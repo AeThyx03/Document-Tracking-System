@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 820" width="100%" height="100%">
+  <!-- Top Roof Eaves Outer Chevron -->
+  <polygon points="500,20 930,325 895,335 500,55 105,335 70,325" fill="#000000" />
+  
+  <!-- Secondary Parallel Roof Stripe -->
+  <polygon points="500,75 870,335 848,342 500,95 152,342 130,335" fill="#000000" />
+
+  <!-- Main Hexagon / Shield Outer Boundary -->
+  <polygon points="500,118 820,318 820,578 500,782 180,578 180,318" fill="none" stroke="#000000" stroke-width="24" stroke-linejoin="miter" />
+
+  <!-- Inner Margin Buffer Line -->
+  <polygon points="500,140 800,326 800,568 500,760 200,568 200,326" fill="none" stroke="#ffffff" stroke-width="14" stroke-linejoin="miter" />
+
+  <!-- LETTERS: P - O - S - S - D in Bold Block Typography matching POSSD emblem -->
+  <g fill="#000000">
+    <!-- P (Column 1: X 215 to 310) -->
+    <path d="M 215,338 L 310,278 L 310,432 L 255,432 L 255,564 L 215,564 Z 
+             M 252,330 L 278,314 L 278,394 L 252,394 Z" 
+          fill-rule="evenodd" />
+
+    <!-- O (Column 2: X 326 to 420) -->
+    <path d="M 326,268 L 420,206 L 420,674 L 326,612 Z 
+             M 360,268 L 386,250 L 386,628 L 360,610 Z" 
+          fill-rule="evenodd" />
+
+    <!-- Center S (Column 3: X 436 to 564 - Tallest letter, reaches top and bottom shield peaks) -->
+    <path d="M 500,152 L 564,196 L 564,284 L 528,284 L 528,228 L 500,206 L 472,228 L 472,318 L 564,368 L 564,520 L 500,566 L 500,598 L 564,642 L 564,678 L 500,746 L 436,700 L 436,614 L 472,614 L 472,670 L 500,692 L 528,670 L 528,580 L 436,530 L 436,378 L 500,332 L 500,300 L 436,256 L 436,220 Z 
+             M 472,390 L 500,410 L 528,390 L 528,352 L 500,332 L 472,352 Z" 
+          fill-rule="evenodd" />
+
+    <!-- S (Column 4: X 580 to 674) -->
+    <path d="M 580,206 L 674,268 L 674,346 L 640,346 L 640,298 L 608,278 L 608,344 L 674,380 L 674,494 L 608,534 L 674,576 L 674,612 L 580,674 L 580,596 L 614,596 L 614,644 L 646,624 L 646,558 L 580,522 L 580,408 L 646,368 L 580,326 Z" 
+          fill-rule="evenodd" />
+
+    <!-- D (Column 5: X 690 to 784) -->
+    <path d="M 690,278 L 784,338 L 784,554 L 746,580 L 690,544 Z 
+             M 726,330 L 752,346 L 752,538 L 726,554 Z" 
+          fill-rule="evenodd" />
+  </g>
+</svg>

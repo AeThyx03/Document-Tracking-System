@@ -45,6 +45,7 @@ export interface DocumentItem {
   currentStatus: 'Incoming Logged' | 'Under Review' | 'Supervisor Comment Needed' | 'Complied / Ready for Clearance' | 'Cleared for Out' | 'Dispatched / Completed';
   currentLocation: string; // e.g. "Records Receiving Desk", "Admin Office Room 2", "Accounting Section"
   currentCustodian: string; // who holds it physically right now
+  fileLink?: string; // Optional external URL or cloud file link (Google Drive, OneDrive, PDF, etc.)
   movements: InternalMovement[];
   supervisorRemarks: SupervisorRemark[];
   managerClearance: ManagerClearance;
@@ -81,6 +82,10 @@ export interface AppUserRole {
   avatarInitials?: string;
   email?: string;
   assignedDesk?: string;
+  username: string;
+  password?: string;
+  status?: 'active' | 'suspended';
+  lastLogin?: string;
 }
 
 export interface RolePermissionConfig {
@@ -99,6 +104,8 @@ export interface RolePermissionConfig {
   canConfigureSync: boolean;
   canManageStaff: boolean;
   canDeleteDocuments?: boolean;
+  canManageCredentials?: boolean;
+  canDeleteDivisionThresholdOverrides?: boolean;
   isPrerequisiteBeforeDivisionManager?: boolean;
   hierarchyNote?: string;
 }

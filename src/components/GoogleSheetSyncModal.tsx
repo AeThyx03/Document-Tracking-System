@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { SheetMetadata, createTrackingSheet, syncAllDocumentsToSheet } from '../lib/googleSheets';
-import { DocumentItem } from '../types';
-import { FileSpreadsheet, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, LogIn, LogOut, ShieldAlert } from 'lucide-react';
+import { DocumentItem, AppUserRole } from '../types';
+import { FileSpreadsheet, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, LogIn, LogOut, ShieldAlert, Users } from 'lucide-react';
 import { googleSignIn, logoutGoogle } from '../lib/firebase';
 import { User } from 'firebase/auth';
+import { getStoredStaffMembers } from '../mockData';
 
 interface GoogleSheetSyncProps {
   user: User | null;
@@ -13,6 +14,7 @@ interface GoogleSheetSyncProps {
   sheetConfig: SheetMetadata | null;
   onSaveSheetConfig: (config: SheetMetadata | null) => void;
   documents: DocumentItem[];
+  staffList?: AppUserRole[];
   onNotify: (title: string, message: string, type: 'sync') => void;
 }
 
@@ -24,10 +26,12 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
   sheetConfig,
   onSaveSheetConfig,
   documents,
+  staffList,
   onNotify,
   isOpen,
   onClose,
 }) => {
+  const effectiveStaffList = staffList || getStoredStaffMembers();
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isCreatingSheet, setIsCreatingSheet] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -61,19 +65,19 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
 
     setConfirmPrompt({
       open: true,
-      description: 'Create a new Google Sheet named "Office Document Tracking Registry" in your Google Drive and populate it with tracking headers?',
+      description: `Create a new Google Sheet named "POSSD Document Tracking & Personnel Registry" in your Google Drive, with "Master Tracking" and "Personnel Directory" tabs pre-formatted and synced with ${documents.length} document entries and ${effectiveStaffList.length} personnel profiles?`,
       action: async () => {
         setIsCreatingSheet(true);
         setErrorMessage(null);
         try {
           const newSheet = await createTrackingSheet(token);
           onSaveSheetConfig(newSheet);
-          // Sync current documents immediately
-          await syncAllDocumentsToSheet(token, newSheet.spreadsheetId, documents);
-          setSyncStatus(`Created spreadsheet and synced ${documents.length} records successfully!`);
+          // Sync current documents and personnel immediately
+          const res = await syncAllDocumentsToSheet(token, newSheet.spreadsheetId, documents, effectiveStaffList);
+          setSyncStatus(`Created spreadsheet and synced ${res.rowsUpdated} document entries and ${res.personnelUpdated} personnel profiles successfully!`);
           onNotify(
             'Google Sheet Connected',
-            `Created and linked "${newSheet.sheetName}" with ${documents.length} records in your Google Drive.`,
+            `Created and linked registry with ${res.rowsUpdated} documents and ${res.personnelUpdated} personnel profiles.`,
             'sync'
           );
         } catch (err: any) {
@@ -105,7 +109,7 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
 
     setConfirmPrompt({
       open: true,
-      description: `Connect Google Sheet ID "${extractedId}" and synchronize all ${documents.length} document tracking records into it? Existing rows in the master tab will be refreshed.`,
+      description: `Connect Google Sheet ID "${extractedId}" and synchronize all ${documents.length} document tracking records plus ${effectiveStaffList.length} personnel roster entries into it?`,
       action: async () => {
         setIsSyncing(true);
         setErrorMessage(null);
@@ -115,12 +119,12 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
             spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${extractedId}/edit`,
             sheetName: 'Master Tracking',
           };
-          await syncAllDocumentsToSheet(token, extractedId, documents);
+          const res = await syncAllDocumentsToSheet(token, extractedId, documents, effectiveStaffList);
           onSaveSheetConfig(config);
-          setSyncStatus(`Successfully connected & updated ${documents.length} document entries into the Google Sheet.`);
+          setSyncStatus(`Successfully connected & updated ${res.rowsUpdated} document entries and ${res.personnelUpdated} personnel records in Google Sheet.`);
           onNotify(
             'Google Sheet Synchronized',
-            `Synchronized ${documents.length} documents into spreadsheet (${extractedId}).`,
+            `Synchronized ${res.rowsUpdated} documents and ${res.personnelUpdated} personnel into spreadsheet (${extractedId}).`,
             'sync'
           );
         } catch (err: any) {
@@ -137,16 +141,16 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
 
     setConfirmPrompt({
       open: true,
-      description: `Synchronize ${documents.length} document tracking records to your Google Sheet? This will overwrite the rows in the 'Master Tracking' tab to match the current office registry state.`,
+      description: `Synchronize ${documents.length} document records and ${effectiveStaffList.length} personnel roster entries to your linked Google Sheet? This will update both "Master Tracking" and "Personnel Directory" tabs.`,
       action: async () => {
         setIsSyncing(true);
         setErrorMessage(null);
         try {
-          await syncAllDocumentsToSheet(token, sheetConfig.spreadsheetId, documents);
-          setSyncStatus(`Sync completed: ${documents.length} records updated at ${new Date().toLocaleTimeString()}.`);
+          const res = await syncAllDocumentsToSheet(token, sheetConfig.spreadsheetId, documents, effectiveStaffList);
+          setSyncStatus(`Sync completed: ${res.rowsUpdated} document entries and ${res.personnelUpdated} personnel records refreshed at ${new Date().toLocaleTimeString()}.`);
           onNotify(
             'Google Sheet Updated',
-            `All ${documents.length} records synced to Google Sheet.`,
+            `All ${res.rowsUpdated} documents and ${res.personnelUpdated} personnel profiles synced to Google Sheet.`,
             'sync'
           );
         } catch (err: any) {
@@ -159,25 +163,25 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs">
+      <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         
         {/* Header */}
-        <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-emerald-50/50">
+        <div className="px-6 py-5 border-b border-[#1b3d64] dark:border-slate-800 flex items-center justify-between bg-[#0c2340] dark:bg-[#071526] text-white">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-sm">
+            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-xs">
               <FileSpreadsheet className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-slate-900">Google Sheets Integration</h2>
-              <p className="text-xs text-slate-500">
-                Synchronize all incoming, outgoing, routing, compliance & clearance records into a single Google Sheet
+              <h2 className="text-lg font-bold text-white">Google Sheets Integration</h2>
+              <p className="text-xs text-blue-200 dark:text-blue-300/80">
+                Synchronize all incoming, outgoing, routing, compliance &amp; clearance records into a single Google Sheet
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 text-sm font-medium"
+            className="text-slate-300 hover:text-white p-1.5 rounded-lg hover:bg-white/10 text-sm font-medium cursor-pointer"
           >
             ✕
           </button>
@@ -187,16 +191,16 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
         <div className="p-6 space-y-6">
 
           {/* Auth State Card */}
-          <div className="rounded-xl border border-slate-200 p-4 bg-slate-50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 bg-slate-50 dark:bg-slate-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div>
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Google Account</span>
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Google Account</span>
               {user ? (
                 <div className="mt-1">
-                  <p className="text-sm font-bold text-slate-800">{user.displayName || 'Google User'}</p>
-                  <p className="text-xs text-slate-600">{user.email}</p>
+                  <p className="text-sm font-bold text-slate-800 dark:text-white">{user.displayName || 'Google User'}</p>
+                  <p className="text-xs text-slate-600 dark:text-slate-300">{user.email}</p>
                 </div>
               ) : (
-                <p className="text-xs text-slate-600 mt-1">
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
                   Sign in to connect with Google Sheets and Google Drive
                 </p>
               )}
@@ -209,7 +213,7 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
                   await logoutGoogle();
                   onSignOut();
                 }}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 transition-colors"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
               >
                 <LogOut className="w-3.5 h-3.5" />
                 Sign out
@@ -219,7 +223,7 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
                 id="sign-in-google-btn"
                 onClick={handleGoogleLogin}
                 disabled={isSigningIn}
-                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-800 bg-white border border-slate-300 shadow-xs hover:bg-slate-100 hover:border-slate-400 transition-all disabled:opacity-50"
+                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-800 dark:text-slate-100 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 shadow-xs hover:bg-slate-100 dark:hover:bg-slate-700 hover:border-slate-400 transition-all disabled:opacity-50"
               >
                 <svg className="w-4 h-4" viewBox="0 0 48 48">
                   <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
@@ -234,32 +238,32 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
 
           {/* Current Sheet Connection Status */}
           {sheetConfig ? (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 space-y-3">
+            <div className="rounded-xl border border-emerald-200 dark:border-emerald-800/80 bg-emerald-50/60 dark:bg-emerald-950/40 p-4 space-y-3">
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                   <div>
-                    <h3 className="text-sm font-semibold text-emerald-900">Linked Google Sheet</h3>
-                    <p className="text-xs text-emerald-700 font-mono break-all">{sheetConfig.spreadsheetId}</p>
+                    <h3 className="text-sm font-semibold text-emerald-900 dark:text-emerald-300">Linked Google Sheet</h3>
+                    <p className="text-xs text-emerald-700 dark:text-emerald-400 font-mono break-all">{sheetConfig.spreadsheetId}</p>
                   </div>
                 </div>
                 <a
                   href={sheetConfig.spreadsheetUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:text-emerald-900 underline shrink-0"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300 hover:underline shrink-0"
                 >
                   Open Sheet <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-emerald-200 text-xs text-emerald-800">
+              <div className="flex items-center justify-between pt-2 border-t border-emerald-200 dark:border-emerald-800/80 text-xs text-emerald-800 dark:text-emerald-300">
                 <span>Total records in queue: <strong>{documents.length}</strong></span>
                 <button
                   id="sync-now-sheet-btn"
                   onClick={handlePerformSync}
                   disabled={isSyncing || !token}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 text-white rounded-lg font-medium hover:bg-emerald-800 transition-colors disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-medium transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
                   {isSyncing ? 'Synchronizing...' : 'Sync Registry to Sheet'}
@@ -267,12 +271,12 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
               </div>
             </div>
           ) : (
-            <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4 space-y-4">
+            <div className="rounded-xl border border-amber-200 dark:border-amber-800/80 bg-amber-50/60 dark:bg-amber-950/40 p-4 space-y-4">
               <div className="flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                <div className="text-xs text-amber-900 space-y-1">
+                <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <div className="text-xs text-amber-900 dark:text-amber-200 space-y-1">
                   <p className="font-semibold">No Google Sheet currently connected.</p>
-                  <p>You can automatically generate a formatted document tracking sheet in your Google Drive, or connect an existing Google Spreadsheet ID.</p>
+                  <p className="text-slate-600 dark:text-slate-400">You can automatically generate a formatted document tracking sheet in your Google Drive, or connect an existing Google Spreadsheet ID.</p>
                 </div>
               </div>
 
@@ -281,7 +285,7 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
                   id="create-new-sheet-btn"
                   onClick={handleCreateNewSheet}
                   disabled={isCreatingSheet || !token}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 transition-colors disabled:opacity-50 shadow-xs"
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 transition-colors disabled:opacity-50 shadow-xs cursor-pointer"
                 >
                   <FileSpreadsheet className="w-4 h-4" />
                   {isCreatingSheet ? 'Creating Sheet...' : 'Create New Tracking Sheet'}
@@ -294,13 +298,13 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
                     value={customSheetId}
                     onChange={(e) => setCustomSheetId(e.target.value)}
                     placeholder="Paste Sheet ID or URL"
-                    className="flex-1 rounded-xl border border-slate-300 px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                    className="flex-1 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                   />
                   <button
                     id="link-sheet-btn"
                     onClick={handleLinkExistingSheet}
                     disabled={isSyncing || !token}
-                    className="px-3 py-1.5 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold disabled:opacity-50"
+                    className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold disabled:opacity-50 cursor-pointer"
                   >
                     Link
                   </button>
@@ -311,34 +315,34 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
 
           {/* Feedback banners */}
           {syncStatus && (
-            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-medium text-emerald-800 flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <div className="p-3 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 rounded-xl text-xs font-medium text-emerald-800 dark:text-emerald-300 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
               <span>{syncStatus}</span>
             </div>
           )}
 
           {errorMessage && (
-            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs font-medium text-rose-800 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <div className="p-3 bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 rounded-xl text-xs font-medium text-rose-800 dark:text-rose-300 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
               <span>{errorMessage}</span>
             </div>
           )}
 
           {/* Data fields note */}
-          <div className="border-t border-slate-100 pt-4 text-xs text-slate-500">
-            <span className="font-semibold text-slate-700">Incorporated Data Columns:</span>
+          <div className="border-t border-slate-100 dark:border-slate-800 pt-4 text-xs text-slate-500 dark:text-slate-400">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">Incorporated Data Columns:</span>
             <p className="mt-1 leading-relaxed">
-              Tracking Number, Document Title, Document Type, Originating Department, Date Received, Time Received (auto-recorded), Target Division, Responsible Person, Current Status, Current Desk/Room, Current Custodian, Full Internal Movements History, Supervisor Remarks & Compliance, and Manager Clearance & Outgoing Dispatch Details.
+              Tracking Number, Document Title, Document Type, Originating Department, Date Received, Time Received (auto-recorded), Target Division, Responsible Person, Current Status, Current Desk/Room, Current Custodian, Full Internal Movements History, Supervisor Remarks &amp; Compliance, and Manager Clearance &amp; Outgoing Dispatch Details.
             </p>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
-          <span className="text-xs text-slate-500">Single consolidated Google Sheet integration</span>
+        <div className="px-6 py-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 flex items-center justify-between">
+          <span className="text-xs text-slate-500 dark:text-slate-400">Single consolidated Google Sheet integration</span>
           <button
             onClick={onClose}
-            className="px-4 py-2 bg-slate-800 text-white rounded-xl text-xs font-medium hover:bg-slate-900 transition-colors"
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 text-white rounded-xl text-xs font-medium transition-colors cursor-pointer"
           >
             Close
           </button>
@@ -347,19 +351,19 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
 
       {/* Confirmation Dialog for Destructive/Mutating Workspace operations */}
       {confirmPrompt && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/50">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-200">
-            <div className="flex items-center gap-3 text-amber-600">
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4 border border-slate-200 dark:border-slate-800">
+            <div className="flex items-center gap-3 text-amber-600 dark:text-amber-400">
               <ShieldAlert className="w-6 h-6 shrink-0" />
-              <h3 className="font-bold text-slate-900 text-base">Confirm Google Sheet Operation</h3>
+              <h3 className="font-bold text-slate-900 dark:text-white text-base">Confirm Google Sheet Operation</h3>
             </div>
-            <p className="text-sm text-slate-600 leading-relaxed">
+            <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
               {confirmPrompt.description}
             </p>
             <div className="flex justify-end gap-3 pt-2">
               <button
                 onClick={() => setConfirmPrompt(null)}
-                className="px-4 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+                className="px-4 py-2 text-xs font-medium text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
               >
                 Cancel
               </button>
@@ -369,7 +373,7 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
                   setConfirmPrompt(null);
                   await action();
                 }}
-                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors shadow-xs"
+                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors shadow-xs cursor-pointer"
               >
                 Proceed & Update Sheet
               </button>

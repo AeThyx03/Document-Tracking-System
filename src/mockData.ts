@@ -22,15 +22,17 @@ export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
     canConfigureSync: false,
     canManageStaff: false,
     canDeleteDocuments: false,
+    canManageCredentials: false,
+    canDeleteDivisionThresholdOverrides: false,
     hierarchyNote: 'Entry Point: Initial document logging & barcoding',
   },
   'Staff': {
     role: 'Staff',
     title: 'Action Officer / Desk Personnel',
-    badgeBg: 'bg-indigo-500/10',
-    badgeText: 'text-indigo-700',
-    badgeBorder: 'border-indigo-500/20',
-    dotColor: 'bg-indigo-500',
+    badgeBg: 'bg-blue-500/15',
+    badgeText: 'text-blue-700',
+    badgeBorder: 'border-blue-500/30',
+    dotColor: 'bg-blue-600',
     summary: 'Receives documents at workstation, updates desk-to-desk movements, and complies with directives and requirements.',
     canLogIncoming: false,
     canRecordMovement: true,
@@ -40,14 +42,16 @@ export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
     canConfigureSync: false,
     canManageStaff: false,
     canDeleteDocuments: false,
+    canManageCredentials: false,
+    canDeleteDivisionThresholdOverrides: false,
     hierarchyNote: 'Processing: Action officer review & movement tracking',
   },
   'Supervisor': {
     role: 'Supervisor',
     title: 'Unit Supervisor / 1st-Line Reviewer',
-    badgeBg: 'bg-amber-500/10',
-    badgeText: 'text-amber-700',
-    badgeBorder: 'border-amber-500/20',
+    badgeBg: 'bg-amber-500/15',
+    badgeText: 'text-amber-800',
+    badgeBorder: 'border-amber-500/30',
     dotColor: 'bg-amber-500',
     summary: 'First-line supervisory reviewer: conducts preliminary document review and issues directives. Must review and endorse before Division Manager endorsement.',
     canLogIncoming: false,
@@ -58,16 +62,18 @@ export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
     canConfigureSync: false,
     canManageStaff: false,
     canDeleteDocuments: false,
+    canManageCredentials: false,
+    canDeleteDivisionThresholdOverrides: false,
     isPrerequisiteBeforeDivisionManager: true,
     hierarchyNote: 'Prerequisite Step 1: Mandatory preliminary endorsement before Division Manager review',
   },
   'Division Manager': {
     role: 'Division Manager',
     title: 'Division Chief / Mid-Level Manager',
-    badgeBg: 'bg-violet-500/10',
-    badgeText: 'text-violet-700',
-    badgeBorder: 'border-violet-500/20',
-    dotColor: 'bg-violet-500',
+    badgeBg: 'bg-blue-700/15',
+    badgeText: 'text-blue-900',
+    badgeBorder: 'border-blue-700/30',
+    dotColor: 'bg-blue-800',
     summary: 'Division Chief: conducts secondary division-level review following Supervisor endorsement; issues directives and recommends document to Department Manager.',
     canLogIncoming: false,
     canRecordMovement: true,
@@ -77,6 +83,8 @@ export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
     canConfigureSync: false,
     canManageStaff: false,
     canDeleteDocuments: false,
+    canManageCredentials: false,
+    canDeleteDivisionThresholdOverrides: false,
     hierarchyNote: 'Endorsement Step 2: Division-level review (requires prior Supervisor review)',
   },
   'Department Manager': {
@@ -95,6 +103,8 @@ export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
     canConfigureSync: true,
     canManageStaff: true,
     canDeleteDocuments: true,
+    canManageCredentials: false,
+    canDeleteDivisionThresholdOverrides: false,
     hierarchyNote: 'Executive Step 3: Final Clearance & Outgoing Dispatch Authorization (Delete Permitted)',
   },
   'System Admin': {
@@ -104,7 +114,7 @@ export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
     badgeText: 'text-slate-800',
     badgeBorder: 'border-slate-500/20',
     dotColor: 'bg-slate-700',
-    summary: 'Full system oversight across records, staff role assignments, dropdown registries, Google Sheets synchronization, incoming/outgoing log deletion, and audit trail validation.',
+    summary: 'Full system oversight across records, staff credentials enrollment, staff role assignments, dropdown registries, Google Sheets synchronization, division threshold override deletion, and audit trail validation.',
     canLogIncoming: true,
     canRecordMovement: true,
     canIssueSupervisorRemarks: true,
@@ -113,7 +123,9 @@ export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
     canConfigureSync: true,
     canManageStaff: true,
     canDeleteDocuments: true,
-    hierarchyNote: 'Administration: System controls, registry, sync & log entry deletion authorization',
+    canManageCredentials: true,
+    canDeleteDivisionThresholdOverrides: true,
+    hierarchyNote: 'Administration: System controls, credentials enrollment, registry, division overrides deletion authorization',
   },
 };
 
@@ -132,6 +144,9 @@ export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
     avatarInitials: 'AC',
     email: 'ana.cruz@agency.gov',
     assignedDesk: 'Records Receiving Counter A',
+    username: 'ana.cruz',
+    password: 'password123',
+    status: 'active',
   },
   {
     id: 'staff-2',
@@ -141,6 +156,9 @@ export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
     avatarInitials: 'PL',
     email: 'patrick.lopez@agency.gov',
     assignedDesk: 'Finance Analysis Station 4',
+    username: 'patrick.l',
+    password: 'password123',
+    status: 'active',
   },
   {
     id: 'staff-3',
@@ -150,6 +168,9 @@ export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
     avatarInitials: 'DR',
     email: 'dominic.reyes@agency.gov',
     assignedDesk: 'Planning Drafting Bay 2',
+    username: 'dominic.r',
+    password: 'password123',
+    status: 'active',
   },
   {
     id: 'staff-4',
@@ -159,6 +180,9 @@ export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
     avatarInitials: 'VR',
     email: 'victor.ramos@agency.gov',
     assignedDesk: 'Supervisor Review Station',
+    username: 'victor.r',
+    password: 'password123',
+    status: 'active',
   },
   {
     id: 'staff-5',
@@ -168,6 +192,9 @@ export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
     avatarInitials: 'MS',
     email: 'melissa.santos@agency.gov',
     assignedDesk: 'Division Chief Office',
+    username: 'melissa.s',
+    password: 'password123',
+    status: 'active',
   },
   {
     id: 'staff-6',
@@ -177,6 +204,9 @@ export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
     avatarInitials: 'EM',
     email: 'evelyn.morales@agency.gov',
     assignedDesk: 'Central Manager Suite 101',
+    username: 'evelyn.m',
+    password: 'password123',
+    status: 'active',
   },
   {
     id: 'staff-7',
@@ -186,6 +216,9 @@ export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
     avatarInitials: 'MV',
     email: 'marcus.vance@agency.gov',
     assignedDesk: 'Central Registry Systems Hub',
+    username: 'admin',
+    password: 'admin123',
+    status: 'active',
   },
 ];
 
@@ -204,6 +237,7 @@ export const INITIAL_DOCUMENTS: DocumentItem[] = [
     currentStatus: 'Under Review',
     currentLocation: 'Finance Analysis Section - Desk 4',
     currentCustodian: 'Mr. Patrick Lopez (Budget Analyst)',
+    fileLink: 'https://drive.google.com/file/d/1A2bC3d4E5f6G7h8_BudgetProposal2027/view',
     movements: [
       {
         id: 'mov-1',
@@ -308,6 +342,7 @@ export const INITIAL_DOCUMENTS: DocumentItem[] = [
     currentStatus: 'Cleared for Out',
     currentLocation: 'Dispatch & Outgoing Courier Station',
     currentCustodian: 'Courier Officer Mateo Gomez',
+    fileLink: 'https://docs.google.com/document/d/1OCD-Emergency-Protocol-Memo-v2/edit',
     movements: [
       {
         id: 'mov-301',
@@ -506,13 +541,26 @@ export function getStoredStaffMembers(): AppUserRole[] {
     if (raw) {
       const list = JSON.parse(raw);
       if (Array.isArray(list) && list.length > 0) {
-        // Automatically migrate legacy role names if present in localStorage
-        return list.map((staff: AppUserRole) => {
+        // Automatically migrate legacy role names & backfill login credentials if missing
+        return list.map((staff: AppUserRole, idx: number) => {
           let updatedRole = staff.role;
           if (updatedRole === 'Receiving Staff') updatedRole = 'Admin Staff';
           else if (updatedRole === 'Personnel / Handler' || updatedRole === 'Personnel') updatedRole = 'Staff';
           else if (updatedRole === 'Records Administrator') updatedRole = 'System Admin';
-          return { ...staff, role: updatedRole };
+
+          const defaultUsername = staff.username || (
+            staff.name.toLowerCase().replace(/[^a-z0-9]/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '') ||
+            `user${idx + 1}`
+          );
+          const defaultPassword = staff.password || (updatedRole === 'System Admin' ? 'admin123' : 'password123');
+
+          return {
+            ...staff,
+            role: updatedRole,
+            username: defaultUsername,
+            password: defaultPassword,
+            status: staff.status || 'active',
+          };
         });
       }
     }
@@ -592,5 +640,11 @@ export function canUserDeleteDocuments(roleName: string): boolean {
   let mappedRole = roleName;
   if (mappedRole === 'Records Administrator') mappedRole = 'System Admin';
   return mappedRole === 'System Admin' || mappedRole === 'Department Manager';
+}
+
+export function canUserDeleteDivisionThresholdOverrides(roleName: string): boolean {
+  let mappedRole = roleName;
+  if (mappedRole === 'Records Administrator') mappedRole = 'System Admin';
+  return mappedRole === 'System Admin';
 }
 

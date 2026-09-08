@@ -1,6 +1,6 @@
 {
-  "name": "Office Document Tracker",
-  "description": "Monitor incoming and outgoing office documents with internal routing, supervisor compliance remarks, manager clearances, real-time notifications, and Google Sheets sync.",
+  "name": "POSSD Document Tracking System",
+  "description": "Monitor incoming and outgoing office documents with internal routing, recharts management analytics dashboard, supervisor compliance remarks, manager clearances, real-time notifications, and Google Sheets sync.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
