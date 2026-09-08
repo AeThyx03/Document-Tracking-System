@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { SheetMetadata, createTrackingSheet, syncAllDocumentsToSheet } from '../lib/googleSheets';
+import { SheetMetadata, createTrackingSheet, syncAllDocumentsToSheet, pullAllFromSheet } from '../lib/googleSheets';
 import { DocumentItem, AppUserRole } from '../types';
-import { FileSpreadsheet, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, LogIn, LogOut, ShieldAlert, Users } from 'lucide-react';
+import { FileSpreadsheet, ExternalLink, RefreshCw, CheckCircle2, AlertCircle, LogIn, LogOut, ShieldAlert, Users, DownloadCloud, Share2, Copy, Check } from 'lucide-react';
 import { googleSignIn, logoutGoogle } from '../lib/firebase';
 import { User } from 'firebase/auth';
 import { getStoredStaffMembers } from '../mockData';
@@ -16,6 +16,7 @@ interface GoogleSheetSyncProps {
   documents: DocumentItem[];
   staffList?: AppUserRole[];
   onNotify: (title: string, message: string, type: 'sync') => void;
+  onPullSuccess?: (updatedDocs: DocumentItem[], updatedStaff: AppUserRole[]) => void;
 }
 
 export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boolean; onClose: () => void }> = ({
@@ -28,6 +29,7 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
   documents,
   staffList,
   onNotify,
+  onPullSuccess,
   isOpen,
   onClose,
 }) => {
@@ -35,9 +37,11 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isCreatingSheet, setIsCreatingSheet] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isPulling, setIsPulling] = useState(false);
   const [customSheetId, setCustomSheetId] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [confirmPrompt, setConfirmPrompt] = useState<{ open: boolean; action: () => Promise<void>; description: string } | null>(null);
 
   if (!isOpen) return null;
@@ -162,6 +166,46 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
     });
   };
 
+  const handlePullFromSheet = async () => {
+    if (!token || !sheetConfig) return;
+
+    setConfirmPrompt({
+      open: true,
+      description: `Pull all documents and personnel roster from Google Sheet into this device? Any records on the sheet will be merged into this device's storage.`,
+      action: async () => {
+        setIsPulling(true);
+        setErrorMessage(null);
+        try {
+          const res = await pullAllFromSheet(token, sheetConfig.spreadsheetId, documents, effectiveStaffList);
+          if (onPullSuccess) {
+            onPullSuccess(res.documents, res.personnel);
+          }
+          setSyncStatus(`Device updated! Pulled ${res.personnel.length} personnel profiles and ${res.documents.length} tracking records from Google Sheet.`);
+          onNotify(
+            'Device Synchronized',
+            `Imported ${res.personnel.length} personnel and ${res.documents.length} document records from Google Sheet to this device.`,
+            'sync'
+          );
+        } catch (err: any) {
+          setErrorMessage(err.message || 'Failed to pull data from Google Sheet.');
+        } finally {
+          setIsPulling(false);
+        }
+      },
+    });
+  };
+
+  const crossDeviceUrl = sheetConfig
+    ? `${window.location.protocol}//${window.location.host}${window.location.pathname}?sheet=${sheetConfig.spreadsheetId}`
+    : '';
+
+  const handleCopyDeviceLink = () => {
+    if (!crossDeviceUrl) return;
+    navigator.clipboard.writeText(crossDeviceUrl);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2500);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs">
       <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
@@ -257,16 +301,43 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
                 </a>
               </div>
 
-              <div className="flex items-center justify-between pt-2 border-t border-emerald-200 dark:border-emerald-800/80 text-xs text-emerald-800 dark:text-emerald-300">
-                <span>Total records in queue: <strong>{documents.length}</strong></span>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-emerald-200 dark:border-emerald-800/80 text-xs text-emerald-800 dark:text-emerald-300">
+                <span>Total records in queue: <strong>{documents.length}</strong> | Enrolled personnel: <strong>{effectiveStaffList.length}</strong></span>
+                <div className="flex items-center gap-2">
+                  <button
+                    id="pull-sheet-btn"
+                    onClick={handlePullFromSheet}
+                    disabled={isPulling || isSyncing || !token}
+                    title="Import all records and personnel from Google Sheet to this device"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-100 dark:bg-emerald-900/80 hover:bg-emerald-200 dark:hover:bg-emerald-800 text-emerald-900 dark:text-emerald-200 rounded-lg font-semibold transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    <DownloadCloud className={`w-3.5 h-3.5 ${isPulling ? 'animate-spin' : ''}`} />
+                    {isPulling ? 'Importing...' : 'Pull from Sheet'}
+                  </button>
+                  <button
+                    id="sync-now-sheet-btn"
+                    onClick={handlePerformSync}
+                    disabled={isSyncing || isPulling || !token}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-medium transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                    {isSyncing ? 'Synchronizing...' : 'Sync Registry to Sheet'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Multi-Device Link Box */}
+              <div className="mt-2 pt-2 border-t border-emerald-200/60 dark:border-emerald-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-1.5 text-emerald-800 dark:text-emerald-300">
+                  <Share2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span className="font-medium">Multi-Device Link: Open on any smartphone, laptop or PC to link this sheet automatically</span>
+                </div>
                 <button
-                  id="sync-now-sheet-btn"
-                  onClick={handlePerformSync}
-                  disabled={isSyncing || !token}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-medium transition-colors disabled:opacity-50 cursor-pointer"
+                  onClick={handleCopyDeviceLink}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-white dark:bg-slate-800 border border-emerald-300 dark:border-emerald-700 hover:bg-emerald-50 dark:hover:bg-slate-700 text-emerald-800 dark:text-emerald-200 rounded-md font-medium text-[11px] transition-colors cursor-pointer shrink-0"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                  {isSyncing ? 'Synchronizing...' : 'Sync Registry to Sheet'}
+                  {copiedLink ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3 text-emerald-600" />}
+                  {copiedLink ? 'Link Copied!' : 'Copy Device Link'}
                 </button>
               </div>
             </div>

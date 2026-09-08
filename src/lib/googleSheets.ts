@@ -3,7 +3,9 @@ import { DocumentItem, AppUserRole } from '../types';
 export interface SheetMetadata {
   spreadsheetId: string;
   spreadsheetUrl: string;
-  sheetName: string;
+  sheetName?: string;
+  title?: string;
+  linkedAt?: string;
 }
 
 const DEFAULT_SHEET_TITLE = 'POSSD Document Tracking & Personnel Registry';
@@ -40,6 +42,9 @@ export const PERSONNEL_HEADERS = [
   'Division / Department',
   'Assigned Desk / Station',
   'Email Address',
+  'Portal Username',
+  'Portal Password',
+  'Account Status',
   'Active Documents Assigned / Held',
   'Total Desk Movements Recorded',
   'Last Registry Synchronization'
@@ -171,8 +176,8 @@ export async function populateHeaders(accessToken: string, spreadsheetId: string
     }
   );
 
-  // 2. Personnel Directory Headers (A1:I1)
-  const personnelRange = `'${PERSONNEL_TAB_NAME}'!A1:I1`;
+  // 2. Personnel Directory Headers (A1:L1)
+  const personnelRange = `'${PERSONNEL_TAB_NAME}'!A1:L1`;
   await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${personnelRange}?valueInputOption=USER_ENTERED`,
     {
@@ -250,7 +255,7 @@ export function formatDocumentRow(doc: DocumentItem): string[] {
   ];
 }
 
-export function formatPersonnelRow(person: AppUserRole, documents: DocumentItem[]): string[] {
+export function formatPersonnelRow(person: AppUserRole, documents: DocumentItem[] = []): string[] {
   const heldCount = documents.filter(
     (d) => d.currentCustodian === person.name || d.responsiblePerson === person.name
   ).length;
@@ -261,17 +266,69 @@ export function formatPersonnelRow(person: AppUserRole, documents: DocumentItem[
     0
   );
 
+  const fallbackUsername = person.name.toLowerCase().replace(/[^a-z0-9]/g, '.');
+  const fallbackPassword = person.role === 'System Admin' ? 'admin123' : 'password123';
+
   return [
     person.id,
     person.name,
     person.role,
     person.division,
     person.assignedDesk || 'General Office',
-    person.email || 'N/A',
+    person.email || `${person.username || fallbackUsername}@agency.gov`,
+    person.username || fallbackUsername,
+    person.password || fallbackPassword,
+    person.status || 'active',
     String(heldCount),
     String(movementsCount),
     new Date().toLocaleString(),
   ];
+}
+
+export function parsePersonnelRow(row: string[], idx: number): AppUserRole | null {
+  if (!row || row.length < 2 || !row[1] || !row[1].trim()) return null;
+  const id = (row[0] && row[0].trim()) ? row[0].trim() : `staff-${Date.now()}-${idx}`;
+  const name = row[1].trim();
+  const role = (row[2] && row[2].trim()) ? row[2].trim() : 'Staff';
+  const division = (row[3] && row[3].trim()) ? row[3].trim() : 'Central Records & Receiving Desk';
+  const assignedDesk = (row[4] && row[4].trim()) ? row[4].trim() : `${division} Station`;
+
+  let username = '';
+  let password = '';
+  let status: 'active' | 'suspended' = 'active';
+
+  // Extended format (>= 9 columns with credentials)
+  if (row.length >= 9 && row[6]) {
+    username = row[6].trim();
+    password = row[7] ? row[7].trim() : 'password123';
+    status = (row[8] && row[8].trim() === 'suspended') ? 'suspended' : 'active';
+  } else {
+    username = name.toLowerCase().replace(/[^a-z0-9]/g, '.');
+    password = role === 'System Admin' ? 'admin123' : 'password123';
+    status = 'active';
+  }
+
+  const email = (row[5] && row[5].trim() && row[5] !== 'N/A') ? row[5].trim() : `${username}@agency.gov`;
+
+  const initials = name
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0].toUpperCase())
+    .join('') || 'ST';
+
+  return {
+    id,
+    name,
+    role,
+    division,
+    assignedDesk,
+    email,
+    username,
+    password,
+    status,
+    avatarInitials: initials,
+  };
 }
 
 /**
@@ -329,7 +386,7 @@ export async function syncAllDocumentsToSheet(
   let personnelUpdated = 0;
   if (personnelList && personnelList.length > 0) {
     const personnelRows = personnelList.map((p) => formatPersonnelRow(p, documents));
-    const clearPersonnelRange = `'${PERSONNEL_TAB_NAME}'!A2:I500`;
+    const clearPersonnelRange = `'${PERSONNEL_TAB_NAME}'!A2:L500`;
     await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${clearPersonnelRange}:clear`,
       {
@@ -341,7 +398,7 @@ export async function syncAllDocumentsToSheet(
       }
     );
 
-    const updatePersonnelRange = `'${PERSONNEL_TAB_NAME}'!A2:I${personnelRows.length + 1}`;
+    const updatePersonnelRange = `'${PERSONNEL_TAB_NAME}'!A2:L${personnelRows.length + 1}`;
     await fetch(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${updatePersonnelRange}?valueInputOption=USER_ENTERED`,
       {
@@ -361,6 +418,257 @@ export async function syncAllDocumentsToSheet(
   }
 
   return { success: true, rowsUpdated: docRows.length, personnelUpdated };
+}
+
+/**
+ * Dedicated helper to sync ONLY the Personnel Directory to the sheet (e.g. after adding, editing, or deleting a staff member)
+ */
+export async function syncPersonnelOnlyToSheet(
+  accessToken: string,
+  spreadsheetId: string,
+  personnelList: AppUserRole[],
+  documents: DocumentItem[] = []
+): Promise<number> {
+  await ensureSheetExists(accessToken, spreadsheetId, PERSONNEL_TAB_NAME);
+
+  // Headers (A1:L1)
+  const personnelHeaderRange = `'${PERSONNEL_TAB_NAME}'!A1:L1`;
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${personnelHeaderRange}?valueInputOption=USER_ENTERED`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        range: personnelHeaderRange,
+        majorDimension: 'ROWS',
+        values: [PERSONNEL_HEADERS],
+      }),
+    }
+  );
+
+  const rows = personnelList.map((p) => formatPersonnelRow(p, documents));
+  const clearPersonnelRange = `'${PERSONNEL_TAB_NAME}'!A2:L500`;
+  await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${clearPersonnelRange}:clear`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  if (rows.length > 0) {
+    const updateRange = `'${PERSONNEL_TAB_NAME}'!A2:L${rows.length + 1}`;
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${updateRange}?valueInputOption=USER_ENTERED`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          range: updateRange,
+          majorDimension: 'ROWS',
+          values: rows,
+        }),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'Failed to update Personnel Directory tab');
+    }
+  }
+
+  return rows.length;
+}
+
+/**
+ * Fetches all personnel rows directly from the connected Google Sheet
+ */
+export async function pullPersonnelFromSheet(
+  accessToken: string,
+  spreadsheetId: string,
+  currentPersonnel?: AppUserRole[]
+): Promise<AppUserRole[]> {
+  const range = `'${PERSONNEL_TAB_NAME}'!A2:L`;
+  const response = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Failed to fetch personnel from Google Sheet');
+  }
+
+  const data = await response.json();
+  const rows: string[][] = data.values || [];
+  const personnel: AppUserRole[] = [];
+
+  rows.forEach((row, idx) => {
+    const parsed = parsePersonnelRow(row, idx);
+    if (parsed) personnel.push(parsed);
+  });
+
+  if (currentPersonnel && currentPersonnel.length > 0) {
+    const map = new Map<string, AppUserRole>();
+    currentPersonnel.forEach((p) => map.set(p.id, p));
+    personnel.forEach((p) => map.set(p.id, p));
+    return Array.from(map.values());
+  }
+
+  return personnel;
+}
+
+/**
+ * Fetches all tracking records directly from the connected Google Sheet
+ */
+export async function pullDocumentsFromSheet(
+  accessToken: string,
+  spreadsheetId: string
+): Promise<DocumentItem[]> {
+  const range = `'${MASTER_TAB_NAME}'!A2:T`;
+  const response = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Failed to fetch documents from Google Sheet');
+  }
+
+  const data = await response.json();
+  const rows: string[][] = data.values || [];
+  const docs: DocumentItem[] = [];
+
+  rows.forEach((row, idx) => {
+    if (!row || !row[0] || !row[0].trim()) return;
+    const trackingNumber = row[0].trim();
+    const title = row[1] ? row[1].trim() : 'Untitled Document';
+    const fileLink = row[2] && row[2] !== 'None / Physical Document' ? row[2].trim() : undefined;
+    
+    const rawPriority = row[3] ? row[3].trim() : '';
+    const priority: DocumentItem['priority'] =
+      rawPriority === 'Rush' ? 'Rush' : rawPriority === 'Urgent' ? 'Urgent' : 'Routine';
+
+    const rawType = row[4] ? row[4].trim() : '';
+    const validTypes: DocumentItem['documentType'][] = [
+      'Memorandum',
+      'Endorsement',
+      'Request / Voucher',
+      'Official Letter',
+      'Project Proposal',
+      'Billing / Invoice',
+      'Resolution / Order',
+      'Others',
+    ];
+    const documentType: DocumentItem['documentType'] =
+      validTypes.find((t) => t.toLowerCase() === rawType.toLowerCase()) || 'Others';
+
+    const originDepartment = row[5] ? row[5].trim() : 'External Origin';
+    const dateReceived = row[6] ? row[6].trim() : new Date().toISOString().slice(0, 10);
+    const timeReceived = row[7] ? row[7].trim() : '08:00';
+    const targetDivision = row[8] ? row[8].trim() : 'Central Records';
+    const responsiblePerson = row[9] ? row[9].trim() : 'Unassigned';
+    const currentStatus = (row[10] ? row[10].trim() : 'Incoming Logged') as any;
+    const currentLocation = row[11] ? row[11].trim() : 'Receiving Station';
+    const currentCustodian = row[12] ? row[12].trim() : responsiblePerson;
+
+    // Clearance
+    const clearanceStr = row[16] || '';
+    const isCleared = clearanceStr.startsWith('CLEARED');
+    const clearedBy = row[17] ? row[17].trim() : undefined;
+    const clearedAt = row[18] ? new Date(row[18]).toISOString() : undefined;
+
+    const docItem: DocumentItem = {
+      id: `doc-${trackingNumber.replace(/[^a-zA-Z0-9]/g, '_')}-${idx}`,
+      trackingNumber,
+      title,
+      fileLink,
+      priority,
+      documentType,
+      originDepartment,
+      dateReceived,
+      timeReceived,
+      targetDivision,
+      responsiblePerson,
+      currentStatus,
+      currentLocation,
+      currentCustodian,
+      movements: [],
+      supervisorRemarks: [],
+      managerClearance: isCleared ? {
+        isCleared: true,
+        clearedBy,
+        clearedAt,
+        clearanceType: 'approved_for_dispatch',
+        clearanceRemarks: 'Synchronized from Google Sheet',
+      } : {
+        isCleared: false,
+      },
+      createdAt: `${dateReceived}T${timeReceived}:00Z`,
+      updatedAt: row[19] && !isNaN(Date.parse(row[19])) ? new Date(row[19]).toISOString() : new Date().toISOString(),
+    };
+    docs.push(docItem);
+  });
+
+  return docs;
+}
+
+/**
+ * Bi-directionally pulls all records and personnel from Google Sheet, safely merging with existing records
+ */
+export async function pullAllFromSheet(
+  accessToken: string,
+  spreadsheetId: string,
+  existingDocs: DocumentItem[] = [],
+  existingStaff: AppUserRole[] = []
+): Promise<{ documents: DocumentItem[]; personnel: AppUserRole[] }> {
+  const [personnelFromSheet, docsFromSheet] = await Promise.all([
+    pullPersonnelFromSheet(accessToken, spreadsheetId).catch(() => []),
+    pullDocumentsFromSheet(accessToken, spreadsheetId).catch(() => []),
+  ]);
+
+  // Merge personnel: sheet entries take priority, while keeping any local that aren't on sheet yet
+  const mergedStaffMap = new Map<string, AppUserRole>();
+  existingStaff.forEach((s) => mergedStaffMap.set(s.id || s.name, s));
+  personnelFromSheet.forEach((s) => mergedStaffMap.set(s.id || s.name, s));
+  const finalStaff = Array.from(mergedStaffMap.values());
+
+  // Merge documents: preserve rich movements & supervisorRemarks from local state if available
+  const mergedDocsMap = new Map<string, DocumentItem>();
+  existingDocs.forEach((d) => mergedDocsMap.set(d.trackingNumber, d));
+  docsFromSheet.forEach((d) => {
+    const existing = mergedDocsMap.get(d.trackingNumber);
+    if (existing) {
+      mergedDocsMap.set(d.trackingNumber, {
+        ...existing,
+        ...d,
+        movements: existing.movements && existing.movements.length > 0 ? existing.movements : d.movements,
+        supervisorRemarks: existing.supervisorRemarks && existing.supervisorRemarks.length > 0 ? existing.supervisorRemarks : d.supervisorRemarks,
+      });
+    } else {
+      mergedDocsMap.set(d.trackingNumber, d);
+    }
+  });
+  const finalDocs = Array.from(mergedDocsMap.values());
+
+  return { documents: finalDocs, personnel: finalStaff };
 }
 
 /**

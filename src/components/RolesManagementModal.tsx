@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AppUserRole, UserRoleType, DocumentItem, RegistryDropdownOptions } from '../types';
-import { ROLE_CONFIGS, getRoleConfig } from '../mockData';
+import { ROLE_CONFIGS, getRoleConfig, encodePersonnelSyncCode, decodePersonnelSyncCode, generateDeviceShareUrl } from '../mockData';
+import { SheetMetadata } from '../lib/googleSheets';
 import { PossdLogo } from './PossdLogo';
 import {
   Users,
@@ -28,7 +29,14 @@ import {
   EyeOff,
   RefreshCw,
   UserCheck,
-  Ban
+  Ban,
+  Share2,
+  Copy,
+  Smartphone,
+  DownloadCloud,
+  UploadCloud,
+  FileJson,
+  FileSpreadsheet,
 } from 'lucide-react';
 
 interface RolesManagementModalProps {
@@ -47,6 +55,11 @@ interface RolesManagementModalProps {
     staffId: string,
     updates: { username?: string; password?: string; status?: 'active' | 'suspended' }
   ) => void;
+  sheetConfig?: SheetMetadata | null;
+  token?: string | null;
+  onSyncToSheet?: () => Promise<void>;
+  onPullFromSheet?: () => Promise<void>;
+  onImportStaff?: (staff: AppUserRole[], options?: RegistryDropdownOptions, sheetConfig?: SheetMetadata | null) => void;
 }
 
 const SYSTEM_ROLES: string[] = [
@@ -89,8 +102,20 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   dropdownOptions,
   onUpdateDropdownOptions,
   onUpdateStaffCredentials,
+  sheetConfig,
+  token,
+  onSyncToSheet,
+  onPullFromSheet,
+  onImportStaff,
 }) => {
-  const [activeTab, setActiveTab] = useState<'directory' | 'dropdown_options' | 'add' | 'permissions'>('directory');
+  const [activeTab, setActiveTab] = useState<'directory' | 'dropdown_options' | 'add' | 'permissions' | 'sync'>('directory');
+
+  // Multi-Device & Cloud Sync state
+  const [syncCodeInput, setSyncCodeInput] = useState('');
+  const [copiedSyncUrl, setCopiedSyncUrl] = useState(false);
+  const [copiedSyncCode, setCopiedSyncCode] = useState(false);
+  const [isPushingSheet, setIsPushingSheet] = useState(false);
+  const [isPullingSheet, setIsPullingSheet] = useState(false);
 
   // Combined roles, departments, and desks
   const availableRoles = Array.from(new Set([...dropdownOptions.roles, ...SYSTEM_ROLES]));
@@ -165,6 +190,91 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       result += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return result;
+  };
+
+  // --- Cross-Device Sync Handlers ---
+  const handleCopyMultiDeviceUrl = () => {
+    const url = generateDeviceShareUrl(staffList, sheetConfig);
+    navigator.clipboard.writeText(url);
+    setCopiedSyncUrl(true);
+    showFeedback('Cross-device sync link copied! Open this link on your other device to load all personnel.', 'success');
+    setTimeout(() => setCopiedSyncUrl(false), 2500);
+  };
+
+  const handleCopySyncCode = () => {
+    const code = encodePersonnelSyncCode(staffList, sheetConfig, dropdownOptions);
+    navigator.clipboard.writeText(code);
+    setCopiedSyncCode(true);
+    showFeedback('Sync code copied! Paste it into another device to import personnel.', 'success');
+    setTimeout(() => setCopiedSyncCode(false), 2500);
+  };
+
+  const handleImportFromCode = () => {
+    if (!syncCodeInput.trim()) {
+      showFeedback('Please paste a sync link or sync code first.', 'error');
+      return;
+    }
+    const payload = decodePersonnelSyncCode(syncCodeInput.trim());
+    if (!payload || !Array.isArray(payload.staff) || payload.staff.length === 0) {
+      showFeedback('Invalid sync code or link. Please verify and try again.', 'error');
+      return;
+    }
+
+    if (onImportStaff) {
+      onImportStaff(payload.staff, payload.dropdownOptions, payload.sheetConfig);
+    } else {
+      payload.staff.forEach((s) => onAddStaffMember(s));
+    }
+    setSyncCodeInput('');
+    showFeedback(`Successfully imported ${payload.staff.length} personnel profiles from sync code!`, 'success');
+  };
+
+  const handleExportJson = () => {
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify({
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      staff: staffList,
+      dropdownOptions,
+      sheetConfig,
+    }, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute('href', dataStr);
+    downloadAnchor.setAttribute('download', `possd_personnel_registry_${new Date().toISOString().slice(0, 10)}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    showFeedback('Personnel roster exported as JSON.', 'success');
+  };
+
+  const handleImportJsonFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const parsed = JSON.parse(text);
+        const importedStaff: AppUserRole[] = Array.isArray(parsed.staff)
+          ? parsed.staff
+          : Array.isArray(parsed)
+          ? parsed
+          : [];
+        if (importedStaff.length === 0) {
+          showFeedback('No valid personnel found in the uploaded file.', 'error');
+          return;
+        }
+        if (onImportStaff) {
+          onImportStaff(importedStaff, parsed.dropdownOptions, parsed.sheetConfig);
+        } else {
+          importedStaff.forEach((s) => onAddStaffMember(s));
+        }
+        showFeedback(`Successfully restored ${importedStaff.length} personnel from JSON file.`, 'success');
+      } catch (err) {
+        showFeedback('Failed to parse JSON file.', 'error');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   };
 
   // --- Handlers for Admin Dropdown Entries ---
@@ -507,6 +617,21 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
           >
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
             <span>Permission Matrix</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('sync')}
+            className={`px-3.5 py-2.5 text-xs font-semibold border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+              activeTab === 'sync'
+                ? 'border-blue-700 dark:border-blue-500 text-blue-900 dark:text-blue-300 bg-white dark:bg-slate-900 rounded-t-lg shadow-2xs font-bold'
+                : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <Smartphone className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+            <span>Cross-Device Sync</span>
+            {sheetConfig && (
+              <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" title="Connected to Google Sheet" />
+            )}
           </button>
         </div>
 
@@ -1803,6 +1928,224 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {/* TAB 5: CROSS-DEVICE SYNC & DATA PERSISTENCE */}
+          {activeTab === 'sync' && (
+            <div className="space-y-6">
+              <div className="border-b border-slate-100 dark:border-slate-800 pb-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-2">
+                      <Smartphone className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                      Cross-Device Personnel Synchronization &amp; Persistence
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      Ensure all enrolled personnel and credentials are accessible seamlessly across different computers, smartphones, and browsers.
+                    </p>
+                  </div>
+                  <span className="text-[11px] px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 rounded-lg font-semibold self-start sm:self-auto">
+                    {staffList.length} Personnel Enrolled
+                  </span>
+                </div>
+              </div>
+
+              {/* Section 1: Google Sheets Cloud Sync */}
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700/80 bg-slate-50/70 dark:bg-slate-800/50 p-4 space-y-3">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                      <FileSpreadsheet className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-wider">
+                        Google Sheets Cloud Persistence
+                      </h4>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        {sheetConfig
+                          ? 'Automatic multi-device synchronization is enabled via Google Sheets.'
+                          : 'Connect a Google Sheet to automatically sync all enrolled personnel across every device.'}
+                      </p>
+                    </div>
+                  </div>
+                  {sheetConfig && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 rounded-full">
+                      <CheckCircle2 className="w-3 h-3" /> Connected
+                    </span>
+                  )}
+                </div>
+
+                {sheetConfig ? (
+                  <div className="pt-2 space-y-3">
+                    <div className="flex items-center justify-between text-xs bg-white dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200 dark:border-slate-700">
+                      <span className="font-mono text-slate-700 dark:text-slate-300 truncate max-w-xs">
+                        Sheet ID: {sheetConfig.spreadsheetId}
+                      </span>
+                      <a
+                        href={sheetConfig.spreadsheetUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-emerald-700 dark:text-emerald-400 hover:underline font-semibold flex items-center gap-1 shrink-0 ml-2"
+                      >
+                        View Sheet
+                      </a>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      {onSyncToSheet && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setIsPushingSheet(true);
+                            try {
+                              await onSyncToSheet();
+                              showFeedback('Personnel directory successfully pushed to Google Sheet!', 'success');
+                            } catch (e: any) {
+                              showFeedback(e.message || 'Failed to sync to Google Sheet.', 'error');
+                            } finally {
+                              setIsPushingSheet(false);
+                            }
+                          }}
+                          disabled={isPushingSheet || !token}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-medium transition-colors disabled:opacity-50 cursor-pointer shadow-xs"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isPushingSheet ? 'animate-spin' : ''}`} />
+                          {isPushingSheet ? 'Pushing to Sheet...' : 'Push Personnel to Google Sheet'}
+                        </button>
+                      )}
+
+                      {onPullFromSheet && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setIsPullingSheet(true);
+                            try {
+                              await onPullFromSheet();
+                              showFeedback('Updated personnel roster pulled from Google Sheet!', 'success');
+                            } catch (e: any) {
+                              showFeedback(e.message || 'Failed to pull from Google Sheet.', 'error');
+                            } finally {
+                              setIsPullingSheet(false);
+                            }
+                          }}
+                          disabled={isPullingSheet || !token}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 cursor-pointer"
+                        >
+                          <DownloadCloud className={`w-3.5 h-3.5 ${isPullingSheet ? 'animate-spin' : ''}`} />
+                          {isPullingSheet ? 'Pulling from Sheet...' : 'Pull Latest from Sheet'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      Google Sheet is not currently connected in this session. You can link a sheet using the top header sync button, or use the <strong>Instant Multi-Device Link</strong> below to copy all personnel to your other device instantly.
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Section 2: Instant Multi-Device Link */}
+              <div className="rounded-xl border border-indigo-200 dark:border-indigo-800/70 bg-indigo-50/60 dark:bg-indigo-950/40 p-4 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center shrink-0 mt-0.5">
+                    <Share2 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-indigo-950 dark:text-indigo-200 uppercase tracking-wider">
+                      Instant Multi-Device Link (One-Click Transfer)
+                    </h4>
+                    <p className="text-xs text-indigo-900/80 dark:text-indigo-300/80 mt-0.5 leading-relaxed">
+                      Generate a unique secure link that contains all {staffList.length} enrolled personnel, credentials, and custom roles. Open this link on your second computer, smartphone, or tablet, and it will immediately save the personnel into that device's permanent storage!
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleCopyMultiDeviceUrl}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-indigo-700 hover:bg-indigo-800 text-white rounded-lg text-xs font-bold transition-colors shadow-xs cursor-pointer"
+                  >
+                    {copiedSyncUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedSyncUrl ? 'Multi-Device Link Copied!' : 'Copy Multi-Device Link'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleCopySyncCode}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-white dark:bg-slate-800 border border-indigo-300 dark:border-indigo-700 text-indigo-900 dark:text-indigo-200 hover:bg-indigo-50 dark:hover:bg-slate-700 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    {copiedSyncCode ? <Check className="w-3.5 h-3.5 text-indigo-600" /> : <Copy className="w-3.5 h-3.5 text-indigo-600" />}
+                    {copiedSyncCode ? 'Sync Code Copied!' : 'Copy Raw Sync Code'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Section 3: Import from Another Device */}
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3 bg-white dark:bg-slate-900">
+                <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                  <UploadCloud className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  Import from Another Device
+                </h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Received a Multi-Device Link or Sync Code from another computer? Paste it below to load all personnel into this device.
+                </p>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    value={syncCodeInput}
+                    onChange={(e) => setSyncCodeInput(e.target.value)}
+                    placeholder="Paste Multi-Device Link or Sync Code here..."
+                    className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleImportFromCode}
+                    className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer shrink-0"
+                  >
+                    Import &amp; Synchronize
+                  </button>
+                </div>
+              </div>
+
+              {/* Section 4: File Backup & Offline Storage */}
+              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3 bg-slate-50/50 dark:bg-slate-800/40">
+                <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                  <FileJson className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                  Offline Backup &amp; File Export
+                </h4>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  You can also download an offline JSON backup file of your personnel roster and import it on any offline or air-gapped machine.
+                </p>
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={handleExportJson}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+                  >
+                    <DownloadCloud className="w-3.5 h-3.5 text-amber-600" />
+                    Download JSON Roster
+                  </button>
+
+                  <label className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg text-xs font-medium transition-colors cursor-pointer">
+                    <UploadCloud className="w-3.5 h-3.5 text-blue-600" />
+                    Upload JSON Roster
+                    <input
+                      type="file"
+                      accept=".json"
+                      onChange={handleImportJsonFile}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              </div>
+
             </div>
           )}
 

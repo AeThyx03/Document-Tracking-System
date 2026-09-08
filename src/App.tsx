@@ -19,8 +19,17 @@ import {
   ROLE_CONFIGS,
   getRoleConfig,
   canUserDeleteDocuments,
+  decodePersonnelSyncCode,
+  broadcastDataUpdate,
+  onDataUpdate,
 } from './mockData';
-import { SheetMetadata, syncAllDocumentsToSheet } from './lib/googleSheets';
+import {
+  SheetMetadata,
+  syncAllDocumentsToSheet,
+  syncPersonnelOnlyToSheet,
+  pullPersonnelFromSheet,
+  pullAllFromSheet,
+} from './lib/googleSheets';
 import { initAuth, setAccessToken, getAccessToken } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { NotificationCenter } from './components/NotificationCenter';
@@ -156,7 +165,98 @@ export default function App() {
   // Load initial data & Firebase Auth Listener
   useEffect(() => {
     setDocuments(getStoredDocuments());
-    setSheetConfig(getStoredSheetConfig());
+    const existingConfig = getStoredSheetConfig();
+    setSheetConfig(existingConfig);
+
+    // Cross-Device Instant Sync URL & Hash Detection
+    try {
+      const hash = window.location.hash || '';
+      const params = new URLSearchParams(window.location.search);
+      let syncRaw = '';
+
+      if (hash.startsWith('#sync_staff=')) {
+        syncRaw = hash.replace('#sync_staff=', '');
+      } else if (hash.startsWith('#sync=')) {
+        syncRaw = hash.replace('#sync=', '');
+      } else if (params.has('sync_staff')) {
+        syncRaw = params.get('sync_staff') || '';
+      } else if (params.has('sync_code')) {
+        syncRaw = params.get('sync_code') || '';
+      }
+
+      if (syncRaw) {
+        const payload = decodePersonnelSyncCode(syncRaw);
+        if (payload && Array.isArray(payload.staff) && payload.staff.length > 0) {
+          const currentStaff = getStoredStaffMembers();
+          // Merge staff prioritizing payload
+          const staffMap = new Map<string, AppUserRole>();
+          currentStaff.forEach((s) => staffMap.set(s.id, s));
+          payload.staff.forEach((s) => staffMap.set(s.id, s));
+          const mergedStaff = Array.from(staffMap.values());
+
+          setStaffList(mergedStaff);
+          saveStoredStaffMembers(mergedStaff);
+
+          if (payload.dropdownOptions) {
+            setDropdownOptions(payload.dropdownOptions);
+            saveStoredDropdownOptions(payload.dropdownOptions);
+          }
+
+          if (payload.sheetConfig && !existingConfig) {
+            setSheetConfig(payload.sheetConfig);
+            saveStoredSheetConfig(payload.sheetConfig);
+          }
+
+          // Clean URL so the token is not exposed in address bar
+          window.history.replaceState(null, '', window.location.pathname);
+
+          setTimeout(() => {
+            addNotification(
+              'Multi-Device Sync Applied',
+              `Successfully loaded ${payload.staff.length} personnel profiles and credentials from device transfer link.`,
+              'System',
+              'sync',
+              'DEVICE-SYNC'
+            );
+          }, 600);
+        }
+      }
+
+      // Check ?sheet=<spreadsheetId> parameter for fast sheet linking across devices
+      const sheetParam = params.get('sheet');
+      if (sheetParam && (!existingConfig || existingConfig.spreadsheetId !== sheetParam)) {
+        const newSheetCfg: SheetMetadata = {
+          spreadsheetId: sheetParam,
+          spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${sheetParam}/edit`,
+          title: 'POSSD Document Tracking & Personnel Directory',
+          linkedAt: new Date().toISOString(),
+        };
+        setSheetConfig(newSheetCfg);
+        saveStoredSheetConfig(newSheetCfg);
+        setTimeout(() => {
+          addNotification(
+            'Google Sheet Linked',
+            `Linked to Google Sheet ID: ${sheetParam}`,
+            'System',
+            'sync',
+            'SHEET-AUTO-CONNECT'
+          );
+        }, 800);
+      }
+    } catch (e) {
+      console.warn('Could not parse multi-device sync params', e);
+    }
+
+    // Cross-Tab Broadcast Channel listener
+    const cleanupBroadcast = onDataUpdate((type, data) => {
+      if (type === 'staff' && Array.isArray(data)) {
+        setStaffList(data);
+      } else if (type === 'documents' && Array.isArray(data)) {
+        setDocuments(data);
+      } else if (type === 'dropdowns' && data) {
+        setDropdownOptions(data);
+      }
+    });
 
     const unsubscribe = initAuth(
       (authedUser, oauthToken) => {
@@ -171,7 +271,10 @@ export default function App() {
       }
     );
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      cleanupBroadcast();
+    };
   }, []);
 
   // Real-time notification helper
@@ -215,6 +318,15 @@ export default function App() {
     const updated = [...staffList, newStaff];
     setStaffList(updated);
     saveStoredStaffMembers(updated);
+    broadcastDataUpdate('staff', updated);
+
+    // Auto-sync to Google Sheet if connected
+    if (token && sheetConfig) {
+      syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, updated).catch((err) => {
+        console.warn('Auto-sync personnel to Google Sheet error:', err);
+      });
+    }
+
     addNotification(
       'Staff Enrolled',
       `Registered ${newStaff.name} as ${newStaff.role} (${newStaff.division})`,
@@ -237,6 +349,13 @@ export default function App() {
     });
     setStaffList(updated);
     saveStoredStaffMembers(updated);
+    broadcastDataUpdate('staff', updated);
+
+    if (token && sheetConfig) {
+      syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, updated).catch((err) => {
+        console.warn('Auto-sync personnel to Google Sheet error:', err);
+      });
+    }
 
     if (currentUser.id === staffId) {
       setCurrentUser((prev) => ({
@@ -270,6 +389,13 @@ export default function App() {
     });
     setStaffList(updated);
     saveStoredStaffMembers(updated);
+    broadcastDataUpdate('staff', updated);
+
+    if (token && sheetConfig) {
+      syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, updated).catch((err) => {
+        console.warn('Auto-sync personnel to Google Sheet error:', err);
+      });
+    }
 
     if (currentUser.id === staffId) {
       setCurrentUser((prev) => ({
@@ -291,12 +417,21 @@ export default function App() {
     const updated = staffList.filter((s) => s.id !== staffId);
     setStaffList(updated);
     saveStoredStaffMembers(updated);
+    broadcastDataUpdate('staff', updated);
+
+    if (token && sheetConfig) {
+      syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, updated).catch((err) => {
+        console.warn('Auto-sync personnel to Google Sheet error:', err);
+      });
+    }
+
     addNotification('Staff Removed', `Removed personnel ID ${staffId}`, currentUser.name, 'sync', 'STAFF');
   };
 
   const handleUpdateDropdownOptions = (updatedOptions: RegistryDropdownOptions) => {
     setDropdownOptions(updatedOptions);
     saveStoredDropdownOptions(updatedOptions);
+    broadcastDataUpdate('dropdowns', updatedOptions);
     addNotification('Options Updated', 'Custom dropdown values updated', currentUser.name, 'sync', 'DROPDOWNS');
   };
 
@@ -1271,6 +1406,33 @@ export default function App() {
         documents={documents}
         dropdownOptions={dropdownOptions}
         onUpdateDropdownOptions={handleUpdateDropdownOptions}
+        sheetConfig={sheetConfig}
+        token={token}
+        onSyncToSheet={async () => {
+          if (!token || !sheetConfig) return;
+          await syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, staffList);
+        }}
+        onPullFromSheet={async () => {
+          if (!token || !sheetConfig) return;
+          const pulled = await pullPersonnelFromSheet(token, sheetConfig.spreadsheetId, staffList);
+          setStaffList(pulled);
+          saveStoredStaffMembers(pulled);
+          broadcastDataUpdate('staff', pulled);
+        }}
+        onImportStaff={(importedStaff, newOptions, newSheetConfig) => {
+          setStaffList(importedStaff);
+          saveStoredStaffMembers(importedStaff);
+          broadcastDataUpdate('staff', importedStaff);
+          if (newOptions) {
+            setDropdownOptions(newOptions);
+            saveStoredDropdownOptions(newOptions);
+            broadcastDataUpdate('dropdowns', newOptions);
+          }
+          if (newSheetConfig && !sheetConfig) {
+            setSheetConfig(newSheetConfig);
+            saveStoredSheetConfig(newSheetConfig);
+          }
+        }}
       />
 
       {/* Modal: New Incoming Document Form */}
@@ -1332,6 +1494,18 @@ export default function App() {
         onNotify={(title, msg, type) =>
           addNotification(title, msg, currentUser.name, type, 'SHEET-SYNC')
         }
+        onPullSuccess={(pulledDocs, pulledStaff) => {
+          if (pulledDocs && pulledDocs.length > 0) {
+            setDocuments(pulledDocs);
+            saveStoredDocuments(pulledDocs);
+            broadcastDataUpdate('documents', pulledDocs);
+          }
+          if (pulledStaff && pulledStaff.length > 0) {
+            setStaffList(pulledStaff);
+            saveStoredStaffMembers(pulledStaff);
+            broadcastDataUpdate('staff', pulledStaff);
+          }
+        }}
       />
 
       {/* Modal: Delete Document Confirmation (System Admin & Department Manager) */}

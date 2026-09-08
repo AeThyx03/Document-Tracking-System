@@ -648,3 +648,123 @@ export function canUserDeleteDivisionThresholdOverrides(roleName: string): boole
   return mappedRole === 'System Admin';
 }
 
+export interface CrossDeviceSyncPayload {
+  version: number;
+  timestamp: string;
+  staff: AppUserRole[];
+  sheetConfig?: { spreadsheetId: string; spreadsheetUrl: string } | null;
+  dropdownOptions?: RegistryDropdownOptions;
+}
+
+/**
+ * Encodes staff list and configuration into a compact base64 string for instant cross-device transfer
+ */
+export function encodePersonnelSyncCode(
+  staff: AppUserRole[],
+  sheetConfig?: { spreadsheetId: string; spreadsheetUrl: string } | null,
+  dropdownOptions?: RegistryDropdownOptions
+): string {
+  try {
+    const payload: CrossDeviceSyncPayload = {
+      version: 1,
+      timestamp: new Date().toISOString(),
+      staff,
+      sheetConfig,
+      dropdownOptions,
+    };
+    const jsonStr = JSON.stringify(payload);
+    // Use UTF-8 safe base64 encoding
+    return btoa(encodeURIComponent(jsonStr));
+  } catch (e) {
+    console.error('Failed to encode sync code:', e);
+    return '';
+  }
+}
+
+/**
+ * Decodes a cross-device transfer code
+ */
+export function decodePersonnelSyncCode(code: string): CrossDeviceSyncPayload | null {
+  try {
+    if (!code || typeof code !== 'string') return null;
+    const clean = code.trim().replace(/^#sync=|^#sync_staff=|\?sync=|\?sync_staff=/, '');
+    const jsonStr = decodeURIComponent(atob(clean));
+    const parsed = JSON.parse(jsonStr);
+
+    if (parsed && Array.isArray(parsed.staff)) {
+      return parsed;
+    }
+    // Also support direct array
+    if (Array.isArray(parsed)) {
+      return {
+        version: 1,
+        timestamp: new Date().toISOString(),
+        staff: parsed,
+      };
+    }
+  } catch (e) {
+    console.error('Failed to decode sync code:', e);
+  }
+  return null;
+}
+
+/**
+ * Generates an instant share URL that can be opened on any device (smartphone, laptop, PC)
+ */
+export function generateDeviceShareUrl(
+  staff: AppUserRole[],
+  sheetConfig?: { spreadsheetId: string; spreadsheetUrl: string } | null
+): string {
+  const code = encodePersonnelSyncCode(staff, sheetConfig);
+  if (!code) return window.location.href;
+  const baseUrl = `${window.location.protocol}//${window.location.host}${window.location.pathname}`;
+  return `${baseUrl}#sync_staff=${code}`;
+}
+
+/**
+ * Broadcasts data changes across multiple browser tabs on the same computer
+ */
+export type BroadcastUpdateType =
+  | 'STAFF_UPDATED'
+  | 'DOCUMENTS_UPDATED'
+  | 'SHEET_UPDATED'
+  | 'staff'
+  | 'documents'
+  | 'dropdowns';
+
+export function broadcastDataUpdate(type: BroadcastUpdateType, payload?: any) {
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const channel = new BroadcastChannel('possd_device_channel');
+      channel.postMessage({ type, payload, timestamp: Date.now() });
+      channel.close();
+    }
+  } catch (e) {
+    // Gracefully ignore if BroadcastChannel not supported
+  }
+}
+
+/**
+ * Subscribes to cross-tab updates via BroadcastChannel
+ */
+export function onDataUpdate(callback: (type: string, payload?: any) => void): () => void {
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const channel = new BroadcastChannel('possd_device_channel');
+      const listener = (event: MessageEvent) => {
+        if (event.data && event.data.type) {
+          callback(event.data.type, event.data.payload);
+        }
+      };
+      channel.addEventListener('message', listener);
+      return () => {
+        channel.removeEventListener('message', listener);
+        channel.close();
+      };
+    }
+  } catch (e) {
+    // Gracefully ignore
+  }
+  return () => {};
+}
+
