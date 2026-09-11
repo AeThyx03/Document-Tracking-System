@@ -32,6 +32,8 @@ import {
 import { canUserDeleteDocuments } from '../mockData';
 import { TimeInDeskConfig } from '../types';
 import { calculateDocumentTimeInDesk, DEFAULT_TIME_IN_DESK_CONFIG } from '../lib/timeInDesk';
+import { DocumentLifecycleProgress } from './DocumentLifecycleProgress';
+import { DocumentAuditTrail } from './DocumentAuditTrail';
 
 interface DocumentDetailModalProps {
   document: DocumentItem | null;
@@ -59,10 +61,17 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
   const canDelete = canUserDeleteDocuments(currentUser.role);
   const timeMetrics = calculateDocumentTimeInDesk(document, timeInDeskConfig || DEFAULT_TIME_IN_DESK_CONFIG);
 
-  const [activeTab, setActiveTab] = useState<'movements' | 'remarks' | 'clearance'>('movements');
+  const [activeTab, setActiveTab] = useState<'audit' | 'movements' | 'remarks' | 'clearance'>('audit');
+
+  const totalAuditEvents =
+    1 +
+    (document.movements?.length || 0) +
+    (document.supervisorRemarks?.length || 0) +
+    (document.supervisorRemarks?.filter((r) => r.complied).length || 0) +
+    (document.managerClearance?.isCleared ? 1 : 0);
 
   // --- 1. Movement form state ---
-  const [currentDeskInput, setCurrentDeskInput] = useState(document.currentLocation);
+  const [currentDeskInput, setCurrentDeskInput] = useState('');
   const [forwardToInput, setForwardToInput] = useState('');
   const [movementAction, setMovementAction] = useState<InternalMovement['statusUpdate']>('forwarded');
   const [movementNotes, setMovementNotes] = useState('');
@@ -139,7 +148,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
 
     const updated: DocumentItem = {
       ...document,
-      currentLocation: forwardToInput.trim(),
+      
       currentCustodian: currentUser.name,
       currentStatus: nextStatus,
       updatedAt: nowIso,
@@ -233,7 +242,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
       ...document,
       managerClearance: updatedClearance,
       currentStatus: clearanceType === 'approved_for_dispatch' ? 'Cleared for Out' : 'Dispatched / Completed',
-      currentLocation: 'Outbox / Dispatch Station',
+      
       updatedAt: nowIso,
     };
 
@@ -245,8 +254,8 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs">
       <div className="bg-white dark:bg-slate-900 w-full max-w-4xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[92vh] flex flex-col animate-in fade-in zoom-in-95 duration-150">
         
-        {/* Modal Top Banner - Institutional Navy & White Palette */}
-        <div className="px-6 py-4 border-b border-[#1b3d64] dark:border-slate-800 bg-[#0c2340] dark:bg-[#071526] text-white flex items-start justify-between">
+        {/* Modal Top Banner - Professional Slate Grayscale Palette */}
+        <div className="px-6 py-4 border-b border-slate-800 bg-slate-900 text-white flex items-start justify-between">
           <div className="flex items-start gap-3.5">
             <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-sm ring-1 ring-amber-400/50 mt-0.5">
               <PossdLogo className="w-8 h-8" variant="black" />
@@ -259,9 +268,17 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                 <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${getStatusColor(document.currentStatus)}`}>
                   {document.currentStatus}
                 </span>
+                
                 <span className="text-xs px-2 py-0.5 rounded bg-blue-900/60 dark:bg-blue-950 text-blue-200 border border-blue-700/50 dark:border-blue-800 font-medium">
+                  {document.communicationType}
+                </span>
+                <span className="text-xs px-2 py-0.5 rounded bg-purple-900/60 dark:bg-purple-950 text-purple-200 border border-purple-700/50 dark:border-purple-800 font-medium">
                   {document.documentType}
                 </span>
+                <span className="text-xs px-2 py-0.5 rounded bg-indigo-900/60 dark:bg-indigo-950 text-indigo-200 border border-indigo-700/50 dark:border-indigo-800 font-medium truncate max-w-[200px]">
+                  {document.reportType}
+                </span>
+
                 <span
                   className={`text-xs px-2 py-0.5 rounded font-bold ${
                     document.priority === 'Rush'
@@ -308,11 +325,16 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
             </span>
           </div>
           <div>
-            <span className="text-slate-500 dark:text-slate-400 block font-medium">Responsible Officer:</span>
+            <span className="text-slate-500 dark:text-slate-400 block font-medium">Focal Person:</span>
             <span className="font-semibold text-slate-900 dark:text-white truncate block">
               {document.responsiblePerson}
             </span>
           </div>
+        </div>
+
+        {/* Visual Progress Steps Indicator */}
+        <div className="px-6 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
+          <DocumentLifecycleProgress document={document} variant="detailed" />
         </div>
 
         {/* Attached File Link Ribbon - Blue & Green Accent */}
@@ -468,7 +490,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
             <div
               className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
                 timeMetrics.isOverdue
-                  ? 'bg-rose-100 dark:bg-rose-900/60 text-rose-700 dark:text-rose-300 ring-2 ring-rose-300 dark:ring-rose-800 animate-pulse'
+                  ? 'bg-rose-100 dark:bg-rose-900/60 text-rose-700 dark:text-rose-300 ring-2 ring-rose-300 dark:ring-rose-800'
                   : timeMetrics.isCleared
                   ? 'bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300'
                   : 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300'
@@ -524,8 +546,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                 {timeMetrics.isOverdue ? (
                   <>
                     <strong className="text-rose-950 dark:text-rose-100 font-bold">Overdue Alert:</strong> Document has remained in{' '}
-                    <strong className="text-rose-950 dark:text-rose-100 font-bold">{document.targetDivision}</strong> (Desk:{' '}
-                    <em>{document.currentLocation}</em>) beyond the configured threshold limit of{' '}
+                    <strong className="text-rose-950 dark:text-rose-100 font-bold">{document.targetDivision}</strong> beyond the configured threshold limit of{' '}
                     <span className="font-mono font-bold underline">{timeMetrics.thresholdHours} hours</span> by{' '}
                     <strong className="text-rose-950 dark:text-rose-100">{timeMetrics.overdueFormatted}</strong>. Immediate desk action or forward routing is recommended.
                   </>
@@ -536,7 +557,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   </>
                 ) : (
                   <>
-                    Currently stationed at <strong>{document.currentLocation}</strong> in{' '}
+                    Currently stationed in{' '}
                     <strong>{document.targetDivision}</strong>. Allowable division threshold:{' '}
                     <span className="font-mono font-bold">{timeMetrics.thresholdHours} hours</span>.
                   </>
@@ -564,18 +585,35 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
         {/* Navigation Tabs - Clean Blue/Yellow/Green Palette */}
         <div className="flex border-b border-slate-200 dark:border-slate-800 px-6 bg-white dark:bg-slate-900 shrink-0 overflow-x-auto">
           <button
+            onClick={() => setActiveTab('audit')}
+            id="tab-audit-trail"
+            className={`py-3 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap ${
+              activeTab === 'audit'
+                ? 'border-blue-700 dark:border-blue-500 text-blue-900 dark:text-blue-300 bg-blue-50/50 dark:bg-blue-950/40 font-bold'
+                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            <History className="w-4 h-4 text-blue-700 dark:text-blue-400" />
+            Chronological Audit Trail
+            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200">
+              {totalAuditEvents}
+            </span>
+          </button>
+          <button
             onClick={() => setActiveTab('movements')}
+            id="tab-movements"
             className={`py-3 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap ${
               activeTab === 'movements'
                 ? 'border-blue-700 dark:border-blue-500 text-blue-800 dark:text-blue-300 bg-blue-50/40 dark:bg-blue-950/40 font-bold'
                 : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
             }`}
           >
-            <History className="w-4 h-4 text-blue-700 dark:text-blue-400" />
+            <MapPin className="w-4 h-4 text-blue-700 dark:text-blue-400" />
             Internal Tracking & Forwarding ({document.movements?.length || 0})
           </button>
           <button
             onClick={() => setActiveTab('remarks')}
+            id="tab-remarks"
             className={`py-3 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap ${
               activeTab === 'remarks'
                 ? 'border-amber-500 dark:border-amber-400 text-amber-900 dark:text-amber-300 bg-amber-50/50 dark:bg-amber-950/40 font-bold'
@@ -587,6 +625,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
           </button>
           <button
             onClick={() => setActiveTab('clearance')}
+            id="tab-clearance"
             className={`py-3 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap ${
               activeTab === 'clearance'
                 ? 'border-emerald-600 dark:border-emerald-500 text-emerald-900 dark:text-emerald-300 bg-emerald-50/50 dark:bg-emerald-950/40 font-bold'
@@ -604,6 +643,15 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
         {/* Tab Body Content (Scrollable) */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
           
+          {/* TAB 0: CHRONOLOGICAL AUDIT TRAIL */}
+          {activeTab === 'audit' && (
+            <DocumentAuditTrail
+              document={document}
+              currentUser={currentUser}
+              onNavigateToTab={(tab) => setActiveTab(tab)}
+            />
+          )}
+
           {/* TAB 1: INTERNAL MOVEMENTS & FORWARDING */}
           {activeTab === 'movements' && (
             <div className="space-y-6">
@@ -699,9 +747,19 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
 
               {/* Movement History Timeline */}
               <div>
-                <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider mb-4">
-                  Internal Route & Desk Audit Trail
-                </h4>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                  <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider">
+                    Internal Route & Desk Movements
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('audit')}
+                    className="text-xs font-semibold text-blue-700 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <History className="w-3.5 h-3.5" />
+                    <span>View Unified Chronological Audit Trail ({totalAuditEvents} events) ➔</span>
+                  </button>
+                </div>
                 {(!document.movements || document.movements.length === 0) ? (
                   <p className="text-xs text-slate-500 dark:text-slate-400 italic">No movement recorded yet.</p>
                 ) : (

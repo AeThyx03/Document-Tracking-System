@@ -86,16 +86,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 dark:bg-black/80 backdrop-blur-xs overflow-y-auto">
       <div className="relative w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden my-8 animate-in fade-in zoom-in-95 duration-200">
         {/* Top Header Banner */}
-        <div className="bg-[#0c2340] dark:bg-[#071526] px-6 py-6 text-white text-center relative border-b border-[#1b3d64] dark:border-slate-800">
+        <div className="bg-slate-900 px-6 py-6 text-white text-center relative border-b border-slate-800">
           <div className="flex justify-center mb-3">
-            <div className="w-16 h-16 bg-white rounded-2xl p-1.5 shadow-md flex items-center justify-center">
+            <div className="w-16 h-16 bg-white rounded-2xl p-1.5 shadow-md flex items-center justify-center ring-1 ring-slate-400">
               <PossdLogo className="w-full h-full object-contain" />
             </div>
           </div>
           <h2 className="text-lg font-bold tracking-tight text-white">
             POSSD Document Tracking System
           </h2>
-          <p className="text-xs text-blue-200/90 mt-1 font-medium">
+          <p className="text-xs text-slate-300 mt-1 font-medium">
             Institutional Portal Authentication
           </p>
 

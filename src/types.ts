@@ -5,7 +5,7 @@ export interface InternalMovement {
   personnelRole?: string;
   currentDesk: string;
   forwardToDesk: string;
-  statusUpdate: 'received' | 'in_review' | 'acted' | 'forwarded';
+  statusUpdate: 'received' | 'in_review' | 'acted' | 'forwarded' | 'dispatched';
   notes?: string;
 }
 
@@ -35,7 +35,10 @@ export interface DocumentItem {
   id: string; // unique ID or tracking number
   trackingNumber: string;
   title: string;
-  documentType: 'Memorandum' | 'Endorsement' | 'Request / Voucher' | 'Official Letter' | 'Project Proposal' | 'Billing / Invoice' | 'Resolution / Order' | 'Others';
+  direction?: 'Incoming' | 'Outgoing';
+  documentType: string;
+  communicationType: string;
+  reportType: string;
   originDepartment: string;
   dateReceived: string; // YYYY-MM-DD
   timeReceived: string; // HH:mm:ss
@@ -72,7 +75,12 @@ export interface RegistryDropdownOptions {
   roles: string[];
   departments: string[];
   desks: string[];
+  documentTypes: string[];
+  communicationTypes: string[];
+  reportTypes: string[];
+  personnel: string[];
 }
+
 
 export interface AppUserRole {
   id: string;
@@ -130,4 +138,17 @@ export interface DocumentTimeMetrics {
   isCleared: boolean;
   division: string;
   currentDesk: string;
+}
+
+export interface DedicatedLinkItem {
+  id: string;
+  title: string;
+  url: string;
+  category: 'Google Drive' | 'Official Files' | 'Portals & Systems' | 'Reference Guidelines';
+  description?: string;
+  targetDivision?: string;
+  iconType?: 'drive' | 'file' | 'link' | 'folder' | 'sheet';
+  addedBy: string;
+  addedAt: string;
+  isPinned?: boolean;
 }

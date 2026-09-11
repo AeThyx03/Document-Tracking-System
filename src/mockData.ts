@@ -6,8 +6,8 @@ const STAFF_KEY = 'office_document_tracker_staff_v1';
 const DROPDOWN_OPTIONS_KEY = 'office_document_tracker_dropdown_options_v2';
 
 export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
-  'Admin Staff': {
-    role: 'Admin Staff',
+  'Receiving': {
+    role: 'Receiving',
     title: 'Administrative Receiving Officer',
     badgeBg: 'bg-sky-500/10',
     badgeText: 'text-sky-700',
@@ -130,370 +130,250 @@ export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
 };
 
 // Aliases for backward compatibility
-ROLE_CONFIGS['Receiving Staff'] = ROLE_CONFIGS['Admin Staff'];
+ROLE_CONFIGS['sys admin'] = ROLE_CONFIGS['System Admin'];
+ROLE_CONFIGS['receiving'] = ROLE_CONFIGS['Receiving'];
+ROLE_CONFIGS['staff'] = ROLE_CONFIGS['Staff'];
+ROLE_CONFIGS['supervisor'] = ROLE_CONFIGS['Supervisor'];
+ROLE_CONFIGS['division manager'] = ROLE_CONFIGS['Division Manager'];
+ROLE_CONFIGS['department manager'] = ROLE_CONFIGS['Department Manager'];
 ROLE_CONFIGS['Personnel / Handler'] = ROLE_CONFIGS['Staff'];
 ROLE_CONFIGS['Personnel'] = ROLE_CONFIGS['Staff'];
 ROLE_CONFIGS['Records Administrator'] = ROLE_CONFIGS['System Admin'];
 
+ROLE_CONFIGS['sys admin'] = ROLE_CONFIGS['System Admin'];
+ROLE_CONFIGS['receiving'] = ROLE_CONFIGS['Admin Staff'];
+ROLE_CONFIGS['staff'] = ROLE_CONFIGS['Staff'];
+ROLE_CONFIGS['supervisor'] = ROLE_CONFIGS['System Admin'];
+ROLE_CONFIGS['division manager'] = ROLE_CONFIGS['Division Manager'];
+ROLE_CONFIGS['department manager'] = ROLE_CONFIGS['Department Head'];
+
+
 export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
   {
-    id: 'staff-1',
-    name: 'Ana Cruz',
-    role: 'Admin Staff',
-    division: 'Central Records & Receiving Desk',
-    avatarInitials: 'AC',
-    email: 'ana.cruz@agency.gov',
-    assignedDesk: 'Records Receiving Counter A',
-    username: 'ana.cruz',
-    password: 'password123',
-    status: 'active',
+    id: "staff-admin-initial",
+    name: "System Administrator",
+    role: "System Admin",
+    division: "CMED",
+    avatarInitials: "SA",
+    email: "admin@system.local",
+    assignedDesk: "Central Registry",
+    username: "admin",
+    password: "admin123",
+    status: "active",
   },
   {
-    id: 'staff-2',
-    name: 'Patrick Lopez',
-    role: 'Staff',
-    division: 'Finance & Budget Division',
-    avatarInitials: 'PL',
-    email: 'patrick.lopez@agency.gov',
-    assignedDesk: 'Finance Analysis Station 4',
-    username: 'patrick.l',
-    password: 'password123',
-    status: 'active',
+    id: "staff-0",
+    name: "Myles Rovi P. Martinez",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "MR",
+    username: "myles1",
+    password: "password123",
+    status: "active",
   },
   {
-    id: 'staff-3',
-    name: 'Arch. Dominic Reyes',
-    role: 'Staff',
-    division: 'Planning & Quality Assurance',
-    avatarInitials: 'DR',
-    email: 'dominic.reyes@agency.gov',
-    assignedDesk: 'Planning Drafting Bay 2',
-    username: 'dominic.r',
-    password: 'password123',
-    status: 'active',
+    id: "staff-1",
+    name: "Judy F. Villarete",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "JF",
+    username: "judy2",
+    password: "password123",
+    status: "active",
   },
   {
-    id: 'staff-4',
-    name: 'Atty. Victor Ramos',
-    role: 'Supervisor',
-    division: 'Finance & Budget Division',
-    avatarInitials: 'VR',
-    email: 'victor.ramos@agency.gov',
-    assignedDesk: 'Supervisor Review Station',
-    username: 'victor.r',
-    password: 'password123',
-    status: 'active',
+    id: "staff-2",
+    name: "Bryan L. Cabalfin",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "BL",
+    username: "bryan3",
+    password: "password123",
+    status: "active",
   },
   {
-    id: 'staff-5',
-    name: 'Dir. Melissa Santos',
-    role: 'Division Manager',
-    division: 'Planning & Quality Assurance',
-    avatarInitials: 'MS',
-    email: 'melissa.santos@agency.gov',
-    assignedDesk: 'Division Chief Office',
-    username: 'melissa.s',
-    password: 'password123',
-    status: 'active',
+    id: "staff-3",
+    name: "Pamela Aprille O. Lumbre",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "PA",
+    username: "pamela4",
+    password: "password123",
+    status: "active",
   },
   {
-    id: 'staff-6',
-    name: 'Dr. Evelyn Morales',
-    role: 'Department Manager',
-    division: 'Executive Office of the Manager',
-    avatarInitials: 'EM',
-    email: 'evelyn.morales@agency.gov',
-    assignedDesk: 'Central Manager Suite 101',
-    username: 'evelyn.m',
-    password: 'password123',
-    status: 'active',
+    id: "staff-4",
+    name: "Benjamin A. Nieva",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "BA",
+    username: "benjamin5",
+    password: "password123",
+    status: "active",
   },
   {
-    id: 'staff-7',
-    name: 'Marcus Vance',
-    role: 'System Admin',
-    division: 'Information & Records Technology',
-    avatarInitials: 'MV',
-    email: 'marcus.vance@agency.gov',
-    assignedDesk: 'Central Registry Systems Hub',
-    username: 'admin',
-    password: 'admin123',
-    status: 'active',
+    id: "staff-5",
+    name: "Maria Urduja Jean V. Tabilas",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "MU",
+    username: "maria6",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-6",
+    name: "Mary Flor F. Aquino",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "MF",
+    username: "mary7",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-7",
+    name: "Aubrey Camille C. Cabrera",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "AC",
+    username: "aubrey8",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-8",
+    name: "Anne Katrina S. Del Rosario",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "AK",
+    username: "anne9",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-9",
+    name: "Rey Reginald A. Mojica",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "RR",
+    username: "rey10",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-10",
+    name: "Janelle Vanessa E. Tanguilig",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "JV",
+    username: "janelle11",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-11",
+    name: "Rodolfo M. Torino Jr",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "RM",
+    username: "rodolfo12",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-12",
+    name: "Danezel Christian G. Cruz",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "DC",
+    username: "danezel13",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-13",
+    name: "John Nicolo V. Salvador",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "JN",
+    username: "john14",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-14",
+    name: "Marian Grace Paling",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "MG",
+    username: "marian15",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-15",
+    name: "Judy Ann T. Pacaanas",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "JA",
+    username: "judy16",
+    password: "password123",
+    status: "active",
+  },
+  {
+    id: "staff-16",
+    name: "Oscar B. Hanova Jr.",
+    role: "staff",
+    division: "CMED",
+    avatarInitials: "OB",
+    username: "oscar17",
+    password: "password123",
+    status: "active",
   },
 ];
 
-export const INITIAL_DOCUMENTS: DocumentItem[] = [
-  {
-    id: 'DOC-2026-0891',
-    trackingNumber: 'TRK-2026-0891',
-    title: 'FY2027 Budget Allocation Proposal for IT Infrastructure Upgrades',
-    documentType: 'Project Proposal',
-    originDepartment: 'Information Technology Division',
-    dateReceived: '2026-09-06',
-    timeReceived: '08:15:30',
-    targetDivision: 'Finance & Budget Division',
-    responsiblePerson: 'Engr. Sarah Jenkins',
-    priority: 'Urgent',
-    currentStatus: 'Under Review',
-    currentLocation: 'Finance Analysis Section - Desk 4',
-    currentCustodian: 'Mr. Patrick Lopez (Budget Analyst)',
-    fileLink: 'https://drive.google.com/file/d/1A2bC3d4E5f6G7h8_BudgetProposal2027/view',
-    movements: [
-      {
-        id: 'mov-1',
-        timestamp: '2026-09-06T08:15:30Z',
-        personnelName: 'Receiving Officer Ana Cruz',
-        currentDesk: 'Central Records & Inflow Desk',
-        forwardToDesk: 'Finance Division Receiving Section',
-        statusUpdate: 'received',
-        notes: 'Signed and stamped physical duplicate copy.',
-      },
-      {
-        id: 'mov-2',
-        timestamp: '2026-09-06T09:40:12Z',
-        personnelName: 'Patrick Lopez',
-        currentDesk: 'Finance Division Receiving Section',
-        forwardToDesk: 'Finance Analysis Section - Desk 4',
-        statusUpdate: 'in_review',
-        notes: 'Verifying itemized costing table against procurement ceiling guidelines.',
-      },
-    ],
-    supervisorRemarks: [
-      {
-        id: 'rem-1',
-        supervisorName: 'Atty. Victor Ramos (Finance Supervisor)',
-        timestamp: '2026-09-06T10:15:00Z',
-        remarkText: 'Please cross-reference Section 4.2 with the Regional Director memorandum dated Aug 15 before forwarding to Department Manager.',
-        complianceRequired: true,
-        complied: false,
-        complianceNotes: '',
-      },
-    ],
-    managerClearance: {
-      isCleared: false,
-    },
-    createdAt: '2026-09-06T08:15:30Z',
-    updatedAt: '2026-09-06T10:15:00Z',
-  },
-  {
-    id: 'DOC-2026-0890',
-    trackingNumber: 'TRK-2026-0890',
-    title: 'Quarterly Environmental Assessment Report & Compliance Certification',
-    documentType: 'Endorsement',
-    originDepartment: 'Department of Environment & Natural Resources (Regional)',
-    dateReceived: '2026-09-06',
-    timeReceived: '07:45:00',
-    targetDivision: 'Planning & Quality Assurance',
-    responsiblePerson: 'Arch. Dominic Reyes',
-    priority: 'Routine',
-    currentStatus: 'Supervisor Comment Needed',
-    currentLocation: 'Supervisor Desk - Room 302',
-    currentCustodian: 'Dir. Melissa Santos',
-    movements: [
-      {
-        id: 'mov-201',
-        timestamp: '2026-09-06T07:45:00Z',
-        personnelName: 'Officer Ben Torres',
-        currentDesk: 'Central Inflow Desk',
-        forwardToDesk: 'Planning Receiving Cubicle',
-        statusUpdate: 'received',
-        notes: 'Complete with attachments and topographic maps.',
-      },
-      {
-        id: 'mov-202',
-        timestamp: '2026-09-06T08:30:00Z',
-        personnelName: 'Arch. Dominic Reyes',
-        currentDesk: 'Planning Receiving Cubicle',
-        forwardToDesk: 'Supervisor Desk - Room 302',
-        statusUpdate: 'forwarded',
-        notes: 'Drafted endorsement summary for supervisor evaluation.',
-      },
-    ],
-    supervisorRemarks: [
-      {
-        id: 'rem-201',
-        supervisorName: 'Dir. Melissa Santos',
-        timestamp: '2026-09-06T09:10:00Z',
-        remarkText: 'Attach Appendix C (Air Quality particulate index) to fulfill environmental oversight prerequisites.',
-        complianceRequired: true,
-        complied: true,
-        complianceNotes: 'Appendix C successfully appended from DENR certified copies by Dominic Reyes.',
-        compliedAt: '2026-09-06T11:20:00Z',
-        compliedBy: 'Arch. Dominic Reyes',
-      },
-    ],
-    managerClearance: {
-      isCleared: false,
-    },
-    createdAt: '2026-09-06T07:45:00Z',
-    updatedAt: '2026-09-06T11:20:00Z',
-  },
-  {
-    id: 'DOC-2026-0888',
-    trackingNumber: 'TRK-2026-0888',
-    title: 'Inter-Agency Emergency Disaster Response Protocol Memorandum',
-    documentType: 'Memorandum',
-    originDepartment: 'Office of Civil Defense / National DRRM',
-    dateReceived: '2026-09-05',
-    timeReceived: '14:22:15',
-    targetDivision: 'Operations & Emergency Management',
-    responsiblePerson: 'Col. Raymond Delgado',
-    priority: 'Rush',
-    currentStatus: 'Cleared for Out',
-    currentLocation: 'Dispatch & Outgoing Courier Station',
-    currentCustodian: 'Courier Officer Mateo Gomez',
-    fileLink: 'https://docs.google.com/document/d/1OCD-Emergency-Protocol-Memo-v2/edit',
-    movements: [
-      {
-        id: 'mov-301',
-        timestamp: '2026-09-05T14:22:15Z',
-        personnelName: 'Records Officer Ana Cruz',
-        currentDesk: 'Central Records & Inflow Desk',
-        forwardToDesk: 'Operations Section Chief Desk',
-        statusUpdate: 'received',
-      },
-      {
-        id: 'mov-302',
-        timestamp: '2026-09-05T15:00:00Z',
-        personnelName: 'Col. Raymond Delgado',
-        currentDesk: 'Operations Section Chief Desk',
-        forwardToDesk: 'Department Manager Executive Suite',
-        statusUpdate: 'acted',
-        notes: 'Action plan fully consolidated and verified with regional offices.',
-      },
-      {
-        id: 'mov-303',
-        timestamp: '2026-09-06T07:30:00Z',
-        personnelName: 'Executive Assistant Clara Vance',
-        currentDesk: 'Department Manager Executive Suite',
-        forwardToDesk: 'Dispatch & Outgoing Courier Station',
-        statusUpdate: 'forwarded',
-        notes: 'Cleared by Department Manager for immediate inter-agency dissemination.',
-      },
-    ],
-    supervisorRemarks: [
-      {
-        id: 'rem-301',
-        supervisorName: 'Operations Chief Roland Kim',
-        timestamp: '2026-09-05T15:30:00Z',
-        remarkText: 'Check contact hotlines for Region IV-A and Region III clusters.',
-        complianceRequired: true,
-        complied: true,
-        complianceNotes: 'Hotline directory updated and verified active.',
-        compliedAt: '2026-09-05T16:15:00Z',
-        compliedBy: 'Col. Raymond Delgado',
-      },
-    ],
-    managerClearance: {
-      isCleared: true,
-      clearedBy: 'Dr. Evelyn Morales, Department Director',
-      clearedAt: '2026-09-06T07:15:00Z',
-      clearanceType: 'approved_for_dispatch',
-      exitTrackingNumber: 'OUT-DISPATCH-2026-0419',
-      forwardedToExternal: 'Office of Civil Defense National Operations Center',
-      clearanceRemarks: 'Approved for urgent transmission. Ensure signed courier receipt acknowledgment.',
-    },
-    createdAt: '2026-09-05T14:22:15Z',
-    updatedAt: '2026-09-06T07:30:00Z',
-  },
-  {
-    id: 'DOC-2026-0872',
-    trackingNumber: 'TRK-2026-0872',
-    title: 'COA Annual Audit Observation Memorandum & Fiscal Compliance Requirement',
-    documentType: 'Official Letter',
-    originDepartment: 'Commission on Audit (COA) Field Office',
-    dateReceived: '2026-09-03',
-    timeReceived: '09:00:00',
-    targetDivision: 'Finance & Budget Division',
-    responsiblePerson: 'Engr. Sarah Jenkins',
-    priority: 'Urgent',
-    currentStatus: 'Under Review',
-    currentLocation: 'Accounting & Disbursement Section - Desk 2',
-    currentCustodian: 'Mr. Patrick Lopez (Budget Analyst)',
-    movements: [
-      {
-        id: 'mov-401',
-        timestamp: '2026-09-03T09:00:00Z',
-        personnelName: 'Receiving Officer Ana Cruz',
-        currentDesk: 'Central Records & Inflow Desk',
-        forwardToDesk: 'Accounting & Disbursement Section - Desk 2',
-        statusUpdate: 'received',
-        notes: 'Received official COA audit memorandum duplicate.',
-      },
-      {
-        id: 'mov-402',
-        timestamp: '2026-09-04T10:30:00Z',
-        personnelName: 'Patrick Lopez',
-        currentDesk: 'Accounting & Disbursement Section - Desk 2',
-        forwardToDesk: 'Accounting & Disbursement Section - Desk 2',
-        statusUpdate: 'in_review',
-        notes: 'Pending liquidation vouchers from provincial field branches.',
-      },
-    ],
-    supervisorRemarks: [
-      {
-        id: 'rem-401',
-        supervisorName: 'Atty. Victor Ramos (Finance Supervisor)',
-        timestamp: '2026-09-04T14:00:00Z',
-        remarkText: 'Consolidate bank reconciliation statements and prepare formal reply matrix.',
-        complianceRequired: true,
-        complied: false,
-        complianceNotes: '',
-      },
-    ],
-    managerClearance: {
-      isCleared: false,
-    },
-    createdAt: '2026-09-03T09:00:00Z',
-    updatedAt: '2026-09-04T14:00:00Z',
-  },
-  {
-    id: 'DOC-2026-0865',
-    trackingNumber: 'TRK-2026-0865',
-    title: 'Urgent Typhoon Drainage Relief Contingency Mobilization Order',
-    documentType: 'Resolution / Order',
-    originDepartment: 'National Disaster Risk Reduction Council',
-    dateReceived: '2026-09-05',
-    timeReceived: '08:00:00',
-    targetDivision: 'Operations & Emergency Management',
-    responsiblePerson: 'Col. Raymond Delgado',
-    priority: 'Rush',
-    currentStatus: 'Supervisor Comment Needed',
-    currentLocation: 'Emergency Ops Action Center - Desk 1',
-    currentCustodian: 'Col. Raymond Delgado',
-    movements: [
-      {
-        id: 'mov-501',
-        timestamp: '2026-09-05T08:00:00Z',
-        personnelName: 'Officer Ben Torres',
-        currentDesk: 'Central Records & Inflow Desk',
-        forwardToDesk: 'Emergency Ops Action Center - Desk 1',
-        statusUpdate: 'received',
-        notes: 'Priority mobilization directive.',
-      },
-    ],
-    supervisorRemarks: [
-      {
-        id: 'rem-501',
-        supervisorName: 'Operations Chief Roland Kim',
-        timestamp: '2026-09-05T09:30:00Z',
-        remarkText: 'Confirm standby equipment inventory with Region IV-B dispatcher.',
-        complianceRequired: true,
-        complied: false,
-        complianceNotes: '',
-      },
-    ],
-    managerClearance: {
-      isCleared: false,
-    },
-    createdAt: '2026-09-05T08:00:00Z',
-    updatedAt: '2026-09-05T09:30:00Z',
-  },
-];
+export const INITIAL_DOCUMENTS: DocumentItem[] = [];
+
+
+const memoryStorageFallback: Record<string, string> = {};
+
+export function safeStorageGet(key: string): string | null {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return localStorage.getItem(key);
+    }
+  } catch (e) {
+    // Cross-origin iframe or partitioned storage exception
+  }
+  return memoryStorageFallback[key] || null;
+}
+
+export function safeStorageSet(key: string, value: string): void {
+  memoryStorageFallback[key] = value;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      localStorage.setItem(key, value);
+    }
+  } catch (e) {
+    // Silently fall back to in-memory store in sandboxed iframes
+  }
+}
+
+export function safeStorageRemove(key: string): void {
+  delete memoryStorageFallback[key];
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      localStorage.removeItem(key);
+    }
+  } catch (e) {
+    // Cross-origin iframe
+  }
+}
 
 export function getStoredDocuments(): DocumentItem[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = safeStorageGet(STORAGE_KEY);
     if (raw) {
       return JSON.parse(raw);
     }
@@ -505,7 +385,13 @@ export function getStoredDocuments(): DocumentItem[] {
 
 export function saveStoredDocuments(docs: DocumentItem[]) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(docs));
+    safeStorageSet(STORAGE_KEY, JSON.stringify(docs));
+    // Cross-device persistence: sync to backend
+    fetch('/api/documents', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(docs),
+    }).catch(() => {});
   } catch (e) {
     console.error('Failed to save documents to storage:', e);
   }
@@ -513,7 +399,7 @@ export function saveStoredDocuments(docs: DocumentItem[]) {
 
 export function getStoredSheetConfig(): { spreadsheetId: string; spreadsheetUrl: string } | null {
   try {
-    const raw = localStorage.getItem(SHEET_CONFIG_KEY);
+    const raw = safeStorageGet(SHEET_CONFIG_KEY);
     if (raw) {
       return JSON.parse(raw);
     }
@@ -526,9 +412,20 @@ export function getStoredSheetConfig(): { spreadsheetId: string; spreadsheetUrl:
 export function saveStoredSheetConfig(config: { spreadsheetId: string; spreadsheetUrl: string } | null) {
   try {
     if (config) {
-      localStorage.setItem(SHEET_CONFIG_KEY, JSON.stringify(config));
+      safeStorageSet(SHEET_CONFIG_KEY, JSON.stringify(config));
+      // Cross-device persistence: sync to backend
+      fetch('/api/sheet-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      }).catch(() => {});
     } else {
-      localStorage.removeItem(SHEET_CONFIG_KEY);
+      safeStorageRemove(SHEET_CONFIG_KEY);
+      fetch('/api/sheet-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      }).catch(() => {});
     }
   } catch (e) {
     console.error('Failed to save sheet config:', e);
@@ -537,7 +434,7 @@ export function saveStoredSheetConfig(config: { spreadsheetId: string; spreadshe
 
 export function getStoredStaffMembers(): AppUserRole[] {
   try {
-    const raw = localStorage.getItem(STAFF_KEY);
+    const raw = safeStorageGet(STAFF_KEY);
     if (raw) {
       const list = JSON.parse(raw);
       if (Array.isArray(list) && list.length > 0) {
@@ -572,7 +469,13 @@ export function getStoredStaffMembers(): AppUserRole[] {
 
 export function saveStoredStaffMembers(staff: AppUserRole[]) {
   try {
-    localStorage.setItem(STAFF_KEY, JSON.stringify(staff));
+    safeStorageSet(STAFF_KEY, JSON.stringify(staff));
+    // Cross-device persistence: sync to backend
+    fetch('/api/staff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(staff),
+    }).catch(() => {});
   } catch (e) {
     console.error('Failed to save staff members:', e);
   }
@@ -580,29 +483,37 @@ export function saveStoredStaffMembers(staff: AppUserRole[]) {
 
 export function getStoredDropdownOptions(): RegistryDropdownOptions {
   try {
-    const raw = localStorage.getItem(DROPDOWN_OPTIONS_KEY);
+    const raw = safeStorageGet(DROPDOWN_OPTIONS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       return {
         roles: Array.isArray(parsed.roles) ? parsed.roles : [],
         departments: Array.isArray(parsed.departments) ? parsed.departments : [],
         desks: Array.isArray(parsed.desks) ? parsed.desks : [],
+        documentTypes: Array.isArray(parsed.documentTypes) ? parsed.documentTypes : [],
+        communicationTypes: Array.isArray(parsed.communicationTypes) ? parsed.communicationTypes : [],
+        reportTypes: Array.isArray(parsed.reportTypes) ? parsed.reportTypes : [],
+        personnel: Array.isArray(parsed.personnel) ? parsed.personnel : [],
       };
     }
   } catch (e) {
     console.error('Failed to get dropdown options:', e);
   }
-  // User explicitly asked to delete all default entries in assigned roles, department/division, assigned Desk
   return {
-    roles: [],
-    departments: [],
+    roles: ['sys admin', 'receiving', 'staff', 'supervisor', 'division manager', 'department manager'],
+    departments: ['CMED', 'CMSD'],
     desks: [],
+    documentTypes: ['Simple Transaction', 'Complex Transaction', 'Highly Technical', 'Regular Report', 'For information only', 'Special Deadline', 'Voucher', 'Payroll', 'Resolution', 'Ordinance', 'Contract/Agreement', 'Endorsement'],
+    communicationTypes: ['Memorandum', 'Letter', 'Certification', 'RDTF', 'Email', 'Verbal Request'],
+    reportTypes: ['Inspection Report', 'Consolidated CMR and PPR', 'External Communication', 'Internal Communications', 'Minutes of Meeting', 'Lacking Documents', 'SM1 and SM2', 'Internal Request', 'For review - SOTEVO', 'For review/Comments - Other docs', 'Travel Order', 'Office Order', 'For staff reference', 'CPES', 'Summary of CMR', 'Summary of PPR', 'CMR and PPR Tracking', 'Project Completion Inspection Report', 'Project Acceptance Report', 'Acceptance Committee', 'Cash Advance / Reimbursement', 'Notice of Inspection', 'BAC-Other works', 'Consolidated CMR and PPR to COA', 'List of Terminated'],
+    personnel: ['Myles Rovi P. Martinez', 'Judy F. Villarete', 'Bryan L. Cabalfin', 'Pamela Aprille O. Lumbre', 'Benjamin A. Nieva', 'Maria Urduja Jean V. Tabilas', 'Mary Flor F. Aquino', 'Aubrey Camille C. Cabrera', 'Anne Katrina S. Del Rosario', 'Rey Reginald A. Mojica', 'Janelle Vanessa E. Tanguilig', 'Rodolfo M. Torino Jr', 'Danezel Christian G. Cruz', 'John Nicolo V. Salvador', 'Marian Grace Paling', 'Judy Ann T. Pacaanas', 'Oscar B. Hanova Jr.'],
+    
   };
 }
 
 export function saveStoredDropdownOptions(options: RegistryDropdownOptions) {
   try {
-    localStorage.setItem(DROPDOWN_OPTIONS_KEY, JSON.stringify(options));
+    safeStorageSet(DROPDOWN_OPTIONS_KEY, JSON.stringify(options));
   } catch (e) {
     console.error('Failed to save dropdown options:', e);
   }

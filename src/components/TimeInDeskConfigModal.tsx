@@ -150,16 +150,16 @@ export const TimeInDeskConfigModal: React.FC<TimeInDeskConfigModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs animate-in fade-in">
       <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 max-w-2xl w-full overflow-hidden flex flex-col max-h-[92vh]">
         {/* Modal Header */}
-        <div className="p-5 bg-[#0c2340] dark:bg-[#071526] border-b border-[#1b3d64] dark:border-slate-800 text-white flex items-start justify-between">
+        <div className="p-5 bg-slate-900 border-b border-slate-800 text-white flex items-start justify-between">
           <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-sm ring-1 ring-amber-400/50">
+            <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-sm ring-1 ring-slate-400">
               <PossdLogo className="w-8 h-8" variant="black" />
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-bold text-white">
                 Time-in-Desk Threshold Configuration
               </h2>
-              <p className="text-xs text-blue-200 dark:text-blue-300/80">
+              <p className="text-xs text-slate-300">
                 Configure allowable dwell time thresholds per division. Documents exceeding their threshold highlight in red.
               </p>
             </div>
@@ -167,7 +167,7 @@ export const TimeInDeskConfigModal: React.FC<TimeInDeskConfigModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="text-slate-300 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
+            className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>

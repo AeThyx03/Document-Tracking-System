@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   DocumentItem,
   RealtimeNotification,
@@ -6,6 +6,7 @@ import {
   UserRoleType,
   RegistryDropdownOptions,
   TimeInDeskConfig,
+  DedicatedLinkItem,
 } from './types';
 import {
   getStoredDocuments,
@@ -22,6 +23,9 @@ import {
   decodePersonnelSyncCode,
   broadcastDataUpdate,
   onDataUpdate,
+  safeStorageGet,
+  safeStorageSet,
+  safeStorageRemove,
 } from './mockData';
 import {
   SheetMetadata,
@@ -29,8 +33,9 @@ import {
   syncPersonnelOnlyToSheet,
   pullPersonnelFromSheet,
   pullAllFromSheet,
+  isGoogleQuotaError,
 } from './lib/googleSheets';
-import { initAuth, setAccessToken, getAccessToken } from './lib/firebase';
+import { initAuth, setAccessToken, getAccessToken, googleSignIn, logoutGoogle, getStaySignedIn } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { NotificationCenter } from './components/NotificationCenter';
 import { GoogleSheetSyncModal } from './components/GoogleSheetSyncModal';
@@ -40,7 +45,14 @@ import { RolesManagementModal } from './components/RolesManagementModal';
 import { TimeInDeskConfigModal } from './components/TimeInDeskConfigModal';
 import { DocumentAnalyticsDashboard } from './components/DocumentAnalyticsDashboard';
 import { LoginModal } from './components/LoginModal';
+import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
+import { DedicatedLinksView } from './components/DedicatedLinksView';
+import { AdminSettingsView } from './components/AdminSettingsView';
+import { PWAInstallButton } from './components/PWAInstallButton';
 import { PossdLogo } from './components/PossdLogo';
+import { motion, AnimatePresence } from 'motion/react';
+import { DocumentLifecycleProgress } from './components/DocumentLifecycleProgress';
+import { VerticalNavigationSidebar, WorkspaceTab } from './components/VerticalNavigationSidebar';
 import {
   getTimeInDeskConfig,
   saveTimeInDeskConfig,
@@ -53,6 +65,8 @@ import {
   Search,
   Filter,
   ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
   Building2,
   Clock,
   Send,
@@ -82,23 +96,39 @@ import {
   Sun,
   Moon,
   LogIn,
+  LogOut,
+  Globe,
+  Keyboard,
 } from 'lucide-react';
 
 export default function App() {
   // Theme Toggle State ('light' | 'dark')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    const saved = localStorage.getItem('possd_theme');
-    if (saved === 'dark' || saved === 'light') return saved;
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const saved = localStorage.getItem('possd_theme');
+        if (saved === 'dark' || saved === 'light') return saved;
+      }
+    } catch (e) {
+      // Sandboxed iframe
+    }
+    return 'dark';
   });
 
   useEffect(() => {
-    if (theme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
+    try {
+      const root = document.documentElement;
+      if (theme === 'dark') {
+        root.classList.add('dark');
+      } else {
+        root.classList.remove('dark');
+      }
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.setItem('possd_theme', theme);
+      }
+    } catch (e) {
+      // Sandboxed iframe
     }
-    localStorage.setItem('possd_theme', theme);
   }, [theme]);
 
   const toggleTheme = () => {
@@ -109,7 +139,14 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [sheetConfig, setSheetConfig] = useState<SheetMetadata | null>(null);
+  const [isAutoSyncing, setIsAutoSyncing] = useState<boolean>(false);
+  const [isPushingAll, setIsPushingAll] = useState<boolean>(false);
+  const [quotaCooldownSeconds, setQuotaCooldownSeconds] = useState<number>(0);
   const [isSheetModalOpen, setIsSheetModalOpen] = useState(false);
+
+  // References to prevent quota over-consumption and circuit-breaker for rate limits
+  const quotaCooldownUntilRef = useRef<number>(0);
+  const pushTimeoutRef = useRef<any>(null);
 
   // Time-in-Desk Threshold Configuration State
   const [timeInDeskConfig, setTimeInDeskConfig] = useState<TimeInDeskConfig>(() =>
@@ -120,17 +157,160 @@ export default function App() {
   // Staff & Roles State
   const [staffList, setStaffList] = useState<AppUserRole[]>(() => getStoredStaffMembers());
   const [currentUser, setCurrentUser] = useState<AppUserRole>(() => {
-    const list = getStoredStaffMembers();
-    return list[0] || {
-      id: 'staff-1',
-      name: 'Ana Cruz',
-      role: 'Admin Staff',
-      division: 'Central Records & Receiving Desk',
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const stored = localStorage.getItem('possd_active_user');
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (parsed && parsed.name && parsed.role) {
+            return parsed;
+          }
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+    const initialStaff = getStoredStaffMembers();
+    return initialStaff[0] || {
+      id: 'SYS-ADMIN-1',
+      name: 'Engr. System Admin',
+      role: 'System Admin',
+      division: 'Administrative Section',
+      username: 'admin',
     };
   });
   const [isRolesModalOpen, setIsRolesModalOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [isShortcutsModalOpen, setIsShortcutsModalOpen] = useState(false);
   const [dropdownOptions, setDropdownOptions] = useState<RegistryDropdownOptions>(() => getStoredDropdownOptions());
+
+  // Dedicated Institutional Links State (Google Drives, Files, External Portals)
+  const [dedicatedLinks, setDedicatedLinks] = useState<DedicatedLinkItem[]>(() => {
+    try {
+      const stored = localStorage.getItem('possd_dedicated_links');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return [
+      {
+        id: 'link-drive-master',
+        title: 'POSSD Master Google Drive Repository',
+        url: 'https://drive.google.com',
+        category: 'Google Drive',
+        description: 'Central cloud drive repository for division folders, digital copies, and clearance attachments.',
+        targetDivision: 'All Divisions',
+        iconType: 'drive',
+        addedBy: 'System Admin',
+        addedAt: new Date().toISOString(),
+        isPinned: true,
+      },
+      {
+        id: 'link-routing-template',
+        title: 'Standard Internal Routing Slip Template',
+        url: 'https://docs.google.com/spreadsheets',
+        category: 'Official Files',
+        description: 'Prescribed routing slip sheet for tracking multi-desk document transmittals and compliance.',
+        targetDivision: 'All Divisions',
+        iconType: 'sheet',
+        addedBy: 'System Admin',
+        addedAt: new Date().toISOString(),
+        isPinned: true,
+      },
+      {
+        id: 'link-philpost-portal',
+        title: 'Philippine Postal Corporation Portal',
+        url: 'https://www.phlpost.gov.ph',
+        category: 'Portals & Systems',
+        description: 'Official PHLPost institutional corporate portal and administrative circulars directory.',
+        targetDivision: 'Administrative Section',
+        iconType: 'link',
+        addedBy: 'System Admin',
+        addedAt: new Date().toISOString(),
+        isPinned: false,
+      },
+      {
+        id: 'link-sla-manual',
+        title: 'Document Turnaround & SLA Threshold Handbook',
+        url: 'https://drive.google.com',
+        category: 'Reference Guidelines',
+        description: 'Operating reference guide on time-in-desk limits, urgent transactions, and focal routing.',
+        targetDivision: 'All Divisions',
+        iconType: 'file',
+        addedBy: 'System Admin',
+        addedAt: new Date().toISOString(),
+        isPinned: false,
+      },
+    ];
+  });
+
+  // Fetch dedicated links from server on mount
+  useEffect(() => {
+    fetch('/api/links')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && data.success && Array.isArray(data.links) && data.links.length > 0) {
+          setDedicatedLinks(data.links);
+          try {
+            localStorage.setItem('possd_dedicated_links', JSON.stringify(data.links));
+          } catch {}
+        }
+      })
+      .catch((err) => console.warn('Could not fetch server links:', err));
+  }, []);
+
+  const handleAddDedicatedLink = (newLink: Omit<DedicatedLinkItem, 'id' | 'addedAt'>) => {
+    const linkItem: DedicatedLinkItem = {
+      ...newLink,
+      id: `link-${Date.now()}`,
+      addedAt: new Date().toISOString(),
+    };
+    const updated = [linkItem, ...dedicatedLinks];
+    setDedicatedLinks(updated);
+    try {
+      localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+    } catch {}
+    fetch('/api/links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ links: updated }),
+    }).catch((e) => console.warn('Failed to push link to server:', e));
+
+    addNotification(
+      'Resource Link Added',
+      `System Admin registered "${linkItem.title}" to dedicated links directory.`,
+      currentUser?.name || 'System Admin',
+      'incoming',
+      'LINK-NEW'
+    );
+  };
+
+  const handleUpdateDedicatedLink = (id: string, updates: Partial<DedicatedLinkItem>) => {
+    const updated = dedicatedLinks.map((l) => (l.id === id ? { ...l, ...updates } : l));
+    setDedicatedLinks(updated);
+    try {
+      localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+    } catch {}
+    fetch('/api/links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ links: updated }),
+    }).catch((e) => console.warn('Failed to push link to server:', e));
+  };
+
+  const handleDeleteDedicatedLink = (id: string) => {
+    const updated = dedicatedLinks.filter((l) => l.id !== id);
+    setDedicatedLinks(updated);
+    try {
+      localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+    } catch {}
+    fetch('/api/links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ links: updated }),
+    }).catch((e) => console.warn('Failed to push link to server:', e));
+  };
 
   // Documents State
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
@@ -148,7 +328,369 @@ export default function App() {
   const [divisionFilter, setDivisionFilter] = useState<string>('ALL');
   const [priorityFilter, setPriorityFilter] = useState<string>('ALL');
   const [viewMode, setViewMode] = useState<'all' | 'incoming' | 'outgoing' | 'compliance_needed' | 'overdue'>('all');
-  const [activeTab, setActiveTab] = useState<'documents' | 'analytics'>('documents');
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('documents');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
+
+  // Table Column Sorting State
+  const [sortField, setSortField] = useState<
+    'trackingNumber' | 'title' | 'dateReceived' | 'targetDivision' | 'currentCustodian' | 'timeInDesk' | 'lifecycle'
+  >('dateReceived');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+
+  const handleSort = (field: typeof sortField) => {
+    if (sortField === field) {
+      setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortField(field);
+      // For dates, elapsed time, and status, default to desc; for text codes, default to asc
+      if (field === 'dateReceived' || field === 'timeInDesk' || field === 'lifecycle') {
+        setSortDirection('desc');
+      } else {
+        setSortDirection('asc');
+      }
+    }
+  };
+
+  // Refs for background sync interval
+  const documentsRef = useRef<DocumentItem[]>(documents);
+  const staffListRef = useRef<AppUserRole[]>(staffList);
+
+  useEffect(() => {
+    documentsRef.current = documents;
+  }, [documents]);
+
+  useEffect(() => {
+    staffListRef.current = staffList;
+  }, [staffList]);
+
+  const hasPendingSyncRef = useRef<boolean>(
+    safeStorageGet('possd_has_unpushed_changes') === 'true'
+  );
+
+  // Debounced push queue to batch rapid mutations and protect against Google Sheets write quota exhaustion (60 writes/min)
+  // Guarantees that any added log (incoming document, desk routing, remark, clearance) is preserved locally and synced to the sheet.
+  const scheduleSheetPush = (updatedDocs: DocumentItem[], updatedStaff?: AppUserRole[]) => {
+    hasPendingSyncRef.current = true;
+    safeStorageSet('possd_has_unpushed_changes', 'true');
+
+    if ((!token && !sheetConfig?.appsScriptUrl) || !sheetConfig?.spreadsheetId) {
+      console.log('Sync queued: Changes saved locally and will auto-push to Google Sheet once connected or Apps Script configured.');
+      return;
+    }
+
+    if (pushTimeoutRef.current) {
+      clearTimeout(pushTimeoutRef.current);
+    }
+
+    const now = Date.now();
+    const waitTime = Math.max(0, quotaCooldownUntilRef.current - now);
+    const delay = waitTime > 0 ? waitTime + 1000 : 1200;
+
+    pushTimeoutRef.current = setTimeout(async () => {
+      setIsAutoSyncing(true);
+      try {
+        await syncAllDocumentsToSheet(
+          token,
+          sheetConfig.spreadsheetId,
+          updatedDocs,
+          updatedStaff || staffListRef.current,
+          { appsScriptUrl: sheetConfig.appsScriptUrl }
+        );
+        hasPendingSyncRef.current = false;
+        safeStorageRemove('possd_has_unpushed_changes');
+      } catch (err: any) {
+        if (isGoogleQuotaError(err)) {
+          const cooldownMs = 65_000;
+          quotaCooldownUntilRef.current = Date.now() + cooldownMs;
+          setQuotaCooldownSeconds(65);
+          addNotification(
+            'Sync Quota Cooldown',
+            'Google Sheets write limit reached (60/min). Your added logs are safely preserved locally and will automatically sync once the window resets.',
+            'System Sync',
+            'sync',
+            'QUOTA'
+          );
+          // Automatically re-schedule push after cooldown so the added log is never dropped!
+          scheduleSheetPush(updatedDocs, updatedStaff);
+        } else {
+          console.error('Failed to sync changes to Google Sheet:', err);
+        }
+      } finally {
+        setIsAutoSyncing(false);
+      }
+    }, delay);
+  };
+
+  // When sheet credentials / connection become active, automatically flush any un-synced logs
+  useEffect(() => {
+    if ((!token && !sheetConfig?.appsScriptUrl) || !sheetConfig?.spreadsheetId) return;
+    if (hasPendingSyncRef.current || safeStorageGet('possd_has_unpushed_changes') === 'true') {
+      scheduleSheetPush(documentsRef.current, staffListRef.current);
+    }
+  }, [token, sheetConfig]);
+
+  // Background Auto-Sync: 30-second read-only polling to observe remote changes without consuming write quota
+  // Supports zero-login public sheets via GViz proxy as well as OAuth sessions
+  useEffect(() => {
+    if (!sheetConfig?.spreadsheetId) return;
+
+    let isSyncing = false;
+
+    const performAutoPull = async () => {
+      // If currently cooling down from HTTP 429 quota, skip polling
+      if (Date.now() < quotaCooldownUntilRef.current) {
+        return;
+      }
+
+      if (isSyncing) return;
+      isSyncing = true;
+      setIsAutoSyncing(true);
+
+      try {
+        // Read-only pull — safely merges with local documents and movements
+        const { documents: pulledDocs, personnel: pulledStaff } = await pullAllFromSheet(
+          token,
+          sheetConfig.spreadsheetId,
+          documentsRef.current,
+          staffListRef.current
+        );
+
+        // Detect if anything actually changed before re-rendering
+        const currentDocs = documentsRef.current;
+        const docsChanged =
+          pulledDocs.length !== currentDocs.length ||
+          pulledDocs.some((d, i) => {
+            const existing = currentDocs[i];
+            return (
+              !existing ||
+              existing.id !== d.id ||
+              existing.currentStatus !== d.currentStatus ||
+              existing.currentLocation !== d.currentLocation ||
+              existing.currentCustodian !== d.currentCustodian ||
+              (existing.movements?.length || 0) !== (d.movements?.length || 0) ||
+              (existing.supervisorRemarks?.length || 0) !== (d.supervisorRemarks?.length || 0) ||
+              existing.managerClearance?.isCleared !== d.managerClearance?.isCleared ||
+              existing.updatedAt !== d.updatedAt
+            );
+          });
+
+        if (docsChanged) {
+          setDocuments(pulledDocs);
+          saveStoredDocuments(pulledDocs);
+        }
+
+        const currentStaff = staffListRef.current;
+        const staffChanged =
+          pulledStaff.length !== currentStaff.length ||
+          pulledStaff.some((s, i) => {
+            const existing = currentStaff[i];
+            return (
+              !existing ||
+              existing.id !== s.id ||
+              existing.role !== s.role ||
+              existing.division !== s.division ||
+              existing.status !== s.status
+            );
+          });
+
+        if (staffChanged) {
+          setStaffList(pulledStaff);
+          saveStoredStaffMembers(pulledStaff);
+        }
+
+        // If local had unsynced logs before or during auto-pull, push the merged state back to the sheet!
+        if (hasPendingSyncRef.current) {
+          scheduleSheetPush(pulledDocs, staffListRef.current);
+        }
+      } catch (err: any) {
+        if (isGoogleQuotaError(err)) {
+          const cooldownMs = 65_000;
+          quotaCooldownUntilRef.current = Date.now() + cooldownMs;
+          setQuotaCooldownSeconds(65);
+          console.warn('Google Sheets API rate limit reached. Auto-sync is paused for 65 seconds.');
+        } else {
+          console.warn('Auto-sync pull failed:', err);
+        }
+      } finally {
+        isSyncing = false;
+        setIsAutoSyncing(false);
+      }
+    };
+
+    // Initial pull after 2s, then every 30s
+    const initialTimer = setTimeout(performAutoPull, 2000);
+    const interval = setInterval(performAutoPull, 30000);
+
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [token, sheetConfig]);
+
+  // Quota cooldown countdown ticker
+  useEffect(() => {
+    if (quotaCooldownSeconds <= 0) return;
+    const ticker = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((quotaCooldownUntilRef.current - Date.now()) / 1000));
+      setQuotaCooldownSeconds(remaining);
+      if (remaining <= 0) {
+        clearInterval(ticker);
+      }
+    }, 1000);
+    return () => clearInterval(ticker);
+  }, [quotaCooldownSeconds]);
+
+  // Sign Out / Logout handler - Turns back to Official Portal Login Page
+  const handleLogout = async () => {
+    try {
+      await logoutGoogle();
+    } catch (e) {
+      console.warn('Google logout warning:', e);
+    }
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.removeItem('possd_active_user');
+      }
+    } catch (e) {}
+    setUser(null);
+    setToken(null);
+    setAccessToken(null);
+    fetch('/api/sheet-auth-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: null }),
+    }).catch(() => {});
+    setCurrentUser(null);
+    setIsLoginModalOpen(false);
+  };
+
+  // Manual Instant Refresh Handler
+  const handleManualSync = async () => {
+    if (!sheetConfig?.spreadsheetId) {
+      setIsSheetModalOpen(true);
+      return;
+    }
+
+    if (Date.now() < quotaCooldownUntilRef.current) {
+      const remaining = Math.max(1, Math.ceil((quotaCooldownUntilRef.current - Date.now()) / 1000));
+      addNotification(
+        'Sync Cooling Down',
+        `Google Sheets API quota is resetting. Please wait ${remaining}s before manual sync.`,
+        'System Sync',
+        'sync',
+        'COOLDOWN'
+      );
+      return;
+    }
+
+    setIsAutoSyncing(true);
+    try {
+      const { documents: pulledDocs, personnel: pulledStaff } = await pullAllFromSheet(
+        token,
+        sheetConfig.spreadsheetId,
+        documentsRef.current,
+        staffListRef.current
+      );
+      setDocuments(pulledDocs);
+      saveStoredDocuments(pulledDocs);
+      setStaffList(pulledStaff);
+      saveStoredStaffMembers(pulledStaff);
+
+      addNotification(
+        'Google Sheet Synchronized',
+        `Refreshed ${pulledDocs.length} documents and ${pulledStaff.length} personnel profiles from Google Sheet.`,
+        'System Sync',
+        'sync',
+        'MANUAL-SYNC'
+      );
+    } catch (err: any) {
+      if (isGoogleQuotaError(err)) {
+        quotaCooldownUntilRef.current = Date.now() + 65_000;
+        setQuotaCooldownSeconds(65);
+      }
+      console.error('Manual sync failed:', err);
+    } finally {
+      setIsAutoSyncing(false);
+    }
+  };
+
+  // Dedicated Force Push All Handler for Top Ribbon & Manual Action
+  const handlePushAllNow = async () => {
+    if (!sheetConfig?.spreadsheetId) {
+      setIsSheetModalOpen(true);
+      return;
+    }
+
+    let activeToken = token;
+    // If no active token, check if Apps Script URL is set or server has shared token
+    if (!activeToken && !sheetConfig.appsScriptUrl) {
+      try {
+        const tokenRes = await fetch('/api/sheet-auth-token').then((r) => r.json());
+        if (tokenRes.success && tokenRes.token) {
+          activeToken = tokenRes.token;
+          setToken(tokenRes.token);
+          setAccessToken(tokenRes.token);
+        }
+      } catch {}
+    }
+
+    setIsPushingAll(true);
+    try {
+      const res = await syncAllDocumentsToSheet(
+        activeToken,
+        sheetConfig.spreadsheetId,
+        documentsRef.current,
+        staffListRef.current,
+        { forceHeaders: true, appsScriptUrl: sheetConfig.appsScriptUrl }
+      );
+
+      hasPendingSyncRef.current = false;
+      safeStorageRemove('possd_has_unpushed_changes');
+
+      // Update URL with direct gid tab link if not present
+      if (res.masterSheetId !== undefined && !sheetConfig.spreadsheetUrl.includes('#gid=')) {
+        const updatedConfig: SheetMetadata = {
+          ...sheetConfig,
+          spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${sheetConfig.spreadsheetId}/edit#gid=${res.masterSheetId}`,
+          sheetName: res.masterTabName,
+        };
+        setSheetConfig(updatedConfig);
+        saveStoredSheetConfig(updatedConfig);
+      }
+
+      addNotification(
+        'Google Sheet Synchronized',
+        `Successfully logged ${res.rowsUpdated} document records and ${res.personnelUpdated} personnel profiles to tab "${res.masterTabName}".`,
+        currentUser.name,
+        'sync',
+        'PUSH-ALL-SUCCESS'
+      );
+    } catch (err: any) {
+      if (isGoogleQuotaError(err)) {
+        quotaCooldownUntilRef.current = Date.now() + 65_000;
+        setQuotaCooldownSeconds(65);
+        addNotification(
+          'Sync Quota Cooldown',
+          'Google Sheets write quota (60/min) reached. Your entries are safely preserved locally and will sync once the window resets.',
+          'System Sync',
+          'sync',
+          'QUOTA'
+        );
+      } else {
+        console.error('Failed to push all records to Google Sheet:', err);
+        addNotification(
+          'Sync Failed',
+          err?.message || 'Failed to push all entries to Google Sheet. Check permissions or network.',
+          'System Sync',
+          'sync',
+          'SYNC-FAILED'
+        );
+        setIsSheetModalOpen(true);
+      }
+    } finally {
+      setIsPushingAll(false);
+    }
+  };
 
   const handleSaveThresholdConfig = (updated: TimeInDeskConfig) => {
     setTimeInDeskConfig(updated);
@@ -164,9 +706,54 @@ export default function App() {
 
   // Load initial data & Firebase Auth Listener
   useEffect(() => {
-    setDocuments(getStoredDocuments());
+    const localDocs = getStoredDocuments();
+    setDocuments(localDocs);
     const existingConfig = getStoredSheetConfig();
     setSheetConfig(existingConfig);
+
+    // Cross-Device Backend Hydration
+    fetch('/api/sheet-config')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success && data.sheetConfig) {
+          setSheetConfig((prev) => prev || data.sheetConfig);
+          if (!existingConfig) {
+            saveStoredSheetConfig(data.sheetConfig);
+          }
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/documents')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.documents) && data.documents.length > 0) {
+          if (localDocs.length === 0) {
+            setDocuments(data.documents);
+            saveStoredDocuments(data.documents);
+          }
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/staff')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.staff) && data.staff.length > 0) {
+          setStaffList((prev) => (prev.length === 0 ? data.staff : prev));
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/sheet-auth-token')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success && data.token) {
+          setToken((prev) => prev || data.token);
+          setAccessToken(data.token);
+        }
+      })
+      .catch(() => {});
 
     // Cross-Device Instant Sync URL & Hash Detection
     try {
@@ -263,11 +850,23 @@ export default function App() {
         setUser(authedUser);
         setToken(oauthToken);
         setAccessToken(oauthToken);
+        if (oauthToken) {
+          fetch('/api/sheet-auth-token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: oauthToken }),
+          }).catch(() => {});
+        }
       },
       () => {
         setUser(null);
         setToken(null);
         setAccessToken(null);
+        fetch('/api/sheet-auth-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: null }),
+        }).catch(() => {});
       }
     );
 
@@ -276,6 +875,137 @@ export default function App() {
       cleanupBroadcast();
     };
   }, []);
+
+  // Global Keyboard Shortcuts Listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore keybindings if the user is typing in any form input, textarea, or contentEditable
+      const target = e.target as HTMLElement | null;
+      const isInputFocused =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        Boolean(target?.isContentEditable);
+
+      // Escape always closes any currently active overlay/modal
+      if (e.key === 'Escape') {
+        if (isShortcutsModalOpen) {
+          setIsShortcutsModalOpen(false);
+          return;
+        }
+        if (selectedDoc) {
+          setSelectedDoc(null);
+          return;
+        }
+        if (isIncomingModalOpen) {
+          setIsIncomingModalOpen(false);
+          return;
+        }
+        if (isSheetModalOpen) {
+          setIsSheetModalOpen(false);
+          return;
+        }
+        if (isRolesModalOpen) {
+          setIsRolesModalOpen(false);
+          return;
+        }
+        if (isLoginModalOpen) {
+          setIsLoginModalOpen(false);
+          return;
+        }
+        if (isThresholdModalOpen) {
+          setIsThresholdModalOpen(false);
+          return;
+        }
+        if (docToDelete) {
+          setDocToDelete(null);
+          return;
+        }
+        return;
+      }
+
+      // Quick Search shortcut: '/' or Ctrl+K / Cmd+K
+      if ((e.key === '/' && !isInputFocused) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k')) {
+        e.preventDefault();
+        const searchInput =
+          (document.getElementById('document-search-input') as HTMLInputElement) ||
+          (document.getElementById('registry-search-input') as HTMLInputElement);
+        if (searchInput) {
+          searchInput.focus();
+          searchInput.select?.();
+        }
+        return;
+      }
+
+      // If typing inside an input/textarea/select, do not trigger single-key action shortcuts
+      if (isInputFocused) {
+        return;
+      }
+
+      // Open Shortcuts Guide: '?' or Shift+'/'
+      if (e.key === '?' || (e.shiftKey && e.key === '?')) {
+        e.preventDefault();
+        setIsShortcutsModalOpen((prev) => !prev);
+        return;
+      }
+
+      // Action: Log Document ('n' or 'N')
+      if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault();
+        setIsIncomingModalOpen(true);
+        return;
+      }
+
+      // Action: Google Sheets Integration & Diagnostics ('s' or 'S')
+      if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        setIsSheetModalOpen(true);
+        return;
+      }
+
+      // Action: Refresh / Manual Sync ('r' or 'R')
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        handleManualSync();
+        return;
+      }
+
+      // Navigation tabs: '1' for Registry, '2' for Distribution Desk, '3' for Analytics, '4' for Roles
+      if (e.key === '1') {
+        e.preventDefault();
+        setActiveTab('documents');
+        return;
+      }
+      if (e.key === '2') {
+        e.preventDefault();
+        setActiveTab('distribution');
+        return;
+      }
+      if (e.key === '3') {
+        e.preventDefault();
+        setActiveTab('analytics');
+        return;
+      }
+      if (e.key === '4') {
+        e.preventDefault();
+        setIsRolesModalOpen(true);
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    isShortcutsModalOpen,
+    selectedDoc,
+    isIncomingModalOpen,
+    isSheetModalOpen,
+    isRolesModalOpen,
+    isLoginModalOpen,
+    isThresholdModalOpen,
+    docToDelete,
+    handleManualSync,
+  ]);
 
   // Real-time notification helper
   const addNotification = (
@@ -320,11 +1050,9 @@ export default function App() {
     saveStoredStaffMembers(updated);
     broadcastDataUpdate('staff', updated);
 
-    // Auto-sync to Google Sheet if connected
+    // Auto-sync to Google Sheet if connected (debounced to avoid rate limits)
     if (token && sheetConfig) {
-      syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, updated).catch((err) => {
-        console.warn('Auto-sync personnel to Google Sheet error:', err);
-      });
+      scheduleSheetPush(documents, updated);
     }
 
     addNotification(
@@ -352,9 +1080,7 @@ export default function App() {
     broadcastDataUpdate('staff', updated);
 
     if (token && sheetConfig) {
-      syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, updated).catch((err) => {
-        console.warn('Auto-sync personnel to Google Sheet error:', err);
-      });
+      scheduleSheetPush(documents, updated);
     }
 
     if (currentUser.id === staffId) {
@@ -392,9 +1118,7 @@ export default function App() {
     broadcastDataUpdate('staff', updated);
 
     if (token && sheetConfig) {
-      syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, updated).catch((err) => {
-        console.warn('Auto-sync personnel to Google Sheet error:', err);
-      });
+      scheduleSheetPush(documents, updated);
     }
 
     if (currentUser.id === staffId) {
@@ -420,9 +1144,7 @@ export default function App() {
     broadcastDataUpdate('staff', updated);
 
     if (token && sheetConfig) {
-      syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, updated).catch((err) => {
-        console.warn('Auto-sync personnel to Google Sheet error:', err);
-      });
+      scheduleSheetPush(documents, updated);
     }
 
     addNotification('Staff Removed', `Removed personnel ID ${staffId}`, currentUser.name, 'sync', 'STAFF');
@@ -450,13 +1172,8 @@ export default function App() {
       newDoc.trackingNumber
     );
 
-    if (token && sheetConfig?.spreadsheetId) {
-      try {
-        await syncAllDocumentsToSheet(token, sheetConfig.spreadsheetId, updatedList, staffList);
-      } catch (err) {
-        console.error('Auto sync sheet error:', err);
-      }
-    }
+    // Always schedule sheet push (will save locally and queue for push when sheet is linked)
+    scheduleSheetPush(updatedList, staffList);
   };
 
   // HANDLER: Update Document
@@ -514,13 +1231,8 @@ export default function App() {
       );
     }
 
-    if (token && sheetConfig?.spreadsheetId) {
-      try {
-        await syncAllDocumentsToSheet(token, sheetConfig.spreadsheetId, updatedList, staffList);
-      } catch (err) {
-        console.error('Auto sync sheet error:', err);
-      }
-    }
+    // Always schedule sheet push (will save locally and queue for push when sheet is linked)
+    scheduleSheetPush(updatedList, staffList);
   };
 
   // HANDLER: Delete document entry (only for System Admins and Department Manager)
@@ -559,18 +1271,7 @@ export default function App() {
     );
 
     if (token && sheetConfig?.spreadsheetId) {
-      try {
-        await syncAllDocumentsToSheet(token, sheetConfig.spreadsheetId, updatedList);
-        addNotification(
-          'Google Sheet Synced',
-          `Registry row for ${doc.trackingNumber} removed from connected Google Sheet.`,
-          'System Sync',
-          'sync',
-          doc.trackingNumber
-        );
-      } catch (err) {
-        console.error('Auto sync sheet error after deletion:', err);
-      }
+      scheduleSheetPush(updatedList, staffList);
     }
   };
 
@@ -605,6 +1306,60 @@ export default function App() {
     return matchesSearch && matchesViewMode && matchesStatus && matchesDivision && matchesPriority;
   });
 
+  // Sorted documents calculation with stable multi-field comparisons
+  const sortedDocuments = useMemo(() => {
+    const list = [...filteredDocuments];
+    list.sort((a, b) => {
+      let comparison = 0;
+      switch (sortField) {
+        case 'trackingNumber':
+          comparison = a.trackingNumber.localeCompare(b.trackingNumber, undefined, { numeric: true, sensitivity: 'base' });
+          break;
+        case 'title':
+          comparison = a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
+          break;
+        case 'dateReceived': {
+          const dateA = new Date(`${a.dateReceived}T${a.timeReceived || '00:00'}:00`).getTime() || 0;
+          const dateB = new Date(`${b.dateReceived}T${b.timeReceived || '00:00'}:00`).getTime() || 0;
+          comparison = dateA - dateB;
+          break;
+        }
+        case 'targetDivision':
+          comparison = (a.targetDivision || '').localeCompare(b.targetDivision || '', undefined, { sensitivity: 'base' });
+          break;
+        case 'currentCustodian':
+          comparison = (a.currentCustodian || '').localeCompare(b.currentCustodian || '', undefined, { sensitivity: 'base' });
+          break;
+        case 'timeInDesk': {
+          const elapsedA = calculateDocumentTimeInDesk(a, timeInDeskConfig).elapsedHours;
+          const elapsedB = calculateDocumentTimeInDesk(b, timeInDeskConfig).elapsedHours;
+          comparison = elapsedA - elapsedB;
+          break;
+        }
+        case 'lifecycle': {
+          const statusOrder: Record<string, number> = {
+            'Incoming Logged': 1,
+            'Under Review': 2,
+            'Supervisor Comment Needed': 3,
+            'Cleared for Out': 4,
+            'Dispatched / Completed': 5,
+          };
+          comparison = (statusOrder[a.currentStatus] || 0) - (statusOrder[b.currentStatus] || 0);
+          break;
+        }
+        default:
+          comparison = 0;
+      }
+
+      if (comparison === 0) {
+        comparison = (b.updatedAt || '').localeCompare(a.updatedAt || '');
+      }
+
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+    return list;
+  }, [filteredDocuments, sortField, sortDirection, timeInDeskConfig]);
+
   // Statistics
   const totalCount = documents.length;
   const activeInOfficeCount = documents.filter(
@@ -619,20 +1374,27 @@ export default function App() {
   const overdueCount = documents.filter(
     (d) => calculateDocumentTimeInDesk(d, timeInDeskConfig).isOverdue
   ).length;
+  const focalPendingCount = documents.filter(
+    (d) =>
+      ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson) &&
+      !d.managerClearance?.isCleared &&
+      d.currentStatus !== 'Cleared for Out' &&
+      d.currentStatus !== 'Dispatched / Completed'
+  ).length;
 
-  const currentRoleConfig = getRoleConfig(currentUser.role);
-  const canDeleteLogs = canUserDeleteDocuments(currentUser.role);
+  const currentRoleConfig = currentUser ? getRoleConfig(currentUser.role) : getRoleConfig('Viewer');
+  const canDeleteLogs = currentUser ? canUserDeleteDocuments(currentUser.role) : false;
 
   return (
     <div className="min-h-screen bg-[#f3f6fa] dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white transition-colors duration-200">
       
-      {/* Executive Institutional Top Navigation Bar (Deep Navy Blue, Gold, Green & White) */}
-      <header className="sticky top-0 z-30 bg-[#0c2340] border-b border-[#1b3d64] px-4 sm:px-8 py-3.5 text-white shadow-md">
-        <div className="max-w-7xl mx-auto flex flex-col lg:flex-row items-start lg:items-center justify-between gap-3.5">
+      {/* Executive Institutional Top Navigation Bar (Professional Slate / Grayscale Theme) */}
+      <header className="sticky top-0 z-30 bg-slate-900 border-b border-slate-800 px-4 sm:px-8 py-3.5 text-white shadow-md">
+        <div className="w-full 2xl:max-w-[1920px] mx-auto flex flex-col lg:flex-row items-start lg:items-center justify-between gap-3.5">
           
           {/* Brand & Identity with Incorporated POSSD Logo */}
           <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-md ring-2 ring-amber-400/60 border border-slate-200">
+            <div className="w-11 h-11 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-md ring-1 ring-slate-700 border border-slate-300">
               <PossdLogo className="w-9 h-9" variant="black" />
             </div>
             <div>
@@ -640,22 +1402,45 @@ export default function App() {
                 <h1 className="text-base font-bold tracking-tight text-white">
                   POSSD Document Tracking System
                 </h1>
-                <span className="text-[10px] font-bold tracking-wide px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                <span className="text-[10px] font-bold tracking-wide px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
                   Official Portal
                 </span>
               </div>
-              <p className="text-xs text-blue-200/90 hidden sm:block">
-                Desk Routing • Supervisor Remarks & Compliance • Manager Clearance • Google Sheets
-              </p>
             </div>
           </div>
 
-          {/* User Session Profile, Role Switcher, Google Sheet & Action Buttons */}
+          {/* User Session Profile, Log Out, Thresholds, Sheet & Actions */}
           <div className="flex items-center flex-wrap gap-2.5 w-full lg:w-auto justify-end">
             
+            {/* Time-in-Desk Thresholds (Available ONLY for System Admin, moved to the left) */}
+            {currentUser.role === 'System Admin' && (
+              <button
+                id="open-thresholds-btn"
+                onClick={() => setActiveTab('admin')}
+                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-all shadow-2xs cursor-pointer ${
+                  overdueCount > 0
+                    ? 'bg-rose-950/80 text-rose-200 border-rose-600 hover:bg-rose-900'
+                    : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700 hover:text-white'
+                }`}
+                title="System Admin: Manage Time-in-Desk thresholds & settings"
+              >
+                <Timer className={`w-4 h-4 ${overdueCount > 0 ? 'text-rose-400' : 'text-slate-400'}`} />
+                <span className="hidden sm:inline">Thresholds</span>
+                {overdueCount > 0 ? (
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-600 text-white font-bold">
+                    {overdueCount} Overdue
+                  </span>
+                ) : (
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-slate-900 text-slate-300 border border-slate-700">
+                    {timeInDeskConfig.defaultThresholdHours}h
+                  </span>
+                )}
+              </button>
+            )}
+
             {/* Active User Pill with Role Indicator */}
-            <div className="flex items-center gap-2 bg-[#102e52] border border-[#204975] rounded-xl px-2.5 py-1.5 shadow-2xs">
-              <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center text-xs font-bold shrink-0 ring-1 ring-amber-400/40">
+            <div className="flex items-center gap-2 bg-slate-800/90 border border-slate-700 rounded-xl px-2.5 py-1.5 shadow-2xs">
+              <div className="w-7 h-7 rounded-lg bg-slate-700 text-slate-100 flex items-center justify-center text-xs font-bold shrink-0 ring-1 ring-slate-600">
                 {currentUser.avatarInitials || currentUser.name.slice(0, 2).toUpperCase()}
               </div>
               <div className="flex flex-col text-left">
@@ -663,95 +1448,48 @@ export default function App() {
                   <span className="text-xs font-bold text-white max-w-[130px] truncate">
                     {currentUser.name}
                   </span>
-                  <span className={`text-[10px] font-semibold px-1.5 py-0.2 rounded border ${currentRoleConfig.badgeBg} ${currentRoleConfig.badgeText} ${currentRoleConfig.badgeBorder}`}>
+                  <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded border bg-slate-900 text-slate-300 border-slate-700">
                     {currentUser.role}
                   </span>
                 </div>
-                <span className="text-[10px] text-blue-200/70 truncate max-w-[170px]">
+                <span className="text-[10px] text-slate-400 truncate max-w-[170px]">
                   {currentUser.division}
                 </span>
               </div>
-
-              {/* Quick Switch Dropdown */}
-              <select
-                id="active-user-quick-select"
-                value={currentUser.id || currentUser.name}
-                onChange={(e) => {
-                  const found = staffList.find((s) => s.id === e.target.value || s.name === e.target.value);
-                  if (found) setCurrentUser(found);
-                }}
-                className="bg-[#0c2340] text-blue-100 text-xs rounded-lg px-2 py-1 font-medium border border-[#275586] focus:outline-none focus:ring-1 focus:ring-amber-400 cursor-pointer"
-                title="Switch active user to experience permissions across staff, supervisor, and manager"
-              >
-                {staffList.map((s) => (
-                  <option key={s.id} value={s.id} className="bg-[#0c2340] text-white">
-                    {s.name} ({s.role})
-                  </option>
-                ))}
-              </select>
             </div>
 
-            {/* Login / Auth Credentials Trigger */}
+            {/* Login Credentials / Switch Account */}
             <button
               id="login-credentials-btn"
               type="button"
               onClick={() => setIsLoginModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#102e52] hover:bg-[#163d6b] border border-[#204975] text-amber-300 hover:text-amber-200 transition-all shadow-2xs cursor-pointer"
-              title="Authenticate with enrolled username & password"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white transition-all shadow-2xs cursor-pointer"
+              title="Authenticate / Switch account"
             >
-              <LogIn className="w-4 h-4 text-amber-300" />
-              <span className="hidden sm:inline">Sign In</span>
+              <LogIn className="w-4 h-4 text-slate-400" />
+              <span className="hidden sm:inline">Switch / Sign In</span>
             </button>
 
-            {/* Manage Roles Modal Trigger */}
+            {/* Log Out Button - Turns back to Official Login Portal */}
             <button
-              id="open-roles-btn"
-              onClick={() => setIsRolesModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-[#102e52] hover:bg-[#163d6b] border border-[#204975] text-blue-100 hover:text-white transition-all shadow-2xs cursor-pointer"
-              title="Open Staff Roles, Credentials & Permission Matrix"
+              id="logout-header-btn"
+              type="button"
+              onClick={handleLogout}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-rose-300 transition-all shadow-2xs cursor-pointer"
+              title="Sign out and return to official login page"
             >
-              <UserCog className="w-4 h-4 text-blue-300" />
-              <span className="hidden sm:inline">Roles</span>
-              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-blue-950 text-blue-200 border border-blue-800">
-                {staffList.length}
-              </span>
+              <LogOut className="w-4 h-4 text-slate-400 hover:text-rose-300" />
+              <span className="hidden sm:inline">Log Out</span>
             </button>
 
-            {/* Time-in-Desk Threshold Configuration Trigger (Yellow / Warning Accent) */}
-            <button
-              id="open-thresholds-btn"
-              onClick={() => setIsThresholdModalOpen(true)}
-              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-all shadow-2xs cursor-pointer ${
-                overdueCount > 0
-                  ? 'bg-rose-950/80 text-rose-200 border-rose-600 hover:bg-rose-900'
-                  : 'bg-[#102e52] text-amber-200 border-amber-400/30 hover:bg-[#163d6b] hover:border-amber-400/50'
-              }`}
-              title="Configure Time-in-Desk thresholds per division"
-            >
-              <Timer className={`w-4 h-4 ${overdueCount > 0 ? 'text-rose-400 animate-pulse' : 'text-amber-400'}`} />
-              <span className="hidden sm:inline">Thresholds</span>
-              {overdueCount > 0 ? (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-600 text-white font-bold animate-pulse">
-                  {overdueCount} Overdue
-                </span>
-              ) : (
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-400/20 text-amber-300 border border-amber-400/30">
-                  {timeInDeskConfig.defaultThresholdHours}h
-                </span>
-              )}
-            </button>
-
-            {/* Google Sheets Sync Trigger (Green Accent) */}
+            {/* Google Sheets Sync Trigger */}
             <button
               id="open-sheet-sync-btn"
               onClick={() => setIsSheetModalOpen(true)}
-              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-all shadow-2xs ${
-                sheetConfig
-                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/60 hover:bg-emerald-900'
-                  : 'bg-[#102e52] text-emerald-200 border-[#204975] hover:bg-[#163d6b] hover:text-white'
-              }`}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white transition-all shadow-2xs cursor-pointer"
+              title="Google Sheet Integration"
             >
-              <FileSpreadsheet className={`w-4 h-4 ${sheetConfig ? 'text-emerald-400' : 'text-emerald-300/80'}`} />
+              <FileSpreadsheet className={`w-4 h-4 ${sheetConfig ? 'text-emerald-400' : 'text-slate-400'}`} />
               <span className="hidden sm:inline">
                 {sheetConfig ? 'Sheet Linked' : 'Connect Sheet'}
               </span>
@@ -763,12 +1501,15 @@ export default function App() {
               id="theme-toggle-btn"
               type="button"
               onClick={toggleTheme}
-              className="p-2 rounded-xl text-xs font-semibold bg-[#102e52] hover:bg-[#163d6b] border border-[#204975] text-amber-300 hover:text-amber-200 transition-all shadow-2xs cursor-pointer"
+              className="p-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition-all shadow-2xs cursor-pointer"
               title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
               aria-label="Toggle theme mode"
             >
-              {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-300" /> : <Moon className="w-4 h-4 text-blue-200" />}
+              {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-300" /> : <Moon className="w-4 h-4 text-slate-300" />}
             </button>
+
+            {/* PWA App Install Button */}
+            <PWAInstallButton className="hidden sm:inline-flex" />
 
             {/* Real-time Notification Center */}
             <NotificationCenter
@@ -780,229 +1521,362 @@ export default function App() {
               }}
             />
 
-            {/* New Incoming Document Button (Vibrant Emerald Green) */}
+            {/* Log Document Button (Incoming or Outgoing) */}
             <button
               id="log-incoming-btn"
               onClick={() => setIsIncomingModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md ring-1 ring-emerald-400/40 transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold border border-slate-600 shadow-md transition-colors cursor-pointer"
+              title="Log incoming receipt or outgoing transmittal (Shortcut: N)"
             >
-              <PlusCircle className="w-4 h-4" />
-              <span>Log Incoming</span>
+              <PlusCircle className="w-4 h-4 text-slate-300" />
+              <span>Log Document</span>
+              <kbd className="hidden lg:inline px-1 py-0.2 text-[9px] font-mono rounded bg-slate-900 text-slate-300 border border-slate-700">
+                N
+              </kbd>
             </button>
           </div>
 
         </div>
       </header>
 
-      {/* Primary Workspace Navigation Tabs (Deep Navy sub-bar with crisp accents) */}
-      <div className="bg-[#08182b] border-t border-[#132c48] px-4 sm:px-6 lg:px-8">
-        <div className="max-w-7xl w-full mx-auto flex items-center justify-between">
-          <nav className="flex items-center gap-1 sm:gap-2">
-            <button
-              id="tab-documents-btn"
-              onClick={() => setActiveTab('documents')}
-              className={`inline-flex items-center gap-2 py-3 px-3 sm:px-4 text-xs font-bold border-b-2 transition-all cursor-pointer ${
-                activeTab === 'documents'
-                  ? 'border-amber-400 text-white bg-[#0e2a4a] shadow-xs'
-                  : 'border-transparent text-blue-200/70 hover:text-white hover:bg-[#0c2340]/60'
-              }`}
-            >
-              <FileText className="w-4 h-4 text-amber-400" />
-              <span>Document Registry</span>
-              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-[#14365d] text-blue-100 border border-blue-700/50">
-                {documents.length}
-              </span>
-            </button>
-
-            <button
-              id="tab-analytics-btn"
-              onClick={() => setActiveTab('analytics')}
-              className={`inline-flex items-center gap-2 py-3 px-3 sm:px-4 text-xs font-bold border-b-2 transition-all cursor-pointer ${
-                activeTab === 'analytics'
-                  ? 'border-emerald-400 text-white bg-[#0e2a4a] shadow-xs'
-                  : 'border-transparent text-blue-200/70 hover:text-white hover:bg-[#0c2340]/60'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4 text-emerald-400" />
-              <span>Analytics & Management Charts</span>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-950 text-emerald-300 border border-emerald-700/50">
-                recharts
-              </span>
-            </button>
+      {/* Mobile Horizontal Navigation Tabs (< lg) with sliding active indicator */}
+      <div className="lg:hidden bg-slate-900 border-t border-slate-800 px-3 py-2">
+        <div className="flex items-center justify-between gap-1">
+          <nav className="flex items-center gap-1.5 overflow-x-auto py-1">
+            {[
+              { id: 'documents' as WorkspaceTab, label: 'Dashboard', count: documents.length, icon: FileText, color: 'text-slate-300' },
+              { id: 'distribution' as WorkspaceTab, label: 'Distribution', count: focalPendingCount, icon: Users, color: 'text-slate-300' },
+              { id: 'analytics' as WorkspaceTab, label: 'Analytics', icon: BarChart3, color: 'text-slate-300' },
+              { id: 'links' as WorkspaceTab, label: 'Dedicated Links', count: dedicatedLinks.length, icon: Link2, color: 'text-sky-400' },
+              ...(currentUser.role === 'System Admin'
+                ? [{ id: 'admin' as WorkspaceTab, label: 'Admin Settings', icon: Sliders, color: 'text-slate-300' }]
+                : []),
+            ].map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    isActive ? 'text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  {isActive && (
+                    <motion.div
+                      layoutId="mobileActiveTabHighlight"
+                      className="absolute inset-0 bg-slate-800 border border-slate-700 rounded-xl shadow-xs pointer-events-none"
+                      transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                    />
+                  )}
+                  <span className="relative z-10 flex items-center gap-1.5">
+                    <Icon className={`w-3.5 h-3.5 ${tab.color}`} />
+                    <span>{tab.label}</span>
+                    {tab.count !== undefined && (
+                      <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-slate-800 text-slate-200 border border-slate-700">
+                        {tab.count}
+                      </span>
+                    )}
+                  </span>
+                </button>
+              );
+            })}
           </nav>
 
-          <div className="hidden md:flex items-center gap-3">
-            {activeTab === 'documents' ? (
-              <button
-                onClick={() => setActiveTab('analytics')}
-                className="inline-flex items-center gap-1.5 text-xs text-blue-100 hover:text-white bg-[#102e52] hover:bg-[#163d6b] px-3 py-1.5 rounded-xl border border-[#204975] transition-all cursor-pointer"
-              >
-                <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Executive Charts View</span>
-                <ChevronRight className="w-3 h-3 text-blue-300" />
-              </button>
-            ) : (
-              <button
-                onClick={() => setActiveTab('documents')}
-                className="inline-flex items-center gap-1.5 text-xs text-blue-100 hover:text-white bg-[#102e52] hover:bg-[#163d6b] px-3 py-1.5 rounded-xl border border-[#204975] transition-all cursor-pointer"
-              >
-                <FileText className="w-3.5 h-3.5 text-amber-400" />
-                <span>Back to Registry Table</span>
-                <ChevronRight className="w-3 h-3 text-blue-300" />
-              </button>
-            )}
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={() => setIsSheetModalOpen(true)}
+              className="p-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs border border-slate-700 cursor-pointer"
+              title="Google Sheets"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Main Workspace Body */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
-        {activeTab === 'analytics' ? (
+      {/* Main Workspace Frame with Left Vertical Navigation & Sliding Transition */}
+      <div className="flex-1 flex flex-col lg:flex-row min-h-[calc(100vh-65px)] bg-[#f3f6fa] dark:bg-slate-950">
+        {/* Left Vertical Navigation Sidebar (Desktop) */}
+        <div className="hidden lg:flex shrink-0">
+          <VerticalNavigationSidebar
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            documentsCount={documents.length}
+            focalPendingCount={focalPendingCount}
+            overdueCount={overdueCount}
+            activeCount={activeInOfficeCount}
+            clearedCount={clearedForOutCount}
+            isSheetConnected={!!sheetConfig}
+            sheetTitle={sheetConfig?.title}
+            isSyncing={isAutoSyncing}
+            quotaCooldownSeconds={quotaCooldownSeconds}
+            onManualSync={handleManualSync}
+            onOpenSheetModal={() => setIsSheetModalOpen(true)}
+            onOpenRolesModal={() => setIsRolesModalOpen(true)}
+            onOpenThresholdModal={() => setIsThresholdModalOpen(true)}
+            onOpenShortcutsModal={() => setIsShortcutsModalOpen(true)}
+            currentUserRole={currentUser.role}
+            isCollapsed={isSidebarCollapsed}
+            setIsCollapsed={setIsSidebarCollapsed}
+          />
+        </div>
+
+        {/* Dynamic Main Workspace Content with Sliding Transition */}
+        <main className="flex-1 min-w-0 p-3 sm:p-5 lg:p-7 overflow-y-auto">
+          <div className="w-full 2xl:max-w-[1920px] mx-auto">
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={activeTab}
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -20 }}
+                transition={{ duration: 0.22, ease: 'easeOut' }}
+                className="space-y-6"
+              >
+                {activeTab === 'distribution' ? (
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 p-6">
+            <div className="mb-6 border-b border-slate-200 dark:border-slate-800 pb-4">
+              <h2 className="text-xl font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                <Users className="w-6 h-6 text-emerald-500" />
+                Distribution Desk - Focal Personnel
+              </h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                Documents awaiting distribution or assignment by Focal Persons.
+              </p>
+            </div>
+            
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-800 dark:bg-slate-900 text-slate-100 font-bold uppercase tracking-wider text-[11px] border-b border-slate-700 dark:border-slate-800">
+                    <th className="py-3.5 px-4">Tracking Code</th>
+                    <th className="py-3.5 px-4">Title & Classification</th>
+                    <th className="py-3.5 px-4">Focal Person</th>
+                    <th className="py-3.5 px-4">Origin Dept</th>
+                    <th className="py-3.5 px-4 min-w-[200px]">Lifecycle Progress</th>
+                    <th className="py-3.5 px-4 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {documents.filter(d => ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson)).map(doc => (
+                    <tr
+                      key={doc.id}
+                      onClick={() => setSelectedDoc(doc)}
+                      className="hover:bg-blue-50/40 dark:hover:bg-slate-800/70 border-l-4 border-l-transparent hover:border-l-blue-500 transition-all duration-150 cursor-pointer group hover:shadow-sm"
+                    >
+                      <td className="py-3.5 px-4 font-mono text-xs font-semibold text-blue-700 dark:text-blue-400 group-hover:translate-x-0.5 transition-transform">{doc.trackingNumber}</td>
+                      <td className="py-3.5 px-4">
+                        <p className="font-semibold text-slate-900 dark:text-white truncate max-w-[200px] group-hover:text-blue-300 transition-colors">{doc.title}</p>
+                        <p className="text-[11px] text-slate-500">{doc.documentType}</p>
+                      </td>
+                      <td className="py-3.5 px-4 text-sm text-slate-700 dark:text-slate-300 font-medium">{doc.responsiblePerson}</td>
+                      <td className="py-3.5 px-4 text-sm text-slate-600 dark:text-slate-400">{doc.originDepartment}</td>
+                      <td className="py-3.5 px-4">
+                        <DocumentLifecycleProgress document={doc} variant="compact" />
+                      </td>
+                      <td className="py-3.5 px-4 text-right">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedDoc(doc);
+                          }}
+                          className="px-3 py-1.5 bg-blue-100 hover:bg-blue-200 text-blue-800 dark:bg-blue-900/40 dark:hover:bg-blue-800/60 dark:text-blue-200 rounded-lg text-xs font-bold transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-2xs hover:shadow-md"
+                        >
+                          Manage
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {documents.filter(d => ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson)).length === 0 && (
+                     <tr>
+                        <td colSpan={6} className="text-center py-12 text-slate-500">No documents pending distribution for focal persons.</td>
+                     </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : activeTab === 'analytics' ? (
+
           <DocumentAnalyticsDashboard
             documents={documents}
             staffList={staffList}
             onSelectDocument={(doc) => setSelectedDoc(doc)}
           />
+        ) : activeTab === 'links' ? (
+          <DedicatedLinksView
+            links={dedicatedLinks}
+            onAddLink={handleAddDedicatedLink}
+            onUpdateLink={handleUpdateDedicatedLink}
+            onDeleteLink={handleDeleteDedicatedLink}
+            currentUserRole={currentUser?.role || 'Viewer'}
+            currentUserName={currentUser?.name || 'Guest User'}
+            availableDivisions={dropdownOptions.departments}
+          />
+        ) : activeTab === 'admin' ? (
+          <AdminSettingsView
+            timeInDeskConfig={timeInDeskConfig}
+            onSaveConfig={handleSaveThresholdConfig}
+            documents={documents}
+            staffList={staffList}
+            sheetConfig={sheetConfig}
+            onOpenRolesModal={() => setIsRolesModalOpen(true)}
+            onOpenSheetModal={() => setIsSheetModalOpen(true)}
+            availableDivisions={dropdownOptions.departments}
+          />
         ) : (
           <>
-        {/* KPI / Dashboard Summary Cards */}
+        {/* KPI / Dashboard Summary Cards (Executive Professional Color Accents with Rich Hover Effects) */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
           
-          {/* 1. Total Monitored - Royal Blue Theme */}
+          {/* 1. Total Monitored - Royal Blue Accent */}
           <div
             onClick={() => setViewMode('all')}
-            className={`cursor-pointer p-4 rounded-2xl border transition-all ${
+            className={`cursor-pointer p-4 rounded-2xl border transition-all duration-200 group hover:-translate-y-1 active:scale-[0.98] ${
               viewMode === 'all'
-                ? 'bg-white dark:bg-slate-900 border-blue-600 ring-2 ring-blue-500/20 shadow-sm'
-                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-blue-300 dark:hover:border-blue-700 shadow-2xs'
+                ? 'bg-gradient-to-br from-blue-950/90 via-slate-900 to-indigo-950/60 border-blue-500 ring-2 ring-blue-500/40 shadow-xl shadow-blue-950/50'
+                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-blue-500 hover:shadow-lg hover:shadow-blue-950/30'
             }`}
           >
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-blue-900 dark:text-blue-300">Total Monitored</span>
-              <div className="w-8 h-8 rounded-lg bg-blue-50 dark:bg-blue-950 flex items-center justify-center text-blue-700 dark:text-blue-300 border border-blue-100 dark:border-blue-900">
+              <span className="text-xs font-bold text-blue-600 dark:text-blue-400 group-hover:translate-x-0.5 transition-transform">Total Monitored</span>
+              <div className="w-8 h-8 rounded-lg bg-blue-100 dark:bg-blue-900/60 flex items-center justify-center text-blue-600 dark:text-blue-300 border border-blue-200 dark:border-blue-700/60 group-hover:scale-115 group-hover:rotate-6 transition-all duration-200 shadow-2xs group-hover:shadow-blue-500/20">
                 <FileText className="w-4 h-4" />
               </div>
             </div>
-            <p className="text-2xl font-bold text-blue-950 dark:text-white mt-2 tracking-tight">{totalCount}</p>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Registry document archive</p>
+            <p className="text-2xl font-black text-slate-900 dark:text-white mt-2 tracking-tight group-hover:text-blue-500 dark:group-hover:text-blue-300 transition-colors">{totalCount}</p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Dashboard document archive</p>
           </div>
 
-          {/* 2. Active In-Transit - Cyan/Sky Blue Theme */}
+          {/* 2. Ongoing - Warm Amber Accent */}
           <div
             onClick={() => setViewMode('incoming')}
-            className={`cursor-pointer p-4 rounded-2xl border transition-all ${
+            className={`cursor-pointer p-4 rounded-2xl border transition-all duration-200 group hover:-translate-y-1 active:scale-[0.98] ${
               viewMode === 'incoming'
-                ? 'bg-white dark:bg-slate-900 border-sky-600 ring-2 ring-sky-500/20 shadow-sm'
-                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-sky-300 dark:hover:border-sky-700 shadow-2xs'
+                ? 'bg-gradient-to-br from-amber-950/90 via-slate-900 to-yellow-950/60 border-amber-500 ring-2 ring-amber-500/40 shadow-xl shadow-amber-950/50'
+                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-amber-500 hover:shadow-lg hover:shadow-amber-950/30'
             }`}
           >
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-sky-800 dark:text-sky-300">Active In-Transit</span>
-              <div className="w-8 h-8 rounded-lg bg-sky-50 dark:bg-sky-950 flex items-center justify-center text-sky-700 dark:text-sky-300 border border-sky-100 dark:border-sky-800">
+              <span className="text-xs font-bold text-amber-600 dark:text-amber-400 group-hover:translate-x-0.5 transition-transform">Ongoing</span>
+              <div className="w-8 h-8 rounded-lg bg-amber-100 dark:bg-amber-900/60 flex items-center justify-center text-amber-600 dark:text-amber-300 border border-amber-200 dark:border-amber-700/60 group-hover:scale-115 group-hover:rotate-6 transition-all duration-200 shadow-2xs group-hover:shadow-amber-500/20">
                 <Inbox className="w-4 h-4" />
               </div>
             </div>
-            <p className="text-2xl font-bold text-sky-950 dark:text-white mt-2 tracking-tight">{activeInOfficeCount}</p>
+            <p className="text-2xl font-black text-slate-900 dark:text-white mt-2 tracking-tight group-hover:text-amber-500 dark:group-hover:text-amber-300 transition-colors">{activeInOfficeCount}</p>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Under desk routing & action</p>
           </div>
 
-          {/* 3. Supervisor Remarks - Warm Yellow / Amber Theme */}
+          {/* 3. Action Required (Previously With comments from Supervisor) - Violet/Purple Accent */}
           <div
             onClick={() => setViewMode('compliance_needed')}
-            className={`cursor-pointer p-4 rounded-2xl border transition-all ${
+            className={`cursor-pointer p-4 rounded-2xl border transition-all duration-200 group hover:-translate-y-1 active:scale-[0.98] ${
               viewMode === 'compliance_needed'
-                ? 'bg-amber-50/40 dark:bg-amber-950/30 border-amber-500 ring-2 ring-amber-400/30 shadow-sm'
-                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-amber-300 dark:hover:border-amber-700 shadow-2xs'
+                ? 'bg-gradient-to-br from-purple-950/90 via-slate-900 to-fuchsia-950/60 border-purple-500 ring-2 ring-purple-500/40 shadow-xl shadow-purple-950/50'
+                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-purple-500 hover:shadow-lg hover:shadow-purple-950/30'
             }`}
           >
             <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-amber-800 dark:text-amber-300">Supervisor Remarks</span>
-              <div className="w-8 h-8 rounded-lg bg-amber-100/70 dark:bg-amber-950 flex items-center justify-center text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+              <span className="text-xs font-bold text-purple-600 dark:text-purple-400 group-hover:translate-x-0.5 transition-transform">Action Required</span>
+              <div className="w-8 h-8 rounded-lg bg-purple-100 dark:bg-purple-900/60 flex items-center justify-center text-purple-600 dark:text-purple-300 border border-purple-200 dark:border-purple-700/60 group-hover:scale-115 group-hover:rotate-6 transition-all duration-200 shadow-2xs group-hover:shadow-purple-500/20">
                 <AlertCircle className="w-4 h-4" />
               </div>
             </div>
-            <p className="text-2xl font-bold text-amber-950 dark:text-white mt-2 tracking-tight">{pendingComplianceCount}</p>
-            <p className="text-[11px] text-amber-700 dark:text-amber-400 font-medium mt-1">Require staff compliance</p>
+            <p className="text-2xl font-black text-slate-900 dark:text-white mt-2 tracking-tight group-hover:text-purple-500 dark:group-hover:text-purple-300 transition-colors">{pendingComplianceCount}</p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-1">Supervisor notes & compliance</p>
           </div>
 
-          {/* 4. Cleared for Out - Emerald / Forest Green Theme */}
-          <div
-            onClick={() => setViewMode('outgoing')}
-            className={`cursor-pointer p-4 rounded-2xl border transition-all ${
-              viewMode === 'outgoing'
-                ? 'bg-emerald-50/40 dark:bg-emerald-950/30 border-emerald-600 ring-2 ring-emerald-500/20 shadow-sm'
-                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-emerald-300 dark:hover:border-emerald-700 shadow-2xs'
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-emerald-800 dark:text-emerald-300">Cleared for Out</span>
-              <div className="w-8 h-8 rounded-lg bg-emerald-100/70 dark:bg-emerald-950 flex items-center justify-center text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                <ShieldCheck className="w-4 h-4" />
-              </div>
-            </div>
-            <p className="text-2xl font-bold text-emerald-950 dark:text-white mt-2 tracking-tight">{clearedForOutCount}</p>
-            <p className="text-[11px] text-emerald-700 dark:text-emerald-400 font-medium mt-1">Manager sign-off authorized</p>
-          </div>
-
-          {/* 5. Overdue Stay - Warning / Alert */}
+          {/* 4. Overdue Stay - Crimson Rose Accent */}
           <div
             onClick={() => setViewMode(viewMode === 'overdue' ? 'all' : 'overdue')}
-            className={`cursor-pointer p-4 rounded-2xl border transition-all ${
+            className={`cursor-pointer p-4 rounded-2xl border transition-all duration-200 group hover:-translate-y-1 active:scale-[0.98] ${
               viewMode === 'overdue'
-                ? 'bg-white dark:bg-slate-900 border-rose-600 ring-2 ring-rose-500/20 shadow-sm'
+                ? 'bg-gradient-to-br from-rose-950/90 via-slate-900 to-red-950/60 border-rose-500 ring-2 ring-rose-500/40 shadow-xl shadow-rose-950/50'
                 : overdueCount > 0
-                ? 'bg-rose-50/50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900 hover:border-rose-300 shadow-2xs'
-                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 shadow-2xs'
+                ? 'bg-rose-50/50 dark:bg-rose-950/30 border-rose-300 dark:border-rose-800/80 hover:border-rose-500 hover:shadow-lg hover:shadow-rose-950/30 shadow-2xs'
+                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-rose-500 hover:shadow-lg hover:shadow-rose-950/30 shadow-2xs'
             }`}
           >
             <div className="flex items-center justify-between">
-              <span className={`text-xs font-semibold ${overdueCount > 0 ? 'text-rose-700 dark:text-rose-400 font-bold' : 'text-slate-600 dark:text-slate-400'}`}>
+              <span className={`text-xs font-bold group-hover:translate-x-0.5 transition-transform ${overdueCount > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-rose-600/80 dark:text-rose-400/80'}`}>
                 Overdue Stay
               </span>
               <div
-                className={`w-8 h-8 rounded-lg flex items-center justify-center border ${
-                  overdueCount > 0 ? 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-400 border-rose-200 dark:border-rose-800' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700'
+                className={`w-8 h-8 rounded-lg flex items-center justify-center border group-hover:scale-115 group-hover:rotate-6 transition-all duration-200 ${
+                  overdueCount > 0
+                    ? 'bg-rose-100 dark:bg-rose-900/70 text-rose-600 dark:text-rose-300 border-rose-300 dark:border-rose-700 shadow-2xs group-hover:shadow-rose-500/20'
+                    : 'bg-rose-50 dark:bg-rose-950/40 text-rose-500 dark:text-rose-400 border-rose-200 dark:border-rose-800/50'
                 }`}
               >
                 <Timer className="w-4 h-4" />
               </div>
             </div>
-            <p className={`text-2xl font-bold mt-2 tracking-tight ${overdueCount > 0 ? 'text-rose-700 dark:text-rose-400' : 'text-slate-900 dark:text-white'}`}>
+            <p className="text-2xl font-black mt-2 tracking-tight text-slate-900 dark:text-white group-hover:text-rose-500 dark:group-hover:text-rose-300 transition-colors">
               {overdueCount}
             </p>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-              {overdueCount > 0 ? 'Exceeded desk threshold' : 'All desks within SLA'}
+              {overdueCount > 0 ? 'Exceeded desk SLA threshold' : 'All desks within SLA'}
             </p>
+          </div>
+
+          {/* 5. Cleared for Out - Mint Emerald Accent */}
+          <div
+            onClick={() => setViewMode('outgoing')}
+            className={`cursor-pointer p-4 rounded-2xl border transition-all duration-200 group hover:-translate-y-1 active:scale-[0.98] ${
+              viewMode === 'outgoing'
+                ? 'bg-gradient-to-br from-emerald-950/90 via-slate-900 to-teal-950/60 border-emerald-500 ring-2 ring-emerald-500/40 shadow-xl shadow-emerald-950/50'
+                : 'bg-white dark:bg-slate-900 border-slate-200/90 dark:border-slate-800 hover:border-emerald-500 hover:shadow-lg hover:shadow-emerald-950/30'
+            }`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 group-hover:translate-x-0.5 transition-transform">Cleared for Out</span>
+              <div className="w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-900/60 flex items-center justify-center text-emerald-600 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-700/60 group-hover:scale-115 group-hover:rotate-6 transition-all duration-200 shadow-2xs group-hover:shadow-emerald-500/20">
+                <ShieldCheck className="w-4 h-4" />
+              </div>
+            </div>
+            <p className="text-2xl font-black text-slate-900 dark:text-white mt-2 tracking-tight group-hover:text-emerald-500 dark:group-hover:text-emerald-300 transition-colors">{clearedForOutCount}</p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium mt-1">Manager sign-off authorized</p>
           </div>
 
         </div>
 
-        {/* Google Sheet Sync Alert Ribbon (if connected) - Green & Blue Accent */}
+        {/* Google Sheet Sync Alert Ribbon (if connected) - Professional Slate Theme */}
         {sheetConfig && (
-          <div className="bg-white dark:bg-slate-900 border border-emerald-400/80 dark:border-emerald-700 rounded-xl px-4 py-2.5 flex items-center justify-between gap-3 text-xs text-slate-800 dark:text-slate-200 shadow-2xs transition-colors">
-            <div className="flex items-center gap-2 truncate">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 animate-pulse"></div>
-              <span className="font-bold text-slate-900 dark:text-white">Google Sheet Active Sync:</span>
-              <span className="text-slate-600 dark:text-slate-400 truncate">Records auto-synchronizing with "{sheetConfig.sheetName}"</span>
+          <div className="bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs transition-colors text-slate-800 dark:text-slate-200">
+            <div className="flex items-center gap-2.5 truncate">
+              <div className="w-2.5 h-2.5 rounded-full shrink-0 bg-slate-500 animate-pulse" />
+              <div className="flex items-center gap-2 truncate">
+                <span className="font-bold text-slate-900 dark:text-white">
+                  Google Sheet Connected:
+                </span>
+                <span className="text-slate-600 dark:text-slate-400 truncate">
+                  {sheetConfig.sheetName || 'Master Tracking'} ({documents.length} doc{documents.length === 1 ? '' : 's'} in registry)
+                </span>
+              </div>
+              {(hasPendingSyncRef.current || safeStorageGet('possd_has_unpushed_changes') === 'true') && (
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 shrink-0">
+                  Unpushed Changes
+                </span>
+              )}
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2.5 shrink-0">
               <button
-                onClick={async () => {
-                  if (token && sheetConfig) {
-                    await syncAllDocumentsToSheet(token, sheetConfig.spreadsheetId, documents, staffList);
-                    addNotification('Sheet Re-synced', 'Pushed latest registry rows to Google Sheet', currentUser.name, 'sync', 'SYNC');
-                  }
-                }}
-                className="inline-flex items-center gap-1 font-semibold text-blue-700 dark:text-blue-400 hover:text-blue-900 dark:hover:text-blue-200 cursor-pointer"
+                id="ribbon-push-all-btn"
+                onClick={handlePushAllNow}
+                disabled={isPushingAll || isAutoSyncing}
+                title="Force push all document registry rows to the linked Google Sheet"
+                className="inline-flex items-center gap-1.5 font-bold cursor-pointer transition-colors px-2.5 py-1 rounded-lg text-xs disabled:opacity-50 bg-slate-800 hover:bg-slate-700 text-white shadow-2xs"
               >
-                <RefreshCw className="w-3.5 h-3.5" /> Push All
+                <RefreshCw className={`w-3.5 h-3.5 ${isPushingAll ? 'animate-spin' : ''}`} />
+                {isPushingAll ? 'Pushing All...' : 'Push All'}
               </button>
               <span className="text-slate-300 dark:text-slate-700">|</span>
               <a
                 href={sheetConfig.spreadsheetUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-1 font-semibold text-emerald-700 dark:text-emerald-400 hover:text-emerald-900 dark:hover:text-emerald-200"
+                className="inline-flex items-center gap-1 font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
               >
                 Open File <ExternalLink className="w-3 h-3" />
               </a>
@@ -1023,15 +1897,22 @@ export default function App() {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search tracking number, subject, originating department, custodian..."
-                className="w-full pl-10 pr-4 py-2.5 text-xs rounded-xl border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 bg-slate-50/50 dark:bg-slate-800/80"
+                className="w-full pl-10 pr-4 py-2.5 text-xs rounded-xl border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-slate-500 bg-slate-50/50 dark:bg-slate-800/80"
               />
-              {searchQuery && (
+              {searchQuery ? (
                 <button
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xs"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xs cursor-pointer"
+                  title="Clear search"
                 >
                   ✕
                 </button>
+              ) : (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:flex items-center gap-1 pointer-events-none">
+                  <kbd className="px-1.5 py-0.5 text-[9.5px] font-mono text-slate-400 dark:text-slate-500 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded shadow-2xs">
+                    /
+                  </kbd>
+                </div>
               )}
             </div>
 
@@ -1039,11 +1920,11 @@ export default function App() {
             <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 text-xs">
               <span className="text-[11px] text-slate-400 dark:text-slate-500 font-semibold uppercase tracking-wider whitespace-nowrap mr-1">Filter:</span>
               {[
-                { id: 'ALL', label: 'All Status', activeClass: 'bg-[#0c2340] dark:bg-blue-600 text-white border-[#0c2340] dark:border-blue-600' },
-                { id: 'Incoming Logged', label: 'Incoming', activeClass: 'bg-blue-600 text-white border-blue-600' },
-                { id: 'Under Review', label: 'In Review', activeClass: 'bg-sky-600 text-white border-sky-600' },
-                { id: 'Supervisor Comment Needed', label: 'Remarks', activeClass: 'bg-amber-500 text-amber-950 font-bold border-amber-500' },
-                { id: 'Cleared for Out', label: 'Cleared Out', activeClass: 'bg-emerald-600 text-white border-emerald-600' },
+                { id: 'ALL', label: 'All Status', activeClass: 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-900 dark:border-slate-100' },
+                { id: 'Incoming Logged', label: 'Incoming', activeClass: 'bg-slate-800 text-white border-slate-800' },
+                { id: 'Under Review', label: 'In Review', activeClass: 'bg-slate-700 text-white border-slate-700' },
+                { id: 'Supervisor Comment Needed', label: 'Remarks', activeClass: 'bg-slate-800 text-white border-slate-800 font-bold' },
+                { id: 'Cleared for Out', label: 'Cleared Out', activeClass: 'bg-slate-800 text-white border-slate-800' },
               ].map((s) => (
                 <button
                   key={s.id}
@@ -1069,7 +1950,7 @@ export default function App() {
                 <select
                   value={priorityFilter}
                   onChange={(e) => setPriorityFilter(e.target.value)}
-                  className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1 font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-600 cursor-pointer"
+                  className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1 font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-slate-500 cursor-pointer"
                 >
                   <option value="ALL">All Priorities</option>
                   <option value="Routine">Routine</option>
@@ -1083,7 +1964,7 @@ export default function App() {
                 <select
                   value={divisionFilter}
                   onChange={(e) => setDivisionFilter(e.target.value)}
-                  className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1 font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-600 max-w-[220px] cursor-pointer"
+                  className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1 font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-slate-500 max-w-[220px] cursor-pointer"
                 >
                   <option value="ALL">All Divisions</option>
                   {dropdownOptions.departments.length > 0 ? (
@@ -1104,16 +1985,6 @@ export default function App() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
-              <button
-                id="open-analytics-from-toolbar-btn"
-                onClick={() => setActiveTab('analytics')}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300 bg-blue-50/70 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/60 text-[11px] font-semibold transition-colors cursor-pointer shadow-2xs"
-                title="View department volume and priority processing time charts"
-              >
-                <BarChart3 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                <span>Executive Charts View</span>
-              </button>
-
               {canDeleteLogs ? (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900 text-[11px] font-semibold shadow-2xs">
                   <Trash2 className="w-3 h-3 text-rose-600 dark:text-rose-400 shrink-0" />
@@ -1125,42 +1996,242 @@ export default function App() {
                   <span>Log Deletion: System Admin & Dept Mgr Only</span>
                 </span>
               )}
-              <div className="text-slate-500 dark:text-slate-400 text-xs font-medium">
-                Showing <strong className="text-slate-900 dark:text-white">{filteredDocuments.length}</strong> of {totalCount} records
+              <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs font-medium">
+                <span>
+                  Showing <strong className="text-slate-900 dark:text-white">{sortedDocuments.length}</strong> of {totalCount} records
+                </span>
+                <span className="text-slate-300 dark:text-slate-700">|</span>
+                <button
+                  onClick={() => setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'))}
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 cursor-pointer transition-colors"
+                  title="Click to toggle ascending/descending order"
+                >
+                  <span className="text-slate-500 dark:text-slate-400 font-normal">Sorted by:</span>
+                  <span>
+                    {sortField === 'trackingNumber' && 'Tracking Code'}
+                    {sortField === 'title' && 'Title'}
+                    {sortField === 'dateReceived' && 'Date Inflow'}
+                    {sortField === 'targetDivision' && 'Forwarded To'}
+                    {sortField === 'currentCustodian' && 'Custodian'}
+                    {sortField === 'timeInDesk' && 'Time in Desk'}
+                    {sortField === 'lifecycle' && 'Lifecycle Status'}
+                  </span>
+                  {sortDirection === 'asc' ? (
+                    <ArrowUp className="w-3 h-3 text-slate-600 dark:text-slate-300 stroke-[2.5]" />
+                  ) : (
+                    <ArrowDown className="w-3 h-3 text-slate-600 dark:text-slate-300 stroke-[2.5]" />
+                  )}
+                </button>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Documents Table View - Professional Blue, Green, Yellow & White Theme */}
+        {/* Documents Table View - Professional Monochrome Slate Theme */}
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-2xs overflow-hidden transition-colors">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
-                <tr className="bg-[#0c2847] dark:bg-slate-950 text-white font-bold uppercase tracking-wider text-[11px] border-b border-[#1b3d64] dark:border-slate-800">
-                  <th className="py-3.5 px-4">Tracking Code</th>
-                  <th className="py-3.5 px-4">Title & Classification</th>
-                  <th className="py-3.5 px-4">Origin & Time Inflow</th>
-                  <th className="py-3.5 px-4">Forwarded To & Officer</th>
-                  <th className="py-3.5 px-4">Current Desk & Custodian</th>
-                  <th className="py-3.5 px-4">Time in Desk</th>
-                  <th className="py-3.5 px-4">Lifecycle Status</th>
-                  <th className="py-3.5 px-4 text-right">Actions</th>
+                <tr className="bg-slate-900 dark:bg-slate-950 text-white font-bold uppercase tracking-wider text-[11px] border-b border-slate-800">
+                  {/* Tracking Code */}
+                  <th
+                    scope="col"
+                    aria-sort={sortField === 'trackingNumber' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    onClick={() => handleSort('trackingNumber')}
+                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                      sortField === 'trackingNumber'
+                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                    }`}
+                    title={sortField === 'trackingNumber' ? `Sorted by Tracking Code (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Tracking Code'}
+                  >
+                    <div className="inline-flex items-center gap-1.5">
+                      <span>Tracking Code</span>
+                      {sortField === 'trackingNumber' ? (
+                        sortDirection === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
+                      )}
+                    </div>
+                  </th>
+
+                  {/* Title & Classification */}
+                  <th
+                    scope="col"
+                    aria-sort={sortField === 'title' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    onClick={() => handleSort('title')}
+                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                      sortField === 'title'
+                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                    }`}
+                    title={sortField === 'title' ? `Sorted by Title (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Title & Classification'}
+                  >
+                    <div className="inline-flex items-center gap-1.5">
+                      <span>Title &amp; Classification</span>
+                      {sortField === 'title' ? (
+                        sortDirection === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
+                      )}
+                    </div>
+                  </th>
+
+                  {/* Origin & Time Inflow */}
+                  <th
+                    scope="col"
+                    aria-sort={sortField === 'dateReceived' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    onClick={() => handleSort('dateReceived')}
+                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                      sortField === 'dateReceived'
+                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                    }`}
+                    title={sortField === 'dateReceived' ? `Sorted by Date Received (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Origin & Date Inflow'}
+                  >
+                    <div className="inline-flex items-center gap-1.5">
+                      <span>Origin &amp; Time Inflow</span>
+                      {sortField === 'dateReceived' ? (
+                        sortDirection === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
+                      )}
+                    </div>
+                  </th>
+
+                  {/* Forwarded To & Officer */}
+                  <th
+                    scope="col"
+                    aria-sort={sortField === 'targetDivision' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    onClick={() => handleSort('targetDivision')}
+                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                      sortField === 'targetDivision'
+                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                    }`}
+                    title={sortField === 'targetDivision' ? `Sorted by Forwarded Division (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Forwarded Division & Officer'}
+                  >
+                    <div className="inline-flex items-center gap-1.5">
+                      <span>Forwarded To &amp; Officer</span>
+                      {sortField === 'targetDivision' ? (
+                        sortDirection === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
+                      )}
+                    </div>
+                  </th>
+
+                  {/* Current Custodian */}
+                  <th
+                    scope="col"
+                    aria-sort={sortField === 'currentCustodian' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    onClick={() => handleSort('currentCustodian')}
+                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                      sortField === 'currentCustodian'
+                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                    }`}
+                    title={sortField === 'currentCustodian' ? `Sorted by Current Custodian (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Current Custodian'}
+                  >
+                    <div className="inline-flex items-center gap-1.5">
+                      <span>Current Custodian</span>
+                      {sortField === 'currentCustodian' ? (
+                        sortDirection === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
+                      )}
+                    </div>
+                  </th>
+
+                  {/* Time in Desk */}
+                  <th
+                    scope="col"
+                    aria-sort={sortField === 'timeInDesk' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    onClick={() => handleSort('timeInDesk')}
+                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                      sortField === 'timeInDesk'
+                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                    }`}
+                    title={sortField === 'timeInDesk' ? `Sorted by Time in Desk (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Time in Desk'}
+                  >
+                    <div className="inline-flex items-center gap-1.5">
+                      <span>Time in Desk</span>
+                      {sortField === 'timeInDesk' ? (
+                        sortDirection === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
+                      )}
+                    </div>
+                  </th>
+
+                  {/* Lifecycle Progress */}
+                  <th
+                    scope="col"
+                    aria-sort={sortField === 'lifecycle' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    onClick={() => handleSort('lifecycle')}
+                    className={`py-3.5 px-4 min-w-[210px] cursor-pointer select-none group transition-colors ${
+                      sortField === 'lifecycle'
+                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                    }`}
+                    title={sortField === 'lifecycle' ? `Sorted by Lifecycle Progress (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Lifecycle Progress'}
+                  >
+                    <div className="inline-flex items-center gap-1.5">
+                      <span>Lifecycle Progress</span>
+                      {sortField === 'lifecycle' ? (
+                        sortDirection === 'asc' ? (
+                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        ) : (
+                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
+                        )
+                      ) : (
+                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
+                      )}
+                    </div>
+                  </th>
+
+                  {/* Actions Column (Non-sortable) */}
+                  <th scope="col" className="py-3.5 px-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {filteredDocuments.length === 0 ? (
+                {sortedDocuments.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="text-center py-12 text-slate-500 dark:text-slate-400">
                       <Inbox className="w-8 h-8 text-slate-300 dark:text-slate-600 mx-auto mb-2" />
                       <p className="font-bold text-slate-800 dark:text-slate-200">No documents match filter criteria.</p>
                       <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-                        Reset filters or click "Log Incoming" to register a new record.
+                        Reset filters or click "Log Document" to register a new record.
                       </p>
                     </td>
                   </tr>
                 ) : (
-                  filteredDocuments.map((doc) => {
+                  sortedDocuments.map((doc) => {
                     const hasPendingRemarks = doc.supervisorRemarks?.some(
                       (r) => r.complianceRequired && !r.complied
                     );
@@ -1174,19 +2245,19 @@ export default function App() {
                       <tr
                         key={doc.id}
                         onClick={() => setSelectedDoc(doc)}
-                        className={`transition-colors cursor-pointer group ${
+                        className={`transition-all duration-150 cursor-pointer group border-l-4 ${
                           shouldHighlightOverdue
-                            ? 'bg-rose-50/70 dark:bg-rose-950/40 hover:bg-rose-100/80 dark:hover:bg-rose-950/60 border-l-4 border-l-rose-500'
-                            : 'hover:bg-blue-50/40 dark:hover:bg-slate-800/60'
+                            ? 'bg-rose-50/70 dark:bg-rose-950/40 hover:bg-rose-100/90 dark:hover:bg-rose-900/40 border-l-rose-500 shadow-2xs hover:shadow-md'
+                            : 'border-l-transparent hover:border-l-blue-500 hover:bg-blue-50/50 dark:hover:bg-slate-800/80 shadow-2xs hover:shadow-md'
                         }`}
                       >
                         {/* Tracking # & Priority */}
                         <td className="py-3.5 px-4 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
-                          <span className="group-hover:text-blue-700 dark:group-hover:text-blue-400 transition-colors">
+                          <span className="group-hover:text-blue-600 dark:group-hover:text-blue-400 group-hover:translate-x-0.5 inline-block transition-all duration-150">
                             {doc.trackingNumber}
                           </span>
                           <span
-                            className={`inline-block ml-2 px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                            className={`inline-block ml-2 px-1.5 py-0.2 rounded text-[10px] font-bold transition-transform duration-150 group-hover:scale-105 ${
                               doc.priority === 'Rush'
                                 ? 'bg-rose-100 dark:bg-rose-950/80 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
                                 : doc.priority === 'Urgent'
@@ -1201,7 +2272,7 @@ export default function App() {
                         {/* Title & Type */}
                         <td className="py-3.5 px-4 max-w-xs">
                           <div className="flex items-center gap-1.5">
-                            <p className="font-bold text-slate-900 dark:text-white line-clamp-1 group-hover:text-blue-900 dark:group-hover:text-blue-300">
+                            <p className="font-bold text-slate-900 dark:text-white line-clamp-1 group-hover:text-blue-700 dark:group-hover:text-blue-300 transition-colors">
                               {doc.title}
                             </p>
                             {doc.fileLink && (
@@ -1210,15 +2281,15 @@ export default function App() {
                                 target="_blank"
                                 rel="noreferrer"
                                 onClick={(e) => e.stopPropagation()}
-                                className="inline-flex items-center gap-0.5 p-1 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 bg-blue-50 dark:bg-blue-950/80 hover:bg-blue-100 dark:hover:bg-blue-900 rounded-md shrink-0 transition-colors"
+                                className="inline-flex items-center gap-0.5 p-1 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 bg-blue-50 dark:bg-blue-950/80 hover:bg-blue-100 dark:hover:bg-blue-900 rounded-md shrink-0 transition-all hover:scale-115 active:scale-95 shadow-2xs hover:shadow-xs"
                                 title="Open attached cloud file / drive link"
                               >
                                 <Link2 className="w-3.5 h-3.5" />
                               </a>
                             )}
                           </div>
-                          <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 block">
-                            {doc.documentType}
+                          <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 block max-w-xs truncate" title={`${doc.communicationType} | ${doc.reportType} | ${doc.documentType}`}>
+                            {doc.communicationType} &bull; {doc.reportType} &bull; {doc.documentType}
                           </span>
                         </td>
 
@@ -1249,12 +2320,9 @@ export default function App() {
                         {/* Current Location & Custodian */}
                         <td className="py-3.5 px-4">
                           <div className="flex items-center gap-1 text-slate-800 dark:text-slate-200 font-semibold">
-                            <MapPin className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                            <span className="truncate max-w-[160px]">{doc.currentLocation}</span>
-                          </div>
-                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 pl-4.5 truncate">
-                            Holder: {doc.currentCustodian}
-                          </p>
+  <Users className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+  <span className="truncate max-w-[160px]">{doc.currentCustodian}</span>
+</div>
                         </td>
 
                         {/* Time in Desk / Dwell SLA */}
@@ -1272,7 +2340,7 @@ export default function App() {
                           ) : isOverdue ? (
                             <div className="flex flex-col">
                               <span className="inline-flex items-center gap-1 font-mono text-xs font-bold text-rose-700 dark:text-rose-400">
-                                <AlertTriangle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0 animate-pulse" />
+                                <AlertTriangle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0" />
                                 {timeMetrics.elapsedFormatted}
                               </span>
                               <span className="text-[10px] text-rose-600 dark:text-rose-400 font-semibold mt-0.5">
@@ -1292,35 +2360,9 @@ export default function App() {
                           )}
                         </td>
 
-                        {/* Status & Indicators */}
+                        {/* Status & Lifecycle Progress Bar */}
                         <td className="py-3.5 px-4">
-                          <span
-                            className={`inline-block px-2.5 py-0.8 rounded-full font-bold text-[11px] border whitespace-nowrap ${
-                              isCleared
-                                ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
-                                : hasPendingRemarks
-                                ? 'bg-amber-50 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-800'
-                                : doc.currentStatus === 'Under Review'
-                                ? 'bg-blue-50 dark:bg-blue-950 text-blue-800 dark:text-blue-300 border-blue-200 dark:border-blue-800'
-                                : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                            }`}
-                          >
-                            {isCleared ? 'Cleared for Out' : doc.currentStatus}
-                          </span>
-
-                          {/* Secondary badges for remarks / compliance */}
-                          <div className="flex items-center gap-1 mt-1">
-                            {hasPendingRemarks && (
-                              <span className="text-[10px] text-amber-800 dark:text-amber-400 font-semibold flex items-center gap-0.5">
-                                <AlertCircle className="w-2.5 h-2.5" /> Supervisor compliance
-                              </span>
-                            )}
-                            {doc.movements?.length > 1 && (
-                              <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                                ({doc.movements.length} movements)
-                              </span>
-                            )}
-                          </div>
+                          <DocumentLifecycleProgress document={doc} variant="compact" />
                         </td>
 
                         {/* Action Link & Deletion */}
@@ -1335,7 +2377,7 @@ export default function App() {
                                   e.stopPropagation();
                                   setDocToDelete(doc);
                                 }}
-                                className="inline-flex items-center justify-center w-7 h-7 rounded-lg border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 hover:border-rose-300 dark:hover:border-rose-700 transition-colors shadow-2xs cursor-pointer"
+                                className="inline-flex items-center justify-center w-7 h-7 rounded-lg border border-rose-200 dark:border-rose-800 text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 hover:border-rose-300 dark:hover:border-rose-700 transition-all duration-150 hover:scale-110 active:scale-95 shadow-2xs hover:shadow-sm cursor-pointer"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
@@ -1354,10 +2396,10 @@ export default function App() {
                                 e.stopPropagation();
                                 setSelectedDoc(doc);
                               }}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800 text-xs font-semibold text-blue-800 dark:text-blue-300 bg-white dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-slate-700 hover:border-blue-300 dark:hover:border-blue-700 transition-colors shadow-2xs cursor-pointer"
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800 text-xs font-semibold text-blue-800 dark:text-blue-300 bg-white dark:bg-slate-800 hover:bg-blue-50 dark:hover:bg-slate-700 hover:border-blue-300 dark:hover:border-blue-600 transition-all duration-150 hover:scale-105 active:scale-95 shadow-2xs hover:shadow-md cursor-pointer group/btn"
                             >
                               <span>Open Route</span>
-                              <ChevronRight className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400" />
+                              <ChevronRight className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 group-hover/btn:translate-x-0.5 transition-transform" />
                             </button>
                           </div>
                         </td>
@@ -1371,7 +2413,11 @@ export default function App() {
         </div>
           </>
         )}
-      </main>
+              </motion.div>
+            </AnimatePresence>
+          </div>
+        </main>
+      </div>
 
       {/* Modal: Login / Authentication */}
       <LoginModal
@@ -1442,6 +2488,7 @@ export default function App() {
         onSubmit={handleCreateDocument}
         currentUser={currentUser}
         availableDivisions={dropdownOptions.departments}
+        dropdownOptions={dropdownOptions}
         timeInDeskConfig={timeInDeskConfig}
       />
 
@@ -1506,6 +2553,12 @@ export default function App() {
             broadcastDataUpdate('staff', pulledStaff);
           }
         }}
+      />
+
+      {/* Modal: Keyboard Shortcuts Guide */}
+      <KeyboardShortcutsModal
+        isOpen={isShortcutsModalOpen}
+        onClose={() => setIsShortcutsModalOpen(false)}
       />
 
       {/* Modal: Delete Document Confirmation (System Admin & Department Manager) */}

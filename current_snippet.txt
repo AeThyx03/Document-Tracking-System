@@ -1,0 +1,16 @@
+    const documentType = row[4] ? String(row[4]).trim() : 'Simple Transaction';
+
+    const originDepartment = row[5] ? row[5].trim() : 'External Origin';
+    const dateReceived = row[6] ? row[6].trim() : new Date().toISOString().slice(0, 10);
+    const timeReceived = row[7] ? row[7].trim() : '08:00';
+    const targetDivision = row[8] ? row[8].trim() : 'Central Records';
+    const responsiblePerson = row[9] ? row[9].trim() : 'Unassigned';
+    const currentStatus = (row[10] ? row[10].trim() : 'Incoming Logged') as any;
+    const currentLocation = row[11] ? row[11].trim() : 'Receiving Station';
+    const currentCustodian = row[12] ? row[12].trim() : responsiblePerson;
+
+    // Clearance
+    const clearanceStr = row[16] || '';
+    const isCleared = clearanceStr.startsWith('CLEARED');
+    const clearedBy = row[17] ? row[17].trim() : undefined;
+    const clearedAt = row[18] ? new Date(row[18]).toISOString() : undefined;

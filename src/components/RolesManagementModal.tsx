@@ -366,7 +366,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     onUpdateDropdownOptions({
       roles: [],
       departments: [],
-      desks: [],
+      desks: [], documentTypes: [], communicationTypes: [], reportTypes: [],
     });
     setIsConfirmingClearAll(false);
     showFeedback('All custom entries cleared. System fallback defaults restored.');
@@ -536,22 +536,22 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       <div className="bg-white dark:bg-slate-900 w-full max-w-4xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[92vh] flex flex-col animate-in fade-in zoom-in-95 duration-150">
         
         {/* Modal Header */}
-        <div className="px-6 py-4 bg-[#0c2340] dark:bg-[#071526] border-b border-[#1b3d64] dark:border-slate-800 text-white flex items-center justify-between">
+        <div className="px-6 py-4 bg-slate-900 border-b border-slate-800 text-white flex items-center justify-between">
           <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-sm ring-1 ring-amber-400/50">
+            <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-sm ring-1 ring-slate-400">
               <PossdLogo className="w-8 h-8" variant="black" />
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-bold text-white tracking-tight">Staff Roles & Personnel Registry</h2>
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-200 border border-blue-500/30 font-medium">
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-200 border border-slate-700 font-medium">
                   {staffList.length} Personnel
                 </span>
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-200 border border-slate-700 font-medium">
                   {totalConfiguredEntries} Dropdown Entries
                 </span>
               </div>
-              <p className="text-xs text-blue-200 dark:text-blue-300/80 mt-0.5">
+              <p className="text-xs text-slate-300 mt-0.5">
                 Manage staff members, configure login credentials, customize dropdown options, and assign administrative roles.
               </p>
             </div>
@@ -1406,7 +1406,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                               ) : (
                                 <X className="w-3 h-3 text-slate-300 dark:text-slate-600 shrink-0" />
                               )}
-                              <span>Log Incoming</span>
+                              <span>Log Document</span>
                             </span>
                             <span className="flex items-center gap-1">
                               {activeConfig.canRecordMovement ? (
@@ -1843,7 +1843,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                             <Lock className="w-3.5 h-3.5 text-slate-300 dark:text-slate-600 shrink-0" />
                           )}
                           <span className={cfg.canLogIncoming ? 'text-slate-700 dark:text-slate-300 font-medium' : 'text-slate-400 dark:text-slate-600'}>
-                            Log Incoming
+                            Log Document
                           </span>
                         </div>
 

@@ -1,0 +1,6 @@
+
+> react-example@0.0.0 lint
+> tsc --noEmit
+
+src/mockData.ts(466,7): error TS2741: Property 'personnel' is missing in type '{ roles: any; departments: any; desks: any; documentTypes: any; communicationTypes: any; reportTypes: any; }' but required in type 'RegistryDropdownOptions'.
+src/mockData.ts(478,3): error TS2741: Property 'personnel' is missing in type '{ roles: string[]; departments: string[]; desks: undefined[]; documentTypes: string[]; communicationTypes: string[]; reportTypes: string[]; }' but required in type 'RegistryDropdownOptions'.
