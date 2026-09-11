@@ -172,13 +172,13 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
 
       // Search query
       if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase();
-        const matchesActor = ev.actorName.toLowerCase().includes(query);
-        const matchesAction = ev.actionTitle.toLowerCase().includes(query);
-        const matchesNotes = ev.notes?.toLowerCase().includes(query);
+        const query = (searchQuery || '').toLowerCase();
+        const matchesActor = (ev.actorName || '').toLowerCase().includes(query);
+        const matchesAction = (ev.actionTitle || '').toLowerCase().includes(query);
+        const matchesNotes = (ev.notes || '').toLowerCase().includes(query);
         const matchesDesks =
-          ev.fromDesk?.toLowerCase().includes(query) || ev.toDesk?.toLowerCase().includes(query);
-        const matchesRole = ev.actorRole.toLowerCase().includes(query);
+          (ev.fromDesk || '').toLowerCase().includes(query) || (ev.toDesk || '').toLowerCase().includes(query);
+        const matchesRole = (ev.actorRole || '').toLowerCase().includes(query);
         return matchesActor || matchesAction || matchesNotes || matchesDesks || matchesRole;
       }
 

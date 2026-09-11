@@ -182,10 +182,10 @@ export async function ensureSpreadsheetStructure(
   const sheets: Array<{ properties: { sheetId: number; title: string; index: number } }> = meta.sheets || [];
 
   let masterSheet = sheets.find(
-    (s) => s.properties?.title?.trim().toLowerCase() === preferredMasterName.toLowerCase()
+    (s) => s.properties?.title?.trim().toLowerCase() === (preferredMasterName || '').toLowerCase()
   );
   let personnelSheet = sheets.find(
-    (s) => s.properties?.title?.trim().toLowerCase() === PERSONNEL_TAB_NAME.toLowerCase()
+    (s) => s.properties?.title?.trim().toLowerCase() === (PERSONNEL_TAB_NAME || '').toLowerCase()
   );
 
   const batchRequests: any[] = [];
@@ -269,11 +269,11 @@ export async function ensureSpreadsheetStructure(
         refreshMeta.sheets || [];
       masterSheet =
         updatedSheets.find(
-          (s) => s.properties?.title?.trim().toLowerCase() === MASTER_TAB_NAME.toLowerCase()
+          (s) => s.properties?.title?.trim().toLowerCase() === (MASTER_TAB_NAME || '').toLowerCase()
         ) || masterSheet;
       personnelSheet =
         updatedSheets.find(
-          (s) => s.properties?.title?.trim().toLowerCase() === PERSONNEL_TAB_NAME.toLowerCase()
+          (s) => s.properties?.title?.trim().toLowerCase() === (PERSONNEL_TAB_NAME || '').toLowerCase()
         ) || personnelSheet;
     }
   }
@@ -421,7 +421,7 @@ export function formatPersonnelRow(person: AppUserRole, documents: DocumentItem[
     0
   );
 
-  const fallbackUsername = person.name.toLowerCase().replace(/[^a-z0-9]/g, '.');
+  const fallbackUsername = (person.name || '').toLowerCase().replace(/[^a-z0-9]/g, '.');
   const fallbackPassword = person.role === 'System Admin' ? 'admin123' : 'password123';
 
   return [
@@ -458,7 +458,7 @@ export function parsePersonnelRow(row: string[], idx: number): AppUserRole | nul
     password = row[7] ? row[7].trim() : 'password123';
     status = (row[8] && row[8].trim() === 'suspended') ? 'suspended' : 'active';
   } else {
-    username = name.toLowerCase().replace(/[^a-z0-9]/g, '.');
+    username = (name || '').toLowerCase().replace(/[^a-z0-9]/g, '.');
     password = role === 'System Admin' ? 'admin123' : 'password123';
     status = 'active';
   }
@@ -765,7 +765,7 @@ export async function pullPersonnelFromSheet(
 }
 
 export function parseMovementsSummaryFromSheet(summary: string, baseDate: string): InternalMovement[] {
-  if (!summary || summary.trim() === '' || summary.toLowerCase().includes('no movements')) {
+  if (!summary || summary.trim() === '' || (summary || '').toLowerCase().includes('no movements')) {
     return [];
   }
   const parts = summary.split(' | ');
@@ -810,7 +810,7 @@ export function parseMovementsSummaryFromSheet(summary: string, baseDate: string
 }
 
 export function parseRemarksSummaryFromSheet(summary: string, baseDate: string): SupervisorRemark[] {
-  if (!summary || summary.trim() === '' || summary.toLowerCase().includes('no remarks')) {
+  if (!summary || summary.trim() === '' || (summary || '').toLowerCase().includes('no remarks')) {
     return [];
   }
   const parts = summary.split(' | ');
@@ -893,7 +893,7 @@ export function parseDocumentRow(row: string[], idx: number): DocumentItem | nul
   } else if (rawDocType.startsWith('Incoming - ')) {
     direction = 'Incoming';
     documentType = rawDocType.replace('Incoming - ', '');
-  } else if (rawDocType.toLowerCase().includes('outgoing')) {
+  } else if ((rawDocType || '').toLowerCase().includes('outgoing')) {
     direction = 'Outgoing';
   }
 

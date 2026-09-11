@@ -80,6 +80,10 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
   const [confirmPrompt, setConfirmPrompt] = useState<{ open: boolean; action: () => Promise<void>; description: string } | null>(null);
   const [staySignedIn, setStaySignedInState] = useState<boolean>(() => getStaySignedIn());
 
+  const [appsScriptUrlInput, setAppsScriptUrlInput] = useState<string>(sheetConfig?.appsScriptUrl || '');
+  const [copiedScript, setCopiedScript] = useState(false);
+  const [showAppsScriptPanel, setShowAppsScriptPanel] = useState(false);
+
   if (!isOpen) return null;
 
   const handleToggleStaySignedIn = (checked: boolean) => {
@@ -140,10 +144,6 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
       },
     });
   };
-
-  const [appsScriptUrlInput, setAppsScriptUrlInput] = useState<string>(sheetConfig?.appsScriptUrl || '');
-  const [copiedScript, setCopiedScript] = useState(false);
-  const [showAppsScriptPanel, setShowAppsScriptPanel] = useState(false);
 
   const handleCopyScriptCode = () => {
     const code = getAppsScriptTemplateCode();

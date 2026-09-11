@@ -98,6 +98,22 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
   showLabels = true,
 }) => {
   const stage = getLifecycleStage(document);
+  const getStageTooltip = (s, isPassed, isCurrent) => {
+    let text = `${s.label}: ${isPassed ? 'Completed' : isCurrent ? 'Current Stage' : 'Pending'}`;
+    if (s.id === 'received' && document.dateReceived) {
+       text += ` on ${document.dateReceived} ${document.timeReceived || ''}`;
+    } else if (s.id === 'review' && document.movements?.length) {
+       const lastMov = document.movements[document.movements.length - 1];
+       text += `\nLast updated: ${new Date(lastMov.timestamp).toLocaleString()}\nLocation: ${lastMov.currentDesk}`;
+    } else if (s.id === 'complied' && document.supervisorRemarks?.length) {
+       const lastRemark = document.supervisorRemarks[document.supervisorRemarks.length - 1];
+       text += `\nDirective: "${lastRemark.remarkText}"\nBy: ${lastRemark.supervisorName}`;
+    } else if (s.id === 'cleared' && document.managerClearance?.isCleared) {
+       text += `\nCleared on ${new Date(document.managerClearance.clearedAt).toLocaleString()}\nBy: ${document.managerClearance.clearedBy}`;
+    }
+    return text;
+  };
+
 
   if (variant === 'detailed') {
     return (
@@ -404,7 +420,7 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
             return (
               <div
                 key={s.id}
-                title={`${s.label}: ${isPassed ? 'Completed' : isCurrent ? 'Current Stage' : 'Pending'}`}
+                title={getStageTooltip(s, isPassed, isCurrent)}
                 className={`w-2.5 h-2.5 rounded-full transition-all duration-200 border cursor-pointer hover:scale-175 hover:z-20 hover:ring-2 hover:ring-offset-1 dark:hover:ring-offset-slate-900 ${
                   isPassed
                     ? 'bg-emerald-500 border-emerald-600 ring-1 ring-emerald-200 dark:ring-emerald-900 hover:ring-emerald-400'
@@ -430,6 +446,8 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
           {STAGES.map((s, idx) => {
             const isCurrent = idx === stage.stageIndex;
             const isPassed = idx < stage.stageIndex;
+
+            
 
             return (
               <span

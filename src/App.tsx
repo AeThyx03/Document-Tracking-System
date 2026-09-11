@@ -35,6 +35,7 @@ import {
   pullAllFromSheet,
   isGoogleQuotaError,
 } from './lib/googleSheets';
+import * as api from './lib/api';
 import { initAuth, setAccessToken, getAccessToken, googleSignIn, logoutGoogle, getStaySignedIn } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { NotificationCenter } from './components/NotificationCenter';
@@ -247,17 +248,7 @@ export default function App() {
 
   // Fetch dedicated links from server on mount
   useEffect(() => {
-    fetch('/api/links')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data && data.success && Array.isArray(data.links) && data.links.length > 0) {
-          setDedicatedLinks(data.links);
-          try {
-            localStorage.setItem('possd_dedicated_links', JSON.stringify(data.links));
-          } catch {}
-        }
-      })
-      .catch((err) => console.warn('Could not fetch server links:', err));
+    api.fetchLinks().then(data => { if (Array.isArray(data)) setDedicatedLinks(data); }).catch(e => console.warn(e));
   }, []);
 
   const handleAddDedicatedLink = (newLink: Omit<DedicatedLinkItem, 'id' | 'addedAt'>) => {
@@ -271,11 +262,7 @@ export default function App() {
     try {
       localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
     } catch {}
-    fetch('/api/links', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ links: updated }),
-    }).catch((e) => console.warn('Failed to push link to server:', e));
+    api.saveLinks(updated).catch((e) => console.warn('Failed to push link to server:', e));
 
     addNotification(
       'Resource Link Added',
@@ -292,11 +279,7 @@ export default function App() {
     try {
       localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
     } catch {}
-    fetch('/api/links', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ links: updated }),
-    }).catch((e) => console.warn('Failed to push link to server:', e));
+    api.saveLinks(updated).catch((e) => console.warn('Failed to push link to server:', e));
   };
 
   const handleDeleteDedicatedLink = (id: string) => {
@@ -305,11 +288,7 @@ export default function App() {
     try {
       localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
     } catch {}
-    fetch('/api/links', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ links: updated }),
-    }).catch((e) => console.warn('Failed to push link to server:', e));
+    api.saveLinks(updated).catch((e) => console.warn('Failed to push link to server:', e));
   };
 
   // Documents State
@@ -661,7 +640,7 @@ export default function App() {
       addNotification(
         'Google Sheet Synchronized',
         `Successfully logged ${res.rowsUpdated} document records and ${res.personnelUpdated} personnel profiles to tab "${res.masterTabName}".`,
-        currentUser.name,
+        currentUser?.name || 'System',
         'sync',
         'PUSH-ALL-SUCCESS'
       );
@@ -698,7 +677,7 @@ export default function App() {
     addNotification(
       'Thresholds Updated',
       `Time-in-desk baseline updated to ${updated.defaultThresholdHours}h with ${Object.keys(updated.divisionThresholds).length} division rules.`,
-      currentUser.name,
+      currentUser?.name || 'System',
       'movement',
       'THRESH-UPDATE'
     );
@@ -724,36 +703,7 @@ export default function App() {
       })
       .catch(() => {});
 
-    fetch('/api/documents')
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success && Array.isArray(data.documents) && data.documents.length > 0) {
-          if (localDocs.length === 0) {
-            setDocuments(data.documents);
-            saveStoredDocuments(data.documents);
-          }
-        }
-      })
-      .catch(() => {});
-
-    fetch('/api/staff')
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success && Array.isArray(data.staff) && data.staff.length > 0) {
-          setStaffList((prev) => (prev.length === 0 ? data.staff : prev));
-        }
-      })
-      .catch(() => {});
-
-    fetch('/api/sheet-auth-token')
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success && data.token) {
-          setToken((prev) => prev || data.token);
-          setAccessToken(data.token);
-        }
-      })
-      .catch(() => {});
+    // Hydration now happens in initAuth successfully
 
     // Cross-Device Instant Sync URL & Hash Detection
     try {
@@ -846,27 +796,53 @@ export default function App() {
     });
 
     const unsubscribe = initAuth(
-      (authedUser, oauthToken) => {
+      async (authedUser, oauthToken) => {
         setUser(authedUser);
         setToken(oauthToken);
         setAccessToken(oauthToken);
-        if (oauthToken) {
-          fetch('/api/sheet-auth-token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: oauthToken }),
-          }).catch(() => {});
+        
+        try {
+          // Cross-device backend hydration
+          const [docs, staff, links] = await Promise.all([
+            api.fetchDocuments(),
+            api.fetchStaff(),
+            api.fetchLinks()
+          ]);
+
+          if (docs && docs.length > 0) {
+            setDocuments(docs);
+            saveStoredDocuments(docs);
+          }
+          if (staff && staff.length > 0) {
+            setStaffList(staff);
+            saveStoredStaffMembers(staff);
+            
+            // Map Firebase user to personnel directory
+            const matchedStaff = staff.find(s => s.email === authedUser.email);
+            if (matchedStaff) {
+               setCurrentUser(matchedStaff);
+               localStorage.setItem('possd_active_user', JSON.stringify(matchedStaff));
+            } else if (authedUser.email) {
+               // Default viewer role
+               const viewer: AppUserRole = {
+                 id: authedUser.uid,
+                 name: authedUser.displayName || authedUser.email.split('@')[0],
+                 role: 'Viewer', division: 'General', username: authedUser.email.split('@')[0], email: authedUser.email
+               };
+               setCurrentUser(viewer);
+               localStorage.setItem('possd_active_user', JSON.stringify(viewer));
+            }
+          }
+          // The links are currently not being set into state here, but can be managed by DedicatedLinksView
+        } catch (e) {
+          console.error("Failed to hydrate from backend:", e);
         }
       },
       () => {
         setUser(null);
         setToken(null);
         setAccessToken(null);
-        fetch('/api/sheet-auth-token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: null }),
-        }).catch(() => {});
+        setCurrentUser(null);
       }
     );
 
@@ -1012,8 +988,8 @@ export default function App() {
     title: string,
     message: string,
     performedBy: string,
-    type: 'incoming' | 'movement' | 'remark' | 'compliance' | 'clearance' | 'sync',
-    trackingNumber: string
+    type: 'incoming' | 'movement' | 'remark' | 'compliance' | 'clearance' | 'sync' | 'urgent',
+    trackingNumber?: string
   ) => {
     const newNotif: RealtimeNotification = {
       id: `notif-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
@@ -1058,7 +1034,7 @@ export default function App() {
     addNotification(
       'Staff Enrolled',
       `Registered ${newStaff.name} as ${newStaff.role} (${newStaff.division})`,
-      currentUser.name,
+      currentUser?.name || 'System',
       'sync',
       'STAFF'
     );
@@ -1083,7 +1059,7 @@ export default function App() {
       scheduleSheetPush(documents, updated);
     }
 
-    if (currentUser.id === staffId) {
+    if (currentUser?.id === staffId) {
       setCurrentUser((prev) => ({
         ...prev,
         role: newRole,
@@ -1094,7 +1070,7 @@ export default function App() {
     addNotification(
       'Role Updated',
       `Updated role permission for staff ${staffId} to ${newRole}`,
-      currentUser.name,
+      currentUser?.name || 'System',
       'sync',
       'ROLE'
     );
@@ -1121,7 +1097,7 @@ export default function App() {
       scheduleSheetPush(documents, updated);
     }
 
-    if (currentUser.id === staffId) {
+    if (currentUser?.id === staffId) {
       setCurrentUser((prev) => ({
         ...prev,
         ...updates,
@@ -1131,7 +1107,7 @@ export default function App() {
     addNotification(
       'Credentials Enrolled',
       `Admin updated portal login credentials for personnel ID ${staffId}.`,
-      currentUser.name,
+      currentUser?.name || 'System',
       'sync',
       staffId
     );
@@ -1147,144 +1123,165 @@ export default function App() {
       scheduleSheetPush(documents, updated);
     }
 
-    addNotification('Staff Removed', `Removed personnel ID ${staffId}`, currentUser.name, 'sync', 'STAFF');
+    addNotification('Staff Removed', `Removed personnel ID ${staffId}`, currentUser?.name || 'System', 'sync', 'STAFF');
   };
 
   const handleUpdateDropdownOptions = (updatedOptions: RegistryDropdownOptions) => {
     setDropdownOptions(updatedOptions);
     saveStoredDropdownOptions(updatedOptions);
     broadcastDataUpdate('dropdowns', updatedOptions);
-    addNotification('Options Updated', 'Custom dropdown values updated', currentUser.name, 'sync', 'DROPDOWNS');
+    addNotification('Options Updated', 'Custom dropdown values updated', currentUser?.name || 'System', 'sync', 'DROPDOWNS');
   };
 
   // HANDLER: Create New Incoming Document
   const handleCreateDocument = async (newDoc: DocumentItem) => {
-    const updatedList = [newDoc, ...documents];
-    setDocuments(updatedList);
-    saveStoredDocuments(updatedList);
-    setIsIncomingModalOpen(false);
+    try {
+      // Opt-in central backend flow
+      const savedDoc = await api.createDocument(newDoc);
+      
+      const updatedList = [savedDoc, ...documents];
+      setDocuments(updatedList);
+      saveStoredDocuments(updatedList);
+      setIsIncomingModalOpen(false);
 
-    addNotification(
-      'Document Inflow Registered',
-      `${newDoc.trackingNumber}: "${newDoc.title}" received from ${newDoc.originDepartment}`,
-      currentUser.name,
-      'incoming',
-      newDoc.trackingNumber
-    );
-
-    // Always schedule sheet push (will save locally and queue for push when sheet is linked)
-    scheduleSheetPush(updatedList, staffList);
+      addNotification(
+        'Document Inflow Registered',
+        `${savedDoc.trackingNumber}: "${savedDoc.title}" received from ${savedDoc.originDepartment}`,
+        currentUser?.name || 'System',
+        'incoming',
+        savedDoc.trackingNumber
+      );
+      
+      api.logAudit("CREATE DOCUMENT", savedDoc.id, currentUser?.name || 'System', "", `Created: ${savedDoc.title}`);
+    } catch (err: any) {
+      addNotification('Error', 'Unable to save document. Please try again.', currentUser?.name || 'System', 'urgent');
+      console.error(err);
+    }
   };
 
   // HANDLER: Update Document
   const handleUpdateDocument = async (updatedDoc: DocumentItem) => {
-    const updatedList = documents.map((d) => (d.id === updatedDoc.id ? updatedDoc : d));
-    setDocuments(updatedList);
-    saveStoredDocuments(updatedList);
-    setSelectedDoc(updatedDoc);
+    try {
+      const oldDoc = documents.find((d) => d.id === updatedDoc.id);
+      const savedDoc = await api.updateDocument(updatedDoc);
+      
+      const updatedList = documents.map((d) => (d.id === savedDoc.id ? savedDoc : d));
+      setDocuments(updatedList);
+      saveStoredDocuments(updatedList);
+      setSelectedDoc(savedDoc);
 
-    const oldDoc = documents.find((d) => d.id === updatedDoc.id);
-
-    if (oldDoc && oldDoc.currentLocation !== updatedDoc.currentLocation) {
-      addNotification(
-        'Document Routed',
-        `${updatedDoc.trackingNumber} transferred to ${updatedDoc.currentLocation} (Custodian: ${updatedDoc.currentCustodian})`,
-        currentUser.name,
-        'movement',
-        updatedDoc.trackingNumber
-      );
-    } else if (
-      oldDoc &&
-      (!oldDoc.supervisorRemarks || oldDoc.supervisorRemarks.length < (updatedDoc.supervisorRemarks?.length || 0))
-    ) {
-      const latestRemark = updatedDoc.supervisorRemarks?.[updatedDoc.supervisorRemarks.length - 1];
-      addNotification(
-        'Supervisor Remark Added',
-        `${updatedDoc.trackingNumber}: ${latestRemark?.supervisorName} added directive ("${latestRemark?.remarkText}")`,
-        currentUser.name,
-        'remark',
-        updatedDoc.trackingNumber
-      );
-    } else if (
-      oldDoc &&
-      !oldDoc.managerClearance?.isCleared &&
-      updatedDoc.managerClearance?.isCleared
-    ) {
-      addNotification(
-        'Manager Clearance Approved',
-        `${updatedDoc.trackingNumber} cleared for Outgoing Dispatch by ${updatedDoc.managerClearance.clearedBy || currentUser.name}`,
-        currentUser.name,
-        'clearance',
-        updatedDoc.trackingNumber
-      );
-    } else if (
-      oldDoc &&
-      oldDoc.supervisorRemarks?.some((r) => !r.complied) &&
-      updatedDoc.supervisorRemarks?.every((r) => !r.complianceRequired || r.complied)
-    ) {
-      addNotification(
-        'Compliance Verified',
-        `${updatedDoc.trackingNumber}: Staff verified all supervisor requirements fulfilled`,
-        currentUser.name,
-        'compliance',
-        updatedDoc.trackingNumber
-      );
+      if (oldDoc && oldDoc.currentLocation !== savedDoc.currentLocation) {
+        addNotification(
+          'Document Routed',
+          `${savedDoc.trackingNumber} transferred to ${savedDoc.currentLocation} (Custodian: ${savedDoc.currentCustodian})`,
+          currentUser?.name || 'System',
+          'movement',
+          savedDoc.trackingNumber
+        );
+        api.logAudit("CHANGE STATUS", savedDoc.id, currentUser?.name || 'System', oldDoc.currentLocation, savedDoc.currentLocation);
+      } else if (
+        oldDoc &&
+        (!oldDoc.supervisorRemarks || oldDoc.supervisorRemarks.length < (savedDoc.supervisorRemarks?.length || 0))
+      ) {
+        const latestRemark = savedDoc.supervisorRemarks?.[savedDoc.supervisorRemarks.length - 1];
+        addNotification(
+          'Supervisor Remark Added',
+          `${savedDoc.trackingNumber}: ${latestRemark?.supervisorName} added directive ("${latestRemark?.remarkText}")`,
+          currentUser?.name || 'System',
+          'remark',
+          savedDoc.trackingNumber
+        );
+        api.logAudit("UPDATE DOCUMENT", savedDoc.id, currentUser?.name || 'System', "", "Added Supervisor Remark");
+      } else if (
+        oldDoc &&
+        !oldDoc.managerClearance?.isCleared &&
+        savedDoc.managerClearance?.isCleared
+      ) {
+        addNotification(
+          'Manager Clearance Approved',
+          `${savedDoc.trackingNumber} cleared for Outgoing Dispatch by ${savedDoc.managerClearance.clearedBy || currentUser?.name}`,
+          currentUser?.name || 'System',
+          'clearance',
+          savedDoc.trackingNumber
+        );
+        api.logAudit("UPDATE DOCUMENT", savedDoc.id, currentUser?.name || 'System', "", "Manager Clearance Approved");
+      } else if (
+        oldDoc &&
+        oldDoc.supervisorRemarks?.some((r) => !r.complied) &&
+        savedDoc.supervisorRemarks?.every((r) => !r.complianceRequired || r.complied)
+      ) {
+        addNotification(
+          'Compliance Verified',
+          `${savedDoc.trackingNumber}: Staff verified all supervisor requirements fulfilled`,
+          currentUser?.name || 'System',
+          'compliance',
+          savedDoc.trackingNumber
+        );
+      } else {
+        api.logAudit("UPDATE DOCUMENT", savedDoc.id, currentUser?.name || 'System', "", "General Update");
+      }
+    } catch (err) {
+      addNotification('Error', 'Unable to update document. Please try again.', currentUser?.name || 'System', 'urgent');
+      console.error(err);
     }
-
-    // Always schedule sheet push (will save locally and queue for push when sheet is linked)
-    scheduleSheetPush(updatedList, staffList);
   };
 
   // HANDLER: Delete document entry (only for System Admins and Department Manager)
   const handleDeleteDocument = async (doc: DocumentItem) => {
-    if (!canUserDeleteDocuments(currentUser.role)) {
+    if (!canUserDeleteDocuments(currentUser?.role)) {
       addNotification(
         'Action Restricted',
         'Deleting entries from incoming and outgoing logs is strictly restricted to System Admins and Department Managers.',
-        currentUser.name,
+        currentUser?.name || 'System',
         'sync',
         doc.trackingNumber
       );
       return;
     }
 
-    setIsDeleting(true);
-    const updatedList = documents.filter((d) => d.id !== doc.id);
-    setDocuments(updatedList);
-    saveStoredDocuments(updatedList);
+    try {
+      setIsDeleting(true);
+      await api.deleteDocument(doc.id);
+      
+      const updatedList = documents.filter((d) => d.id !== doc.id);
+      setDocuments(updatedList);
+      saveStoredDocuments(updatedList);
 
-    if (selectedDoc?.id === doc.id) {
-      setSelectedDoc(null);
-    }
-    setDocToDelete(null);
-    setIsDeleting(false);
+      if (selectedDoc?.id === doc.id) {
+        setSelectedDoc(null);
+      }
+      setDocToDelete(null);
 
-    const isOutgoing = doc.managerClearance?.isCleared || doc.currentStatus === 'Cleared for Out' || doc.currentStatus === 'Dispatched / Completed';
-    const logType = isOutgoing ? 'Outgoing Log' : 'Incoming Log';
+      const isOutgoing = doc.managerClearance?.isCleared || doc.currentStatus === 'Cleared for Out' || doc.currentStatus === 'Dispatched / Completed';
+      const logType = isOutgoing ? 'Outgoing Log' : 'Incoming Log';
 
-    addNotification(
-      'Log Entry Deleted',
-      `${logType} entry "${doc.title}" (${doc.trackingNumber}) was permanently deleted by ${currentUser.name} (${currentUser.role}).`,
-      currentUser.name,
-      'sync',
-      doc.trackingNumber
-    );
-
-    if (token && sheetConfig?.spreadsheetId) {
-      scheduleSheetPush(updatedList, staffList);
+      addNotification(
+        'Log Entry Deleted',
+        `${logType} entry "${doc.title}" (${doc.trackingNumber}) was permanently deleted by ${currentUser?.name} (${currentUser?.role}).`,
+        currentUser?.name || 'System',
+        'sync',
+        doc.trackingNumber
+      );
+      
+      api.logAudit("DELETE DOCUMENT", doc.id, currentUser?.name || 'System', `Tracking #: ${doc.trackingNumber}`, "");
+    } catch (err: any) {
+      addNotification('Error', 'Unable to delete document. Please try again.', currentUser?.name || 'System', 'urgent');
+      console.error(err);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
   // Filtered documents calculation
   const filteredDocuments = documents.filter((doc) => {
-    const query = searchQuery.toLowerCase();
+    const query = (searchQuery || '').toLowerCase();
     const matchesSearch =
-      doc.trackingNumber.toLowerCase().includes(query) ||
-      doc.title.toLowerCase().includes(query) ||
-      doc.originDepartment.toLowerCase().includes(query) ||
-      doc.responsiblePerson.toLowerCase().includes(query) ||
-      doc.targetDivision.toLowerCase().includes(query) ||
-      doc.currentLocation.toLowerCase().includes(query);
+      (doc.trackingNumber || '').toLowerCase().includes(query) ||
+      (doc.title || '').toLowerCase().includes(query) ||
+      (doc.originDepartment || '').toLowerCase().includes(query) ||
+      (doc.responsiblePerson || '').toLowerCase().includes(query) ||
+      (doc.targetDivision || '').toLowerCase().includes(query) ||
+      (doc.currentLocation || '').toLowerCase().includes(query);
 
     let matchesViewMode = true;
     if (viewMode === 'incoming') {
@@ -1382,8 +1379,8 @@ export default function App() {
       d.currentStatus !== 'Dispatched / Completed'
   ).length;
 
-  const currentRoleConfig = currentUser ? getRoleConfig(currentUser.role) : getRoleConfig('Viewer');
-  const canDeleteLogs = currentUser ? canUserDeleteDocuments(currentUser.role) : false;
+  const currentRoleConfig = currentUser ? getRoleConfig(currentUser?.role) : getRoleConfig('Viewer');
+  const canDeleteLogs = currentUser ? canUserDeleteDocuments(currentUser?.role) : false;
 
   return (
     <div className="min-h-screen bg-[#f3f6fa] dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white transition-colors duration-200">
@@ -1402,9 +1399,7 @@ export default function App() {
                 <h1 className="text-base font-bold tracking-tight text-white">
                   POSSD Document Tracking System
                 </h1>
-                <span className="text-[10px] font-bold tracking-wide px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
-                  Official Portal
-                </span>
+                
               </div>
             </div>
           </div>
@@ -1413,7 +1408,7 @@ export default function App() {
           <div className="flex items-center flex-wrap gap-2.5 w-full lg:w-auto justify-end">
             
             {/* Time-in-Desk Thresholds (Available ONLY for System Admin, moved to the left) */}
-            {currentUser.role === 'System Admin' && (
+            {currentUser?.role === 'System Admin' && (
               <button
                 id="open-thresholds-btn"
                 onClick={() => setActiveTab('admin')}
@@ -1441,19 +1436,19 @@ export default function App() {
             {/* Active User Pill with Role Indicator */}
             <div className="flex items-center gap-2 bg-slate-800/90 border border-slate-700 rounded-xl px-2.5 py-1.5 shadow-2xs">
               <div className="w-7 h-7 rounded-lg bg-slate-700 text-slate-100 flex items-center justify-center text-xs font-bold shrink-0 ring-1 ring-slate-600">
-                {currentUser.avatarInitials || currentUser.name.slice(0, 2).toUpperCase()}
+                {currentUser?.avatarInitials || currentUser?.name?.slice(0, 2).toUpperCase()}
               </div>
               <div className="flex flex-col text-left">
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs font-bold text-white max-w-[130px] truncate">
-                    {currentUser.name}
+                    {currentUser?.name}
                   </span>
                   <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded border bg-slate-900 text-slate-300 border-slate-700">
-                    {currentUser.role}
+                    {currentUser?.role}
                   </span>
                 </div>
                 <span className="text-[10px] text-slate-400 truncate max-w-[170px]">
-                  {currentUser.division}
+                  {currentUser?.division}
                 </span>
               </div>
             </div>
@@ -1548,15 +1543,15 @@ export default function App() {
               { id: 'distribution' as WorkspaceTab, label: 'Distribution', count: focalPendingCount, icon: Users, color: 'text-slate-300' },
               { id: 'analytics' as WorkspaceTab, label: 'Analytics', icon: BarChart3, color: 'text-slate-300' },
               { id: 'links' as WorkspaceTab, label: 'Dedicated Links', count: dedicatedLinks.length, icon: Link2, color: 'text-sky-400' },
-              ...(currentUser.role === 'System Admin'
+              ...(currentUser?.role === 'System Admin'
                 ? [{ id: 'admin' as WorkspaceTab, label: 'Admin Settings', icon: Sliders, color: 'text-slate-300' }]
                 : []),
-            ].map((tab) => {
+            ].map((tab, _idx_tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
               return (
                 <button
-                  key={tab.id}
+                  key={`${tab.id}-${_idx_tab}`}
                   onClick={() => setActiveTab(tab.id)}
                   className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
                     isActive ? 'text-white' : 'text-slate-400 hover:text-white'
@@ -1616,7 +1611,7 @@ export default function App() {
             onOpenRolesModal={() => setIsRolesModalOpen(true)}
             onOpenThresholdModal={() => setIsThresholdModalOpen(true)}
             onOpenShortcutsModal={() => setIsShortcutsModalOpen(true)}
-            currentUserRole={currentUser.role}
+            currentUserRole={currentUser?.role}
             isCollapsed={isSidebarCollapsed}
             setIsCollapsed={setIsSidebarCollapsed}
           />
@@ -1659,9 +1654,9 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {documents.filter(d => ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson)).map(doc => (
+                  {documents.filter(d => ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson)).map((doc, _idx_doc) => (
                     <tr
-                      key={doc.id}
+                      key={`${doc.id}-${_idx_doc}`}
                       onClick={() => setSelectedDoc(doc)}
                       className="hover:bg-blue-50/40 dark:hover:bg-slate-800/70 border-l-4 border-l-transparent hover:border-l-blue-500 transition-all duration-150 cursor-pointer group hover:shadow-sm"
                     >
@@ -1925,9 +1920,9 @@ export default function App() {
                 { id: 'Under Review', label: 'In Review', activeClass: 'bg-slate-700 text-white border-slate-700' },
                 { id: 'Supervisor Comment Needed', label: 'Remarks', activeClass: 'bg-slate-800 text-white border-slate-800 font-bold' },
                 { id: 'Cleared for Out', label: 'Cleared Out', activeClass: 'bg-slate-800 text-white border-slate-800' },
-              ].map((s) => (
+              ].map((s, _idx_s) => (
                 <button
-                  key={s.id}
+                  key={`${s.id}-${_idx_s}`}
                   onClick={() => setStatusFilter(s.id)}
                   className={`px-3 py-1.5 rounded-xl font-semibold whitespace-nowrap border transition-all cursor-pointer ${
                     statusFilter === s.id
@@ -1968,14 +1963,14 @@ export default function App() {
                 >
                   <option value="ALL">All Divisions</option>
                   {dropdownOptions.departments.length > 0 ? (
-                    dropdownOptions.departments.map((dept) => (
-                      <option key={dept} value={dept}>
+                    dropdownOptions.departments.map((dept, _idx_dept) => (
+                      <option key={`${dept}-${_idx_dept}`} value={dept}>
                         {dept}
                       </option>
                     ))
                   ) : (
-                    Array.from(new Set(documents.map((d) => d.targetDivision).filter(Boolean))).map((div) => (
-                      <option key={div} value={div}>
+                    Array.from(new Set(documents.map((d) => d.targetDivision).filter(Boolean))).map((div, _idx_div) => (
+                      <option key={`${div}-${_idx_div}`} value={div}>
                         {div}
                       </option>
                     ))
@@ -1988,7 +1983,7 @@ export default function App() {
               {canDeleteLogs ? (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900 text-[11px] font-semibold shadow-2xs">
                   <Trash2 className="w-3 h-3 text-rose-600 dark:text-rose-400 shrink-0" />
-                  <span>Log Deletion Allowed ({currentUser.role})</span>
+                  <span>Log Deletion Allowed ({currentUser?.role})</span>
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700 text-[11px]">
@@ -2231,7 +2226,7 @@ export default function App() {
                     </td>
                   </tr>
                 ) : (
-                  sortedDocuments.map((doc) => {
+                  sortedDocuments.map((doc, _idx_doc) => {
                     const hasPendingRemarks = doc.supervisorRemarks?.some(
                       (r) => r.complianceRequired && !r.complied
                     );
@@ -2243,7 +2238,7 @@ export default function App() {
 
                     return (
                       <tr
-                        key={doc.id}
+                        key={`${doc.id}-${_idx_doc}`}
                         onClick={() => setSelectedDoc(doc)}
                         className={`transition-all duration-150 cursor-pointer group border-l-4 ${
                           shouldHighlightOverdue
@@ -2372,7 +2367,7 @@ export default function App() {
                               <button
                                 type="button"
                                 id={`delete-doc-${doc.trackingNumber}`}
-                                title={`Delete log entry (${doc.trackingNumber}) - Authorized for ${currentUser.role}`}
+                                title={`Delete log entry (${doc.trackingNumber}) - Authorized for ${currentUser?.role}`}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setDocToDelete(doc);
@@ -2510,7 +2505,7 @@ export default function App() {
         onClose={() => setIsThresholdModalOpen(false)}
         config={timeInDeskConfig}
         onSaveConfig={handleSaveThresholdConfig}
-        currentUserRole={currentUser.role}
+        currentUserRole={currentUser?.role}
         documents={documents}
         availableDivisions={dropdownOptions.departments}
       />
@@ -2539,7 +2534,7 @@ export default function App() {
         documents={documents}
         staffList={staffList}
         onNotify={(title, msg, type) =>
-          addNotification(title, msg, currentUser.name, type, 'SHEET-SYNC')
+          addNotification(title, msg, currentUser?.name || 'System', type, 'SHEET-SYNC')
         }
         onPullSuccess={(pulledDocs, pulledStaff) => {
           if (pulledDocs && pulledDocs.length > 0) {
@@ -2644,7 +2639,7 @@ export default function App() {
                 <ShieldCheck className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" />
                 <div>
                   <span className="font-bold">Operator Authorization:</span> You are deleting as{' '}
-                  <strong className="text-slate-900 dark:text-white">{currentUser.name}</strong> (<span className="text-amber-800 dark:text-amber-400 font-semibold">{currentUser.role}</span>). This event is permanently recorded in the system notification and sync trail.
+                  <strong className="text-slate-900 dark:text-white">{currentUser?.name}</strong> (<span className="text-amber-800 dark:text-amber-400 font-semibold">{currentUser?.role}</span>). This event is permanently recorded in the system notification and sync trail.
                 </div>
               </div>
             </div>

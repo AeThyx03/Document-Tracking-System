@@ -103,9 +103,17 @@ export const initAuth = (
 
       if (cachedAccessToken) {
         if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
-      } else if (!isSigningIn) {
-        // If user is authenticated in Firebase but OAuth token has expired or not stored
-        if (onAuthFailure) onAuthFailure();
+      } else {
+        // If we don't have the token, let's just get it since the user is authenticated in firebase
+        try {
+            // Since we need OAuth token and not ID token for Google Sheets, if the token is lost from session, we cannot retrieve the OAuth token from just getIdToken() which is a Firebase JWT.
+            // We must prompt the user to re-authenticate or they will be signed out from spreadsheet capability.
+            // However, we just return the user for now. Google Sheet writes might fail and prompt re-auth.
+            cachedAccessToken = null;
+            if (!isSigningIn && onAuthFailure) onAuthFailure();
+        } catch (e) {
+            if (!isSigningIn && onAuthFailure) onAuthFailure();
+        }
       }
     } else {
       cachedAccessToken = null;
@@ -132,10 +140,9 @@ export const googleSignIn = async (
 
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error('Failed to get Google OAuth access token from authentication result');
-    }
-    cachedAccessToken = credential.accessToken;
+    const token = credential?.accessToken;
+    if (!token) throw new Error('No Google OAuth access token returned');
+    cachedAccessToken = token;
     saveStoredToken(cachedAccessToken, stay);
 
     return { user: result.user, accessToken: cachedAccessToken };

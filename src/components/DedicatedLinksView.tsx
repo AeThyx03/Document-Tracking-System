@@ -150,10 +150,10 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
   const filteredLinks = links
     .filter((l) => {
       const matchSearch =
-        l.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (l.description && l.description.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        l.url.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (l.targetDivision && l.targetDivision.toLowerCase().includes(searchQuery.toLowerCase()));
+        (l.title || '').toLowerCase().includes((searchQuery || '').toLowerCase()) ||
+        (l.description && (l.description || '').toLowerCase().includes((searchQuery || '').toLowerCase())) ||
+        (l.url || '').toLowerCase().includes((searchQuery || '').toLowerCase()) ||
+        (l.targetDivision && (l.targetDivision || '').toLowerCase().includes((searchQuery || '').toLowerCase()));
 
       const matchCategory = selectedCategory === 'All' || l.category === selectedCategory;
       const matchDivision =

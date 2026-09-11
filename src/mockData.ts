@@ -387,11 +387,7 @@ export function saveStoredDocuments(docs: DocumentItem[]) {
   try {
     safeStorageSet(STORAGE_KEY, JSON.stringify(docs));
     // Cross-device persistence: sync to backend
-    fetch('/api/documents', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(docs),
-    }).catch(() => {});
+    
   } catch (e) {
     console.error('Failed to save documents to storage:', e);
   }
@@ -446,7 +442,7 @@ export function getStoredStaffMembers(): AppUserRole[] {
           else if (updatedRole === 'Records Administrator') updatedRole = 'System Admin';
 
           const defaultUsername = staff.username || (
-            staff.name.toLowerCase().replace(/[^a-z0-9]/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '') ||
+            (staff.name || '').toLowerCase().replace(/[^a-z0-9]/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '') ||
             `user${idx + 1}`
           );
           const defaultPassword = staff.password || (updatedRole === 'System Admin' ? 'admin123' : 'password123');
@@ -471,11 +467,7 @@ export function saveStoredStaffMembers(staff: AppUserRole[]) {
   try {
     safeStorageSet(STAFF_KEY, JSON.stringify(staff));
     // Cross-device persistence: sync to backend
-    fetch('/api/staff', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(staff),
-    }).catch(() => {});
+    
   } catch (e) {
     console.error('Failed to save staff members:', e);
   }

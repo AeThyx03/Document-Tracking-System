@@ -65,7 +65,7 @@ export interface RealtimeNotification {
   title: string;
   message: string;
   actor: string;
-  type: 'incoming' | 'movement' | 'remark' | 'compliance' | 'clearance' | 'sync';
+  type: 'incoming' | 'movement' | 'remark' | 'compliance' | 'clearance' | 'sync' | 'urgent';
   read: boolean;
 }
 

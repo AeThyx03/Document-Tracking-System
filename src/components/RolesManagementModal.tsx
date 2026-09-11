@@ -147,7 +147,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   // When personnel name changes in enrollment form, auto-suggest username if user hasn't customized it
   useEffect(() => {
     if (!isUsernameCustomized) {
-      const suggested = newName.trim().toLowerCase().replace(/[^a-z0-9]/g, '.');
+      const suggested = (newName || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '.');
       setNewUsername(suggested);
     }
   }, [newName, isUsernameCustomized]);
@@ -283,7 +283,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     const trimmed = roleInput.trim();
     if (!trimmed) return;
 
-    if (dropdownOptions.roles.some((r) => r.toLowerCase() === trimmed.toLowerCase())) {
+    if (dropdownOptions.roles.some((r) => (r || '').toLowerCase() === (trimmed || '').toLowerCase())) {
       showFeedback(`"${trimmed}" is already in the assigned roles list.`, 'error');
       return;
     }
@@ -311,7 +311,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     const trimmed = deptInput.trim();
     if (!trimmed) return;
 
-    if (dropdownOptions.departments.some((d) => d.toLowerCase() === trimmed.toLowerCase())) {
+    if (dropdownOptions.departments.some((d) => (d || '').toLowerCase() === (trimmed || '').toLowerCase())) {
       showFeedback(`"${trimmed}" is already in the department/division list.`, 'error');
       return;
     }
@@ -339,7 +339,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     const trimmed = deskInput.trim();
     if (!trimmed) return;
 
-    if (dropdownOptions.desks.some((d) => d.toLowerCase() === trimmed.toLowerCase())) {
+    if (dropdownOptions.desks.some((d) => (d || '').toLowerCase() === (trimmed || '').toLowerCase())) {
       showFeedback(`"${trimmed}" is already in the assigned desks list.`, 'error');
       return;
     }
@@ -388,7 +388,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       .map((w) => w[0].toUpperCase())
       .join('');
 
-    const autoUsername = quickName.toLowerCase().trim().replace(/[^a-z0-9]/g, '.');
+    const autoUsername = (quickName || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '.');
 
     const newStaff: AppUserRole = {
       id: `staff-${Date.now()}`,
@@ -451,7 +451,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       .map((w) => w[0].toUpperCase())
       .join('');
 
-    const cleanUsername = (newUsername.trim() || newName.toLowerCase().replace(/[^a-z0-9]/g, '.')).toLowerCase();
+    const cleanUsername = (newUsername.trim() || (newName || '').toLowerCase().replace(/[^a-z0-9]/g, '.')).toLowerCase();
     const cleanPassword = newPassword.trim() || 'password123';
 
     const newStaff: AppUserRole = {
@@ -494,7 +494,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
 
   const handleOpenCredentialsModal = (staff: AppUserRole) => {
     setCredentialStaff(staff);
-    setEditUsername(staff.username || staff.name.toLowerCase().replace(/[^a-z0-9]/g, '.'));
+    setEditUsername(staff.username || (staff.name || '').toLowerCase().replace(/[^a-z0-9]/g, '.'));
     setEditPassword(staff.password || (staff.role === 'System Admin' ? 'admin123' : 'password123'));
     setEditStatus(staff.status || 'active');
     setShowEditPassword(false);
