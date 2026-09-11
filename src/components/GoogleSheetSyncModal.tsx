@@ -93,9 +93,13 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
 
   const formatSyncError = (err: any, defaultMsg: string): string => {
     if (isGoogleQuotaError(err)) {
-      return 'Google Sheets write quota limit reached (60 requests/minute per user). Please wait 60 seconds for the quota window to reset. All local data is safe and intact.';
+      return 'Google Sheets API write quota limit reached (60 requests/min per account). Your data is safely preserved on your device and will resume syncing once the quota resets.';
     }
-    return err?.message || defaultMsg;
+    const msg = (typeof err === 'string' ? err : err?.message || defaultMsg);
+    if (msg.toLowerCase().includes('rate exceeded') || msg.toLowerCase().includes('quota')) {
+      return 'Google Sheets API write quota limit reached (60 requests/min per account). Your data is safely preserved on your device and will resume syncing once the quota resets.';
+    }
+    return msg;
   };
 
   const handleGoogleLogin = async () => {
@@ -567,7 +571,7 @@ export const GoogleSheetSyncModal: React.FC<GoogleSheetSyncProps & { isOpen: boo
                   {diagnosticResult.connected && (
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 font-mono text-[11px] text-slate-700 dark:text-slate-300">
                       <div>Sheet Title: <strong>{diagnosticResult.spreadsheetTitle}</strong></div>
-                      <div>Master Tab: <strong className={diagnosticResult.hasMasterTab ? 'text-emerald-600' : 'text-rose-600'}>{diagnosticResult.hasMasterTab ? 'Found' : 'Missing'}</strong></div>
+                      <div>Master Tab: <strong className={diagnosticResult.masterTabReady ? 'text-emerald-600' : 'text-rose-600'}>{diagnosticResult.masterTabReady ? 'Found' : 'Missing'}</strong></div>
                       <div>Rows Detected: <strong>{diagnosticResult.rowCount}</strong></div>
                     </div>
                   )}

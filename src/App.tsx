@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   DocumentItem,
+  InternalMovement,
+  ManagerClearance,
   RealtimeNotification,
   AppUserRole,
   UserRoleType,
@@ -100,6 +102,7 @@ import {
   LogOut,
   Globe,
   Keyboard,
+  CheckSquare,
 } from 'lucide-react';
 
 export default function App() {
@@ -298,6 +301,12 @@ export default function App() {
   const [docToDelete, setDocToDelete] = useState<DocumentItem | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
+  // Batch Document Selection & Actions
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
+  const [batchAction, setBatchAction] = useState<string>('');
+  const [isExecutingBatch, setIsExecutingBatch] = useState<boolean>(false);
+  const [batchDocsToDelete, setBatchDocsToDelete] = useState<DocumentItem[] | null>(null);
+
   // Notifications State (Real-time activity log)
   const [notifications, setNotifications] = useState<RealtimeNotification[]>([]);
 
@@ -363,7 +372,7 @@ export default function App() {
 
     const now = Date.now();
     const waitTime = Math.max(0, quotaCooldownUntilRef.current - now);
-    const delay = waitTime > 0 ? waitTime + 1000 : 1200;
+    const delay = waitTime > 0 ? waitTime + 1000 : 3500;
 
     pushTimeoutRef.current = setTimeout(async () => {
       setIsAutoSyncing(true);
@@ -378,7 +387,7 @@ export default function App() {
         hasPendingSyncRef.current = false;
         safeStorageRemove('possd_has_unpushed_changes');
       } catch (err: any) {
-        if (isGoogleQuotaError(err)) {
+        if (isGoogleQuotaError(err) || err?.message?.toLowerCase().includes('rate exceeded')) {
           const cooldownMs = 65_000;
           quotaCooldownUntilRef.current = Date.now() + cooldownMs;
           setQuotaCooldownSeconds(65);
@@ -482,11 +491,11 @@ export default function App() {
           scheduleSheetPush(pulledDocs, staffListRef.current);
         }
       } catch (err: any) {
-        if (isGoogleQuotaError(err)) {
+        if (isGoogleQuotaError(err) || err?.message?.toLowerCase().includes('rate exceeded')) {
           const cooldownMs = 65_000;
           quotaCooldownUntilRef.current = Date.now() + cooldownMs;
           setQuotaCooldownSeconds(65);
-          console.warn('Google Sheets API rate limit reached. Auto-sync is paused for 65 seconds.');
+          console.warn('Google Sheets API rate limit reached. Auto-sync paused for 65 seconds (Local data preserved).');
         } else {
           console.warn('Auto-sync pull failed:', err);
         }
@@ -583,11 +592,19 @@ export default function App() {
         'MANUAL-SYNC'
       );
     } catch (err: any) {
-      if (isGoogleQuotaError(err)) {
+      if (isGoogleQuotaError(err) || err?.message?.toLowerCase().includes('rate exceeded')) {
         quotaCooldownUntilRef.current = Date.now() + 65_000;
         setQuotaCooldownSeconds(65);
+        addNotification(
+          'Sync Quota Cooldown',
+          'Google Sheets rate limit reached (60/min). Local data is safely preserved and sync will resume automatically.',
+          'System Sync',
+          'sync',
+          'QUOTA'
+        );
+      } else {
+        console.error('Manual sync failed:', err);
       }
-      console.error('Manual sync failed:', err);
     } finally {
       setIsAutoSyncing(false);
     }
@@ -645,12 +662,12 @@ export default function App() {
         'PUSH-ALL-SUCCESS'
       );
     } catch (err: any) {
-      if (isGoogleQuotaError(err)) {
+      if (isGoogleQuotaError(err) || err?.message?.toLowerCase().includes('rate exceeded')) {
         quotaCooldownUntilRef.current = Date.now() + 65_000;
         setQuotaCooldownSeconds(65);
         addNotification(
           'Sync Quota Cooldown',
-          'Google Sheets write quota (60/min) reached. Your entries are safely preserved locally and will sync once the window resets.',
+          'Google Sheets write quota reached (60 requests/min). All records are safely preserved locally and will sync once the window resets.',
           'System Sync',
           'sync',
           'QUOTA'
@@ -813,25 +830,50 @@ export default function App() {
             setDocuments(docs);
             saveStoredDocuments(docs);
           }
+          let currentStaffList = staffListRef.current;
           if (staff && staff.length > 0) {
             setStaffList(staff);
             saveStoredStaffMembers(staff);
-            
-            // Map Firebase user to personnel directory
-            const matchedStaff = staff.find(s => s.email === authedUser.email);
-            if (matchedStaff) {
-               setCurrentUser(matchedStaff);
-               localStorage.setItem('possd_active_user', JSON.stringify(matchedStaff));
-            } else if (authedUser.email) {
-               // Default viewer role
-               const viewer: AppUserRole = {
-                 id: authedUser.uid,
-                 name: authedUser.displayName || authedUser.email.split('@')[0],
-                 role: 'Viewer', division: 'General', username: authedUser.email.split('@')[0], email: authedUser.email
-               };
-               setCurrentUser(viewer);
-               localStorage.setItem('possd_active_user', JSON.stringify(viewer));
-            }
+            currentStaffList = staff;
+          }
+          
+          // Map Firebase user to personnel directory
+          let matchedStaff = currentStaffList.find(s => s.email === authedUser.email || ((s.name || '').includes('Rey Reginald') && authedUser.email === 'reymojica01@gmail.com'));
+          
+          if (authedUser.email === 'reymojica01@gmail.com') {
+             if (matchedStaff) {
+                matchedStaff = { ...matchedStaff, role: 'System Admin', email: authedUser.email };
+             } else {
+                matchedStaff = {
+                   id: authedUser.uid,
+                   name: authedUser.displayName || 'Rey Reginald A. Mojica',
+                   role: 'System Admin',
+                   division: 'CMED',
+                   username: 'reymojica01',
+                   email: authedUser.email
+                };
+             }
+             
+             // Ensure it's in the staff list so it persists correctly
+             const updatedList = currentStaffList.some(s => s.id === matchedStaff.id)
+                ? currentStaffList.map(s => s.id === matchedStaff.id ? matchedStaff : s)
+                : [...currentStaffList, matchedStaff];
+             setStaffList(updatedList);
+             saveStoredStaffMembers(updatedList);
+          }
+          
+          if (matchedStaff) {
+             setCurrentUser(matchedStaff);
+             localStorage.setItem('possd_active_user', JSON.stringify(matchedStaff));
+          } else if (authedUser.email) {
+             // Default viewer role
+             const viewer: AppUserRole = {
+               id: authedUser.uid,
+               name: authedUser.displayName || authedUser.email.split('@')[0],
+               role: 'Viewer', division: 'General', username: authedUser.email.split('@')[0], email: authedUser.email
+             };
+             setCurrentUser(viewer);
+             localStorage.setItem('possd_active_user', JSON.stringify(viewer));
           }
           // The links are currently not being set into state here, but can be managed by DedicatedLinksView
         } catch (e) {
@@ -891,6 +933,10 @@ export default function App() {
         }
         if (isThresholdModalOpen) {
           setIsThresholdModalOpen(false);
+          return;
+        }
+        if (batchDocsToDelete) {
+          setBatchDocsToDelete(null);
           return;
         }
         if (docToDelete) {
@@ -979,6 +1025,7 @@ export default function App() {
     isRolesModalOpen,
     isLoginModalOpen,
     isThresholdModalOpen,
+    batchDocsToDelete,
     docToDelete,
     handleManualSync,
   ]);
@@ -1381,6 +1428,224 @@ export default function App() {
 
   const currentRoleConfig = currentUser ? getRoleConfig(currentUser?.role) : getRoleConfig('Viewer');
   const canDeleteLogs = currentUser ? canUserDeleteDocuments(currentUser?.role) : false;
+
+  // Batch Selection & Bulk Operations Logic
+  const isAllSelected = sortedDocuments.length > 0 && sortedDocuments.every((d) => selectedDocIds.has(d.id));
+  const isSomeSelected = sortedDocuments.some((d) => selectedDocIds.has(d.id)) && !isAllSelected;
+
+  const toggleSelectDoc = (docId: string) => {
+    setSelectedDocIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) {
+        next.delete(docId);
+      } else {
+        next.add(docId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (isAllSelected) {
+      setSelectedDocIds((prev) => {
+        const next = new Set(prev);
+        sortedDocuments.forEach((d) => next.delete(d.id));
+        return next;
+      });
+    } else {
+      setSelectedDocIds((prev) => {
+        const next = new Set(prev);
+        sortedDocuments.forEach((d) => next.add(d.id));
+        return next;
+      });
+    }
+  };
+
+  const clearSelection = () => {
+    setSelectedDocIds(new Set());
+  };
+
+  const handleExecuteBatchAction = async () => {
+    if (selectedDocIds.size === 0 || !batchAction) return;
+
+    if (batchAction === 'delete_batch') {
+      if (!canDeleteLogs) {
+        addNotification(
+          'Action Restricted',
+          'Deleting document entries is strictly restricted to System Admins and Department Managers.',
+          currentUser?.name || 'System',
+          'sync'
+        );
+        return;
+      }
+      const toDelete = documents.filter((d) => selectedDocIds.has(d.id));
+      setBatchDocsToDelete(toDelete);
+      return;
+    }
+
+    try {
+      setIsExecutingBatch(true);
+      const nowIso = new Date().toISOString();
+      const currentUserName = currentUser?.name || 'System Admin';
+      const currentUserRole = currentUser?.role || 'Staff';
+
+      let actionLabel = '';
+
+      const updatedDocs = await Promise.all(
+        documents.map(async (doc) => {
+          if (!selectedDocIds.has(doc.id)) return doc;
+
+          let updated = { ...doc };
+
+          if (batchAction === 'mark_cleared') {
+            actionLabel = 'Mark as Cleared';
+            const newMovement: InternalMovement = {
+              id: `mov-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              timestamp: nowIso,
+              personnelName: currentUserName,
+              personnelRole: currentUserRole,
+              currentDesk: doc.currentLocation || 'Section Desk',
+              forwardToDesk: 'Dispatch / Outbox Desk',
+              statusUpdate: 'dispatched',
+              notes: 'Batch clearance authorized for outgoing dispatch.',
+            };
+
+            const newClearance: ManagerClearance = {
+              isCleared: true,
+              clearedBy: currentUserName,
+              clearedAt: nowIso,
+              clearanceType: 'approved_for_dispatch',
+              clearanceRemarks: 'Bulk clearance approved.',
+            };
+
+            updated = {
+              ...updated,
+              managerClearance: newClearance,
+              currentStatus: 'Cleared for Out',
+              currentLocation: 'Dispatch / Outbox Desk',
+              movements: [...(updated.movements || []), newMovement],
+              updatedAt: nowIso,
+            };
+          } else if (batchAction.startsWith('forward:')) {
+            const targetDept = batchAction.replace('forward:', '');
+            actionLabel = `Forward to ${targetDept}`;
+
+            const newMovement: InternalMovement = {
+              id: `mov-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              timestamp: nowIso,
+              personnelName: currentUserName,
+              personnelRole: currentUserRole,
+              currentDesk: doc.currentLocation || 'Incoming Records Desk',
+              forwardToDesk: `${targetDept} Desk`,
+              statusUpdate: 'forwarded',
+              notes: `Bulk forwarded to ${targetDept} by ${currentUserName}.`,
+            };
+
+            updated = {
+              ...updated,
+              targetDivision: targetDept,
+              currentLocation: `${targetDept} Desk`,
+              movements: [...(updated.movements || []), newMovement],
+              updatedAt: nowIso,
+            };
+          } else if (batchAction.startsWith('priority:')) {
+            const newPriority = batchAction.replace('priority:', '') as 'Routine' | 'Urgent' | 'Rush';
+            actionLabel = `Set Priority to ${newPriority}`;
+            updated = {
+              ...updated,
+              priority: newPriority,
+              updatedAt: nowIso,
+            };
+          } else if (batchAction.startsWith('status:')) {
+            const newStatus = batchAction.replace('status:', '') as DocumentItem['currentStatus'];
+            actionLabel = `Set Status to ${newStatus}`;
+            updated = {
+              ...updated,
+              currentStatus: newStatus,
+              updatedAt: nowIso,
+            };
+          }
+
+          try {
+            await api.updateDocument(updated);
+          } catch (e) {
+            console.warn(`Failed to sync bulk update for doc ${doc.id}:`, e);
+          }
+
+          return updated;
+        })
+      );
+
+      setDocuments(updatedDocs);
+      saveStoredDocuments(updatedDocs);
+      broadcastDataUpdate('documents', updatedDocs);
+      scheduleSheetPush(updatedDocs);
+
+      addNotification(
+        'Batch Action Executed',
+        `Successfully applied "${actionLabel}" to ${selectedDocIds.size} document(s).`,
+        currentUserName,
+        'sync',
+        'BATCH'
+      );
+
+      api.logAudit("BATCH ACTION", "", currentUserName, "", `Executed ${actionLabel} on ${selectedDocIds.size} documents`);
+
+      setSelectedDocIds(new Set());
+      setBatchAction('');
+    } catch (err) {
+      console.error('Failed to execute batch action:', err);
+      addNotification('Error', 'Unable to complete batch action.', currentUser?.name || 'System', 'urgent');
+    } finally {
+      setIsExecutingBatch(false);
+    }
+  };
+
+  const handleConfirmBatchDelete = async () => {
+    if (!batchDocsToDelete || batchDocsToDelete.length === 0) return;
+    try {
+      setIsDeleting(true);
+      const count = batchDocsToDelete.length;
+      const idsToDelete = new Set(batchDocsToDelete.map((d) => d.id));
+
+      for (const doc of batchDocsToDelete) {
+        try {
+          await api.deleteDocument(doc.id);
+        } catch (e) {
+          console.warn(`Failed to delete doc ${doc.id}:`, e);
+        }
+      }
+
+      const updatedList = documents.filter((d) => !idsToDelete.has(d.id));
+      setDocuments(updatedList);
+      saveStoredDocuments(updatedList);
+      broadcastDataUpdate('documents', updatedList);
+      scheduleSheetPush(updatedList);
+
+      if (selectedDoc && idsToDelete.has(selectedDoc.id)) {
+        setSelectedDoc(null);
+      }
+
+      addNotification(
+        'Batch Records Deleted',
+        `Permanently deleted ${count} document entries by ${currentUser?.name} (${currentUser?.role}).`,
+        currentUser?.name || 'System',
+        'sync',
+        'BATCH-DEL'
+      );
+
+      api.logAudit("DELETE DOCUMENTS (BATCH)", "", currentUser?.name || 'System', "", `Deleted ${count} documents`);
+
+      setSelectedDocIds(new Set());
+      setBatchAction('');
+      setBatchDocsToDelete(null);
+    } catch (err) {
+      console.error('Batch deletion error:', err);
+      addNotification('Error', 'Unable to complete batch deletion.', currentUser?.name || 'System', 'urgent');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#f3f6fa] dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white transition-colors duration-200">
@@ -2024,10 +2289,165 @@ export default function App() {
 
         {/* Documents Table View - Professional Monochrome Slate Theme */}
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-2xs overflow-hidden transition-colors">
+          
+          {/* Table Header Batch Actions Toolbar */}
+          <div
+            id="table-batch-toolbar"
+            className={`px-4 py-2.5 border-b flex flex-wrap items-center justify-between gap-3 transition-colors ${
+              selectedDocIds.size > 0
+                ? 'bg-blue-50/90 dark:bg-blue-950/60 border-blue-200/80 dark:border-blue-900/60'
+                : 'bg-slate-50/70 dark:bg-slate-800/40 border-slate-200/80 dark:border-slate-800'
+            }`}
+          >
+            {/* Selection Status & Checkbox */}
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="batch-select-all-toolbar"
+                  aria-label="Select all visible documents"
+                  checked={isAllSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = isSomeSelected;
+                  }}
+                  onChange={toggleSelectAll}
+                  className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-blue-600 focus:ring-blue-500 cursor-pointer align-middle"
+                  title={isAllSelected ? "Deselect all visible documents" : "Select all visible documents"}
+                />
+                <label
+                  htmlFor="batch-select-all-toolbar"
+                  className="text-xs font-semibold text-slate-700 dark:text-slate-300 select-none cursor-pointer flex items-center gap-1.5"
+                >
+                  {selectedDocIds.size > 0 ? (
+                    <span className="text-blue-700 dark:text-blue-300 font-bold flex items-center gap-1.5">
+                      <span className="inline-flex items-center justify-center px-2 py-0.5 text-[11px] rounded-full bg-blue-600 text-white font-mono">
+                        {selectedDocIds.size}
+                      </span>
+                      <span>of {sortedDocuments.length} selected</span>
+                    </span>
+                  ) : (
+                    <span>Select all visible ({sortedDocuments.length})</span>
+                  )}
+                </label>
+              </div>
+
+              {selectedDocIds.size > 0 && (
+                <button
+                  type="button"
+                  id="clear-selection-btn"
+                  onClick={clearSelection}
+                  className="text-[11px] text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 underline cursor-pointer"
+                >
+                  Deselect all
+                </button>
+              )}
+            </div>
+
+            {/* Batch Action Select Dropdown & Bulk Execute Button */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                <label
+                  htmlFor="batch-action-select"
+                  className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 hidden sm:inline"
+                >
+                  Action:
+                </label>
+                <select
+                  id="batch-action-select"
+                  value={batchAction}
+                  onChange={(e) => setBatchAction(e.target.value)}
+                  disabled={selectedDocIds.size === 0}
+                  className="text-xs bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-2xs min-w-[210px]"
+                >
+                  <option value="">Select batch action...</option>
+                  <option value="mark_cleared">&#10003; Mark as Cleared (Dispatch)</option>
+                  
+                  <optgroup label="Forward to Division...">
+                    {(dropdownOptions.departments.length > 0 ? dropdownOptions.departments : ['Administrative Section', 'Port Operations Section', 'Billing & Collections Section', 'Harbor Master Office', 'Safety & Environmental Division']).map((dept) => (
+                      <option key={`fwd-${dept}`} value={`forward:${dept}`}>
+                        &rarr; Forward to: {dept}
+                      </option>
+                    ))}
+                  </optgroup>
+
+                  <optgroup label="Change Priority...">
+                    <option value="priority:Routine">Set Priority: Routine</option>
+                    <option value="priority:Urgent">Set Priority: Urgent</option>
+                    <option value="priority:Rush">Set Priority: Rush</option>
+                  </optgroup>
+
+                  <optgroup label="Update Lifecycle Status...">
+                    <option value="status:Under Review">Set Status: Under Review</option>
+                    <option value="status:Supervisor Comment Needed">Set Status: Supervisor Comment Needed</option>
+                    <option value="status:Complied / Ready for Clearance">Set Status: Complied / Ready for Clearance</option>
+                    <option value="status:Dispatched / Completed">Set Status: Dispatched / Completed</option>
+                  </optgroup>
+
+                  {canDeleteLogs && (
+                    <optgroup label="Admin Actions">
+                      <option value="delete_batch" className="text-rose-600 font-bold">
+                        &#128465; Delete Selected ({selectedDocIds.size})
+                      </option>
+                    </optgroup>
+                  )}
+                </select>
+              </div>
+
+              {/* Bulk Execute Button */}
+              <button
+                type="button"
+                id="bulk-execute-btn"
+                onClick={handleExecuteBatchAction}
+                disabled={selectedDocIds.size === 0 || !batchAction || isExecutingBatch}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:bg-slate-300 dark:disabled:bg-slate-700 text-white text-xs font-bold rounded-lg shadow-2xs transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                title={
+                  selectedDocIds.size === 0
+                    ? 'Select one or more documents to perform batch action'
+                    : !batchAction
+                    ? 'Select an action from the dropdown first'
+                    : `Execute on ${selectedDocIds.size} document(s)`
+                }
+              >
+                {isExecutingBatch ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Processing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Execute Action</span>
+                    {selectedDocIds.size > 0 && (
+                      <span className="ml-0.5 px-1.5 py-0.2 text-[10px] bg-blue-800/80 rounded-full font-mono">
+                        {selectedDocIds.size}
+                      </span>
+                    )}
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
                 <tr className="bg-slate-900 dark:bg-slate-950 text-white font-bold uppercase tracking-wider text-[11px] border-b border-slate-800">
+                  {/* Selection Checkbox Column */}
+                  <th scope="col" className="w-10 py-3.5 px-3 text-center select-none">
+                    <input
+                      type="checkbox"
+                      id="select-all-table-header"
+                      aria-label="Select or deselect all visible documents"
+                      checked={isAllSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = isSomeSelected;
+                      }}
+                      onChange={toggleSelectAll}
+                      className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-blue-400 focus:ring-offset-slate-900 cursor-pointer align-middle"
+                      title={isAllSelected ? 'Deselect all visible records' : 'Select all visible records'}
+                    />
+                  </th>
+
                   {/* Tracking Code */}
                   <th
                     scope="col"
@@ -2217,7 +2637,7 @@ export default function App() {
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {sortedDocuments.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="text-center py-12 text-slate-500 dark:text-slate-400">
+                    <td colSpan={9} className="text-center py-12 text-slate-500 dark:text-slate-400">
                       <Inbox className="w-8 h-8 text-slate-300 dark:text-slate-600 mx-auto mb-2" />
                       <p className="font-bold text-slate-800 dark:text-slate-200">No documents match filter criteria.</p>
                       <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
@@ -2235,17 +2655,35 @@ export default function App() {
                     const isOverdue = timeMetrics.isOverdue;
                     const shouldHighlightOverdue =
                       timeInDeskConfig.highlightRowOnExceed && isOverdue;
+                    const isSelected = selectedDocIds.has(doc.id);
 
                     return (
                       <tr
                         key={`${doc.id}-${_idx_doc}`}
                         onClick={() => setSelectedDoc(doc)}
                         className={`transition-all duration-150 cursor-pointer group border-l-4 ${
-                          shouldHighlightOverdue
+                          isSelected
+                            ? 'bg-blue-50/80 dark:bg-blue-950/50 hover:bg-blue-100/90 dark:hover:bg-blue-900/60 border-l-blue-600 shadow-2xs'
+                            : shouldHighlightOverdue
                             ? 'bg-rose-50/70 dark:bg-rose-950/40 hover:bg-rose-100/90 dark:hover:bg-rose-900/40 border-l-rose-500 shadow-2xs hover:shadow-md'
                             : 'border-l-transparent hover:border-l-blue-500 hover:bg-blue-50/50 dark:hover:bg-slate-800/80 shadow-2xs hover:shadow-md'
                         }`}
                       >
+                        {/* Checkbox Column */}
+                        <td
+                          className="py-3.5 px-3 text-center whitespace-nowrap"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            id={`select-doc-${doc.id}`}
+                            aria-label={`Select document ${doc.trackingNumber}`}
+                            checked={isSelected}
+                            onChange={() => toggleSelectDoc(doc.id)}
+                            className="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-blue-600 focus:ring-blue-500 cursor-pointer align-middle"
+                          />
+                        </td>
+
                         {/* Tracking # & Priority */}
                         <td className="py-3.5 px-4 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
                           <span className="group-hover:text-blue-600 dark:group-hover:text-blue-400 group-hover:translate-x-0.5 inline-block transition-all duration-150">
@@ -2555,6 +2993,108 @@ export default function App() {
         isOpen={isShortcutsModalOpen}
         onClose={() => setIsShortcutsModalOpen(false)}
       />
+
+      {/* Modal: Batch Delete Documents Confirmation */}
+      {batchDocsToDelete && batchDocsToDelete.length > 0 && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 max-w-lg w-full overflow-hidden transition-colors">
+            
+            {/* Modal Header */}
+            <div className="p-5 bg-rose-50 dark:bg-rose-950/40 border-b border-rose-100 dark:border-rose-900 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-900/60 text-rose-700 dark:text-rose-300 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5 text-rose-600 dark:text-rose-400" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                    Confirm Bulk Deletion
+                  </h3>
+                  <p className="text-xs text-rose-800 dark:text-rose-300 font-medium">
+                    Permanent deletion of {batchDocsToDelete.length} document record(s)
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBatchDocsToDelete(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 space-y-4">
+              <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/70 rounded-xl text-xs text-amber-800 dark:text-amber-300">
+                <p className="font-semibold flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                  Warning: This action cannot be undone.
+                </p>
+                <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+                  The following {batchDocsToDelete.length} document entries will be permanently removed from all logs and synchronizations.
+                </p>
+              </div>
+
+              {/* Document List Preview */}
+              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 divide-y divide-slate-100 dark:divide-slate-800">
+                {batchDocsToDelete.map((doc) => (
+                  <div key={doc.id} className="pt-1.5 first:pt-0 flex items-center justify-between text-xs">
+                    <div className="min-w-0 pr-2">
+                      <span className="font-mono font-bold text-slate-900 dark:text-white mr-2">
+                        {doc.trackingNumber}
+                      </span>
+                      <span className="text-slate-600 dark:text-slate-400 truncate">
+                        {doc.title}
+                      </span>
+                    </div>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 shrink-0 font-medium">
+                      {doc.currentStatus}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Role Audit Info */}
+              <div className="p-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-[11px] text-slate-500 dark:text-slate-400 flex items-center justify-between">
+                <span>Authorized Operator:</span>
+                <span className="font-semibold text-slate-800 dark:text-slate-200">
+                  {currentUser?.name} ({currentUser?.role})
+                </span>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 bg-slate-50 dark:bg-slate-850 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setBatchDocsToDelete(null)}
+                className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                id="confirm-batch-delete-btn"
+                disabled={isDeleting}
+                onClick={handleConfirmBatchDelete}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white text-xs font-semibold transition-colors shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                {isDeleting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deleting {batchDocsToDelete.length}...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete {batchDocsToDelete.length} Record{batchDocsToDelete.length === 1 ? '' : 's'}</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal: Delete Document Confirmation (System Admin & Department Manager) */}
       {docToDelete && (

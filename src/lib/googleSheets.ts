@@ -65,15 +65,48 @@ const initializedSheets = new Set<string>();
  */
 export function isGoogleQuotaError(err: any): boolean {
   if (!err) return false;
-  const msg = (typeof err === 'string' ? err : err.message || '').toLowerCase();
+  if (err.status === 429 || err.code === 429 || err?.error?.code === 429) return true;
+  const msg = (
+    typeof err === 'string'
+      ? err
+      : err?.error?.message || err?.message || err?.statusText || ''
+  ).toLowerCase();
   return (
+    msg.includes('rate exceeded') ||
     msg.includes('quota exceeded') ||
     msg.includes('write requests per minute') ||
     msg.includes('read requests per minute') ||
     msg.includes('rate limit') ||
     msg.includes('too many requests') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('resource has been exhausted') ||
+    msg.includes('quota') ||
     msg.includes('429')
   );
+}
+
+/**
+ * Internal helper to retry fetch operations with exponential backoff on HTTP 429 rate limit errors
+ */
+async function fetchWithQuotaRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries = 2
+): Promise<Response> {
+  let attempt = 0;
+  while (true) {
+    const res = await fetch(url, options);
+    if (res.status === 429) {
+      if (attempt < maxRetries) {
+        attempt++;
+        const backoffMs = 1500 * Math.pow(2, attempt);
+        console.warn(`Google Sheets 429 Rate limit detected. Backing off ${backoffMs}ms before retry ${attempt}...`);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+    }
+    return res;
+  }
 }
 
 /**
@@ -555,20 +588,28 @@ export async function syncAllDocumentsToSheet(
     throw new Error('No Google Spreadsheet ID provided.');
   }
 
-  // 1. Ensure sheet structure and headers
-  const structure = await populateHeaders(
-    accessToken,
-    spreadsheetId,
-    options?.targetMasterTab || MASTER_TAB_NAME
-  );
-  initializedSheets.add(spreadsheetId);
+  // 1. Ensure sheet structure and headers only if not yet initialized or forced
+  let structure = {
+    masterTabName: options?.targetMasterTab || MASTER_TAB_NAME,
+    masterSheetId: 0,
+    personnelTabName: PERSONNEL_TAB_NAME,
+  };
+
+  if (options?.forceHeaders || !initializedSheets.has(spreadsheetId)) {
+    structure = await populateHeaders(
+      accessToken,
+      spreadsheetId,
+      options?.targetMasterTab || MASTER_TAB_NAME
+    );
+    initializedSheets.add(spreadsheetId);
+  }
 
   // 2. Prepare all document rows with sanitization
   const docRows = documents.map((d) => formatDocumentRow(d).map(sanitizeCellValue));
 
   // Clear existing values from Master Tracking (row 2 onwards) with empty body {}
   const clearDocRange = `'${structure.masterTabName}'!A2:V`;
-  await fetch(
+  await fetchWithQuotaRetry(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(clearDocRange)}:clear`,
     {
       method: 'POST',
@@ -582,7 +623,7 @@ export async function syncAllDocumentsToSheet(
 
   if (docRows.length > 0) {
     const updateDocRange = `'${structure.masterTabName}'!A2:V${docRows.length + 1}`;
-    const docRes = await fetch(
+    const docRes = await fetchWithQuotaRetry(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(updateDocRange)}?valueInputOption=USER_ENTERED`,
       {
         method: 'PUT',
@@ -599,6 +640,9 @@ export async function syncAllDocumentsToSheet(
     );
     if (!docRes.ok) {
       const err = await docRes.json().catch(() => ({}));
+      if (isGoogleQuotaError(err) || docRes.status === 429) {
+        throw new Error('Google Sheets write rate limit reached (60 requests/min). Records are safely preserved on your device and will resume syncing once the quota resets.');
+      }
       throw new Error(err.error?.message || `Failed to sync documents to tab "${structure.masterTabName}"`);
     }
   }
@@ -608,7 +652,7 @@ export async function syncAllDocumentsToSheet(
   if (personnelList && personnelList.length > 0) {
     const personnelRows = personnelList.map((p) => formatPersonnelRow(p, documents).map(sanitizeCellValue));
     const clearPersonnelRange = `'${structure.personnelTabName}'!A2:L`;
-    await fetch(
+    await fetchWithQuotaRetry(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(clearPersonnelRange)}:clear`,
       {
         method: 'POST',
@@ -621,7 +665,7 @@ export async function syncAllDocumentsToSheet(
     ).catch((e) => console.warn('Clear personnel range notice:', e));
 
     const updatePersonnelRange = `'${structure.personnelTabName}'!A2:L${personnelRows.length + 1}`;
-    const persRes = await fetch(
+    const persRes = await fetchWithQuotaRetry(
       `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(updatePersonnelRange)}?valueInputOption=USER_ENTERED`,
       {
         method: 'PUT',
@@ -640,6 +684,9 @@ export async function syncAllDocumentsToSheet(
       personnelUpdated = personnelRows.length;
     } else {
       const err = await persRes.json().catch(() => ({}));
+      if (isGoogleQuotaError(err) || persRes.status === 429) {
+        throw new Error('Google Sheets write rate limit reached (60 requests/min). Records are safely preserved on your device and will resume syncing once the quota resets.');
+      }
       console.warn('Personnel sync notice:', err);
     }
   }

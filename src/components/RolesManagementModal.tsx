@@ -366,7 +366,11 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     onUpdateDropdownOptions({
       roles: [],
       departments: [],
-      desks: [], documentTypes: [], communicationTypes: [], reportTypes: [],
+      desks: [],
+      documentTypes: [],
+      communicationTypes: [],
+      reportTypes: [],
+      personnel: [],
     });
     setIsConfirmingClearAll(false);
     showFeedback('All custom entries cleared. System fallback defaults restored.');
