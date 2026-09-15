@@ -10,7 +10,6 @@ import {
   HardDrive,
   FileText,
   Globe,
-  FileSpreadsheet,
   Pin,
   FolderOpen,
   Copy,
@@ -173,11 +172,11 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
     if (type === 'drive' || category === 'Google Drive') {
       return <HardDrive className="w-5 h-5 text-sky-400" />;
     }
-    if (type === 'sheet') {
-      return <FileSpreadsheet className="w-5 h-5 text-emerald-400" />;
+    if (type === 'file' || category === 'Reference Guidelines' || category === 'Official Files') {
+      return <FileText className="w-5 h-5 text-emerald-400" />;
     }
-    if (type === 'file' || category === 'Reference Guidelines') {
-      return <FileText className="w-5 h-5 text-amber-400" />;
+    if (type === 'folder') {
+      return <FolderOpen className="w-5 h-5 text-amber-400" />;
     }
     return <Globe className="w-5 h-5 text-indigo-400" />;
   };
@@ -534,8 +533,8 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
                     onChange={(e) => setFormIconType(e.target.value as any)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-blue-500"
                   >
-                    <option value="drive">Cloud Drive / Folder</option>
-                    <option value="sheet">Spreadsheet / Ledger</option>
+                    <option value="drive">Cloud Drive</option>
+                    <option value="folder">Shared Folder</option>
                     <option value="file">Document / PDF</option>
                     <option value="link">Web Portal / System</option>
                   </select>

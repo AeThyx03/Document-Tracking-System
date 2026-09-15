@@ -11,48 +11,14 @@ import {
 import * as dotenv from 'dotenv';
 import { eq } from 'drizzle-orm';
 import { INITIAL_DOCUMENTS, INITIAL_STAFF_MEMBERS } from '../src/mockData.ts';
-import fetch from 'node-fetch';
 
 dotenv.config();
 
-const GOOGLE_APPS_SCRIPT_URL = process.env.GOOGLE_APPS_SCRIPT_URL;
-const API_SECRET = process.env.API_SECRET;
-
-async function fetchFromAppsScript(action: string) {
-  if (!GOOGLE_APPS_SCRIPT_URL || !API_SECRET) {
-    throw new Error("Missing GOOGLE_APPS_SCRIPT_URL or API_SECRET.");
-  }
-  const url = `${GOOGLE_APPS_SCRIPT_URL}?secret=${encodeURIComponent(API_SECRET)}&action=${encodeURIComponent(action)}`;
-  const response = await fetch(url, { method: "GET", headers: { "Content-Type": "application/json" } });
-  if (!response.ok) throw new Error(`Apps Script Error: ${response.statusText}`);
-  return await response.json();
-}
-
 async function migrate() {
-  console.log('--- STARTING PHASE 2 MIGRATION ---');
+  console.log('--- STARTING POSTGRESQL DATABASE SEED / MIGRATION ---');
   
-  let docsData = INITIAL_DOCUMENTS || [];
-  let staffData = INITIAL_STAFF_MEMBERS || [];
-  
-  try {
-    console.log('Attempting to fetch documents from Apps Script...');
-    const docsRes: any = await fetchFromAppsScript("getDocuments");
-    if (docsRes && docsRes.documents && docsRes.documents.length > 0) {
-      docsData = docsRes.documents;
-    }
-  } catch (e: any) {
-    console.log('Could not fetch docs from Apps Script (using local backup/mock data):', e.message);
-  }
-
-  try {
-    console.log('Attempting to fetch personnel from Apps Script...');
-    const staffRes: any = await fetchFromAppsScript("getStaff");
-    if (staffRes && staffRes.staff && staffRes.staff.length > 0) {
-      staffData = staffRes.staff;
-    }
-  } catch (e: any) {
-    console.log('Could not fetch staff from Apps Script (using local backup/mock data):', e.message);
-  }
+  const docsData = INITIAL_DOCUMENTS || [];
+  const staffData = INITIAL_STAFF_MEMBERS || [];
 
   console.log(`Found ${docsData.length} documents.`);
   console.log(`Found ${staffData.length} personnel.`);

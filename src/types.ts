@@ -264,7 +264,7 @@ export interface DedicatedLinkItem {
   category: 'Google Drive' | 'Official Files' | 'Portals & Systems' | 'Reference Guidelines';
   description?: string;
   targetDivision?: string;
-  iconType?: 'drive' | 'file' | 'link' | 'folder' | 'sheet';
+  iconType?: 'drive' | 'file' | 'link' | 'folder';
   addedBy: string;
   addedAt: string;
   isPinned?: boolean;
