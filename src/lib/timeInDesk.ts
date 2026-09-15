@@ -1,6 +1,15 @@
-import { DocumentItem, TimeInDeskConfig, DocumentTimeMetrics } from '../types';
+import { DocumentItem, TimeInDeskConfig, DocumentTimeMetrics, getLatestMovement, parsePhilippineDateToISO } from '../types';
 
 export const TIME_IN_DESK_CONFIG_KEY = 'doc_tracker_time_in_desk_config';
+
+/**
+ * Standard institutional turnaround SLA targets by priority classification.
+ */
+export const PRIORITY_SLA_HOURS: Record<'Rush' | 'Urgent' | 'Routine', number> = {
+  Rush: 4,
+  Urgent: 8,
+  Routine: 24,
+};
 
 export const DEFAULT_TIME_IN_DESK_CONFIG: TimeInDeskConfig = {
   defaultThresholdHours: 24,
@@ -18,14 +27,33 @@ export const DEFAULT_TIME_IN_DESK_CONFIG: TimeInDeskConfig = {
 };
 
 /**
- * Returns system reference now. If local clock is before Sept 2026 baseline,
- * uses the latest mock date baseline so simulated metrics remain coherent.
+ * Returns current timestamp (UTC/server-synchronized).
+ * Removed simulated reference clock baseline to ensure production temporal accuracy.
  */
 export function getReferenceNow(): number {
-  const systemNow = Date.now();
-  // Sept 6, 2026 14:30:00 UTC baseline
-  const baseline = new Date('2026-09-06T14:30:00Z').getTime();
-  return Math.max(systemNow, baseline);
+  return Date.now();
+}
+
+export async function fetchTimeInDeskConfigFromBackend(): Promise<TimeInDeskConfig> {
+  try {
+    const res = await fetch('/api/sla/config', {
+      headers: { 'Authorization': 'Bearer ' + (window.localStorage.getItem('possd_auth_token') || '') }
+    });
+    const data = await res.json();
+    if (data.success && data.config) {
+      return {
+        ...DEFAULT_TIME_IN_DESK_CONFIG,
+        ...data.config,
+        divisionThresholds: {
+          ...DEFAULT_TIME_IN_DESK_CONFIG.divisionThresholds,
+          ...(data.config.divisionThresholds || {})
+        }
+      };
+    }
+  } catch (err) {
+    console.error('Failed to fetch SLA config from backend:', err);
+  }
+  return getTimeInDeskConfig(); // Fallback to local
 }
 
 export function getTimeInDeskConfig(): TimeInDeskConfig {
@@ -46,6 +74,21 @@ export function getTimeInDeskConfig(): TimeInDeskConfig {
     console.error('Failed to parse time-in-desk config:', err);
   }
   return DEFAULT_TIME_IN_DESK_CONFIG;
+}
+
+export async function saveTimeInDeskConfigToBackend(config: TimeInDeskConfig): Promise<void> {
+  try {
+    await fetch('/api/sla/config', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + (window.localStorage.getItem('possd_auth_token') || '')
+      },
+      body: JSON.stringify(config)
+    });
+  } catch (err) {
+    console.error('Failed to save SLA config to backend:', err);
+  }
 }
 
 export function saveTimeInDeskConfig(config: TimeInDeskConfig): void {
@@ -93,17 +136,11 @@ export function calculateDocumentTimeInDesk(
   // Determine when the document entered the division / current desk
   let arrivalTimestamp = doc.createdAt;
   if (doc.dateReceived && doc.timeReceived) {
-    const combinedStr = `${doc.dateReceived}T${doc.timeReceived}Z`;
-    const parsed = new Date(combinedStr).getTime();
-    if (!isNaN(parsed)) {
-      arrivalTimestamp = new Date(parsed).toISOString();
-    }
+    arrivalTimestamp = parsePhilippineDateToISO(doc.dateReceived, doc.timeReceived);
   }
 
-  // If there are movements within the division, the latest movement is the arrival at current desk
-  const latestMovement = doc.movements && doc.movements.length > 0 
-    ? doc.movements[doc.movements.length - 1] 
-    : null;
+  // Authoritative latest movement determined by chronological sorting (Requirement 14)
+  const latestMovement = doc.movements && doc.movements.length > 0 ? getLatestMovement(doc) : null;
 
   // If movements exist, arrival at current desk/division can be inferred
   const effectiveArrival = latestMovement?.timestamp || arrivalTimestamp;

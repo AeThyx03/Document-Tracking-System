@@ -1,152 +1,45 @@
-import { DocumentItem, AppUserRole, RolePermissionConfig, UserRoleType, RegistryDropdownOptions } from './types';
+import { DocumentItem, AppUserRole, RolePermissionConfig, UserRoleType, RegistryDropdownOptions, normalizeDocumentItem } from './types';
+import {
+  CanonicalRole,
+  CANONICAL_ROLES,
+  normalizeRole,
+  ROLE_CONFIGS,
+  getRoleConfig,
+  getRolePermissions,
+  canUserDeleteDocuments,
+  canUserDeleteDivisionThresholdOverrides,
+  canUserAuthorizeClearance,
+  canUserFulfillCompliance,
+  canUserIssueSupervisorRemarks,
+  canUserLogIncoming,
+  canUserManageStaff,
+  canUserManageSettings,
+  canUserRecordMovement,
+  canUserManageCredentials,
+} from './lib/permissions';
 
-const STORAGE_KEY = 'office_document_tracker_data_v1';
-const SHEET_CONFIG_KEY = 'office_document_tracker_sheet_config_v1';
-const STAFF_KEY = 'office_document_tracker_staff_v1';
-const DROPDOWN_OPTIONS_KEY = 'office_document_tracker_dropdown_options_v2';
-
-export const ROLE_CONFIGS: Record<string, RolePermissionConfig> = {
-  'Receiving': {
-    role: 'Receiving',
-    title: 'Administrative Receiving Officer',
-    badgeBg: 'bg-sky-500/10',
-    badgeText: 'text-sky-700',
-    badgeBorder: 'border-sky-500/20',
-    dotColor: 'bg-sky-500',
-    summary: 'Captures incoming documents with auto-timestamps, stamps tracking references, and routes to initial division.',
-    canLogIncoming: true,
-    canRecordMovement: true,
-    canIssueSupervisorRemarks: false,
-    canFulfillCompliance: false,
-    canAuthorizeClearance: false,
-    canConfigureSync: false,
-    canManageStaff: false,
-    canDeleteDocuments: false,
-    canManageCredentials: false,
-    canDeleteDivisionThresholdOverrides: false,
-    hierarchyNote: 'Entry Point: Initial document logging & barcoding',
-  },
-  'Staff': {
-    role: 'Staff',
-    title: 'Action Officer / Desk Personnel',
-    badgeBg: 'bg-blue-500/15',
-    badgeText: 'text-blue-700',
-    badgeBorder: 'border-blue-500/30',
-    dotColor: 'bg-blue-600',
-    summary: 'Receives documents at workstation, updates desk-to-desk movements, and complies with directives and requirements.',
-    canLogIncoming: false,
-    canRecordMovement: true,
-    canIssueSupervisorRemarks: false,
-    canFulfillCompliance: true,
-    canAuthorizeClearance: false,
-    canConfigureSync: false,
-    canManageStaff: false,
-    canDeleteDocuments: false,
-    canManageCredentials: false,
-    canDeleteDivisionThresholdOverrides: false,
-    hierarchyNote: 'Processing: Action officer review & movement tracking',
-  },
-  'Supervisor': {
-    role: 'Supervisor',
-    title: 'Unit Supervisor / 1st-Line Reviewer',
-    badgeBg: 'bg-amber-500/15',
-    badgeText: 'text-amber-800',
-    badgeBorder: 'border-amber-500/30',
-    dotColor: 'bg-amber-500',
-    summary: 'First-line supervisory reviewer: conducts preliminary document review and issues directives. Must review and endorse before Division Manager endorsement.',
-    canLogIncoming: false,
-    canRecordMovement: true,
-    canIssueSupervisorRemarks: true,
-    canFulfillCompliance: true,
-    canAuthorizeClearance: false,
-    canConfigureSync: false,
-    canManageStaff: false,
-    canDeleteDocuments: false,
-    canManageCredentials: false,
-    canDeleteDivisionThresholdOverrides: false,
-    isPrerequisiteBeforeDivisionManager: true,
-    hierarchyNote: 'Prerequisite Step 1: Mandatory preliminary endorsement before Division Manager review',
-  },
-  'Division Manager': {
-    role: 'Division Manager',
-    title: 'Division Chief / Mid-Level Manager',
-    badgeBg: 'bg-blue-700/15',
-    badgeText: 'text-blue-900',
-    badgeBorder: 'border-blue-700/30',
-    dotColor: 'bg-blue-800',
-    summary: 'Division Chief: conducts secondary division-level review following Supervisor endorsement; issues directives and recommends document to Department Manager.',
-    canLogIncoming: false,
-    canRecordMovement: true,
-    canIssueSupervisorRemarks: true,
-    canFulfillCompliance: true,
-    canAuthorizeClearance: false,
-    canConfigureSync: false,
-    canManageStaff: false,
-    canDeleteDocuments: false,
-    canManageCredentials: false,
-    canDeleteDivisionThresholdOverrides: false,
-    hierarchyNote: 'Endorsement Step 2: Division-level review (requires prior Supervisor review)',
-  },
-  'Department Manager': {
-    role: 'Department Manager',
-    title: 'Executive Director / Department Head',
-    badgeBg: 'bg-emerald-500/10',
-    badgeText: 'text-emerald-700',
-    badgeBorder: 'border-emerald-500/20',
-    dotColor: 'bg-emerald-500',
-    summary: 'Holds executive sign-off authority. Issues official clearance for out, assigns outgoing dispatch numbers, directs releases, and authorizes log deletions.',
-    canLogIncoming: true,
-    canRecordMovement: true,
-    canIssueSupervisorRemarks: true,
-    canFulfillCompliance: true,
-    canAuthorizeClearance: true,
-    canConfigureSync: true,
-    canManageStaff: true,
-    canDeleteDocuments: true,
-    canManageCredentials: false,
-    canDeleteDivisionThresholdOverrides: false,
-    hierarchyNote: 'Executive Step 3: Final Clearance & Outgoing Dispatch Authorization (Delete Permitted)',
-  },
-  'System Admin': {
-    role: 'System Admin',
-    title: 'Registry & Systems Administrator',
-    badgeBg: 'bg-slate-700/10',
-    badgeText: 'text-slate-800',
-    badgeBorder: 'border-slate-500/20',
-    dotColor: 'bg-slate-700',
-    summary: 'Full system oversight across records, staff credentials enrollment, staff role assignments, dropdown registries, Google Sheets synchronization, division threshold override deletion, and audit trail validation.',
-    canLogIncoming: true,
-    canRecordMovement: true,
-    canIssueSupervisorRemarks: true,
-    canFulfillCompliance: true,
-    canAuthorizeClearance: true,
-    canConfigureSync: true,
-    canManageStaff: true,
-    canDeleteDocuments: true,
-    canManageCredentials: true,
-    canDeleteDivisionThresholdOverrides: true,
-    hierarchyNote: 'Administration: System controls, credentials enrollment, registry, division overrides deletion authorization',
-  },
+export {
+  type CanonicalRole,
+  CANONICAL_ROLES,
+  normalizeRole,
+  ROLE_CONFIGS,
+  getRoleConfig,
+  getRolePermissions,
+  canUserDeleteDocuments,
+  canUserDeleteDivisionThresholdOverrides,
+  canUserAuthorizeClearance,
+  canUserFulfillCompliance,
+  canUserIssueSupervisorRemarks,
+  canUserLogIncoming,
+  canUserManageStaff,
+  canUserManageSettings,
+  canUserRecordMovement,
+  canUserManageCredentials,
 };
 
-// Aliases for backward compatibility
-ROLE_CONFIGS['sys admin'] = ROLE_CONFIGS['System Admin'];
-ROLE_CONFIGS['receiving'] = ROLE_CONFIGS['Receiving'];
-ROLE_CONFIGS['staff'] = ROLE_CONFIGS['Staff'];
-ROLE_CONFIGS['supervisor'] = ROLE_CONFIGS['Supervisor'];
-ROLE_CONFIGS['division manager'] = ROLE_CONFIGS['Division Manager'];
-ROLE_CONFIGS['department manager'] = ROLE_CONFIGS['Department Manager'];
-ROLE_CONFIGS['Personnel / Handler'] = ROLE_CONFIGS['Staff'];
-ROLE_CONFIGS['Personnel'] = ROLE_CONFIGS['Staff'];
-ROLE_CONFIGS['Records Administrator'] = ROLE_CONFIGS['System Admin'];
-
-ROLE_CONFIGS['sys admin'] = ROLE_CONFIGS['System Admin'];
-ROLE_CONFIGS['receiving'] = ROLE_CONFIGS['Admin Staff'];
-ROLE_CONFIGS['staff'] = ROLE_CONFIGS['Staff'];
-ROLE_CONFIGS['supervisor'] = ROLE_CONFIGS['System Admin'];
-ROLE_CONFIGS['division manager'] = ROLE_CONFIGS['Division Manager'];
-ROLE_CONFIGS['department manager'] = ROLE_CONFIGS['Department Head'];
-
+const STORAGE_KEY = 'office_document_tracker_data_v1';
+const STAFF_KEY = 'office_document_tracker_staff_v1';
+const DROPDOWN_OPTIONS_KEY = 'office_document_tracker_dropdown_options_v2';
 
 export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
   {
@@ -158,177 +51,159 @@ export const INITIAL_STAFF_MEMBERS: AppUserRole[] = [
     email: "admin@system.local",
     assignedDesk: "Central Registry",
     username: "admin",
-    password: "admin123",
     status: "active",
   },
   {
     id: "staff-0",
     name: "Myles Rovi P. Martinez",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "MR",
     username: "myles1",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-1",
     name: "Judy F. Villarete",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "JF",
     username: "judy2",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-2",
     name: "Bryan L. Cabalfin",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "BL",
     username: "bryan3",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-3",
     name: "Pamela Aprille O. Lumbre",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "PA",
     username: "pamela4",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-4",
     name: "Benjamin A. Nieva",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "BA",
     username: "benjamin5",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-5",
     name: "Maria Urduja Jean V. Tabilas",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "MU",
     username: "maria6",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-6",
     name: "Mary Flor F. Aquino",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "MF",
     username: "mary7",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-7",
     name: "Aubrey Camille C. Cabrera",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "AC",
     username: "aubrey8",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-8",
     name: "Anne Katrina S. Del Rosario",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "AK",
     username: "anne9",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-9",
     name: "Rey Reginald A. Mojica",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "RR",
     username: "rey10",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-10",
     name: "Janelle Vanessa E. Tanguilig",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "JV",
     username: "janelle11",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-11",
     name: "Rodolfo M. Torino Jr",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "RM",
     username: "rodolfo12",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-12",
     name: "Danezel Christian G. Cruz",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "DC",
     username: "danezel13",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-13",
     name: "John Nicolo V. Salvador",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "JN",
     username: "john14",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-14",
     name: "Marian Grace Paling",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "MG",
     username: "marian15",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-15",
     name: "Judy Ann T. Pacaanas",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "JA",
     username: "judy16",
-    password: "password123",
     status: "active",
   },
   {
     id: "staff-16",
     name: "Oscar B. Hanova Jr.",
-    role: "staff",
+    role: "Staff",
     division: "CMED",
     avatarInitials: "OB",
     username: "oscar17",
-    password: "password123",
     status: "active",
   },
 ];
@@ -375,56 +250,22 @@ export function getStoredDocuments(): DocumentItem[] {
   try {
     const raw = safeStorageGet(STORAGE_KEY);
     if (raw) {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map(normalizeDocumentItem);
+      }
     }
   } catch (e) {
     console.error('Failed to load documents from storage:', e);
   }
-  return INITIAL_DOCUMENTS;
+  return INITIAL_DOCUMENTS.map(normalizeDocumentItem);
 }
 
 export function saveStoredDocuments(docs: DocumentItem[]) {
   try {
     safeStorageSet(STORAGE_KEY, JSON.stringify(docs));
-    // Cross-device persistence: sync to backend
-    
   } catch (e) {
     console.error('Failed to save documents to storage:', e);
-  }
-}
-
-export function getStoredSheetConfig(): { spreadsheetId: string; spreadsheetUrl: string } | null {
-  try {
-    const raw = safeStorageGet(SHEET_CONFIG_KEY);
-    if (raw) {
-      return JSON.parse(raw);
-    }
-  } catch (e) {
-    console.error('Failed to get sheet config:', e);
-  }
-  return null;
-}
-
-export function saveStoredSheetConfig(config: { spreadsheetId: string; spreadsheetUrl: string } | null) {
-  try {
-    if (config) {
-      safeStorageSet(SHEET_CONFIG_KEY, JSON.stringify(config));
-      // Cross-device persistence: sync to backend
-      fetch('/api/sheet-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config),
-      }).catch(() => {});
-    } else {
-      safeStorageRemove(SHEET_CONFIG_KEY);
-      fetch('/api/sheet-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      }).catch(() => {});
-    }
-  } catch (e) {
-    console.error('Failed to save sheet config:', e);
   }
 }
 
@@ -434,26 +275,27 @@ export function getStoredStaffMembers(): AppUserRole[] {
     if (raw) {
       const list = JSON.parse(raw);
       if (Array.isArray(list) && list.length > 0) {
-        // Automatically migrate legacy role names & backfill login credentials if missing
-        return list.map((staff: AppUserRole, idx: number) => {
-          let updatedRole = staff.role;
-          if (updatedRole === 'Receiving Staff') updatedRole = 'Admin Staff';
-          else if (updatedRole === 'Personnel / Handler' || updatedRole === 'Personnel') updatedRole = 'Staff';
-          else if (updatedRole === 'Records Administrator') updatedRole = 'System Admin';
-
+        return list.map((staff: any, idx: number) => {
+          const canonical = normalizeRole(staff.role) || 'Staff';
           const defaultUsername = staff.username || (
             (staff.name || '').toLowerCase().replace(/[^a-z0-9]/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '') ||
             `user${idx + 1}`
           );
-          const defaultPassword = staff.password || (updatedRole === 'System Admin' ? 'admin123' : 'password123');
 
-          return {
-            ...staff,
-            role: updatedRole,
+          // Clean presentation profile - guarantee NO password fields
+          const cleanStaff: AppUserRole = {
+            id: String(staff.id || `staff-${idx}`),
+            name: String(staff.name || 'Unnamed Personnel'),
+            role: canonical,
+            division: String(staff.division || 'CMED'),
+            avatarInitials: staff.avatarInitials || (staff.name ? staff.name.split(' ').map((n: string) => n[0]).join('').slice(0, 2).toUpperCase() : 'ST'),
+            email: staff.email || undefined,
+            assignedDesk: staff.assignedDesk || undefined,
             username: defaultUsername,
-            password: defaultPassword,
-            status: staff.status || 'active',
+            status: staff.status === 'suspended' ? 'suspended' : 'active',
+            lastLogin: staff.lastLogin,
           };
+          return cleanStaff;
         });
       }
     }
@@ -465,9 +307,20 @@ export function getStoredStaffMembers(): AppUserRole[] {
 
 export function saveStoredStaffMembers(staff: AppUserRole[]) {
   try {
-    safeStorageSet(STAFF_KEY, JSON.stringify(staff));
-    // Cross-device persistence: sync to backend
-    
+    // Sanitize staff to ensure clean model (no plaintext passwords)
+    const sanitized = staff.map((s) => ({
+      id: s.id,
+      name: s.name,
+      role: normalizeRole(s.role) || 'Staff',
+      division: s.division,
+      avatarInitials: s.avatarInitials,
+      email: s.email,
+      assignedDesk: s.assignedDesk,
+      username: s.username,
+      status: s.status || 'active',
+      lastLogin: s.lastLogin,
+    }));
+    safeStorageSet(STAFF_KEY, JSON.stringify(sanitized));
   } catch (e) {
     console.error('Failed to save staff members:', e);
   }
@@ -479,7 +332,7 @@ export function getStoredDropdownOptions(): RegistryDropdownOptions {
     if (raw) {
       const parsed = JSON.parse(raw);
       return {
-        roles: Array.isArray(parsed.roles) ? parsed.roles : [],
+        roles: Array.isArray(parsed.roles) && parsed.roles.length > 0 ? parsed.roles : [...CANONICAL_ROLES],
         departments: Array.isArray(parsed.departments) ? parsed.departments : [],
         desks: Array.isArray(parsed.desks) ? parsed.desks : [],
         documentTypes: Array.isArray(parsed.documentTypes) ? parsed.documentTypes : [],
@@ -492,14 +345,13 @@ export function getStoredDropdownOptions(): RegistryDropdownOptions {
     console.error('Failed to get dropdown options:', e);
   }
   return {
-    roles: ['sys admin', 'receiving', 'staff', 'supervisor', 'division manager', 'department manager'],
+    roles: [...CANONICAL_ROLES],
     departments: ['CMED', 'CMSD'],
     desks: [],
     documentTypes: ['Simple Transaction', 'Complex Transaction', 'Highly Technical', 'Regular Report', 'For information only', 'Special Deadline', 'Voucher', 'Payroll', 'Resolution', 'Ordinance', 'Contract/Agreement', 'Endorsement'],
     communicationTypes: ['Memorandum', 'Letter', 'Certification', 'RDTF', 'Email', 'Verbal Request'],
     reportTypes: ['Inspection Report', 'Consolidated CMR and PPR', 'External Communication', 'Internal Communications', 'Minutes of Meeting', 'Lacking Documents', 'SM1 and SM2', 'Internal Request', 'For review - SOTEVO', 'For review/Comments - Other docs', 'Travel Order', 'Office Order', 'For staff reference', 'CPES', 'Summary of CMR', 'Summary of PPR', 'CMR and PPR Tracking', 'Project Completion Inspection Report', 'Project Acceptance Report', 'Acceptance Committee', 'Cash Advance / Reimbursement', 'Notice of Inspection', 'BAC-Other works', 'Consolidated CMR and PPR to COA', 'List of Terminated'],
     personnel: ['Myles Rovi P. Martinez', 'Judy F. Villarete', 'Bryan L. Cabalfin', 'Pamela Aprille O. Lumbre', 'Benjamin A. Nieva', 'Maria Urduja Jean V. Tabilas', 'Mary Flor F. Aquino', 'Aubrey Camille C. Cabrera', 'Anne Katrina S. Del Rosario', 'Rey Reginald A. Mojica', 'Janelle Vanessa E. Tanguilig', 'Rodolfo M. Torino Jr', 'Danezel Christian G. Cruz', 'John Nicolo V. Salvador', 'Marian Grace Paling', 'Judy Ann T. Pacaanas', 'Oscar B. Hanova Jr.'],
-    
   };
 }
 
@@ -511,60 +363,18 @@ export function saveStoredDropdownOptions(options: RegistryDropdownOptions) {
   }
 }
 
-export function getRoleConfig(roleName: string): RolePermissionConfig {
-  let mappedRole = roleName;
-  if (mappedRole === 'Receiving Staff') mappedRole = 'Admin Staff';
-  else if (mappedRole === 'Personnel / Handler' || mappedRole === 'Personnel') mappedRole = 'Staff';
-  else if (mappedRole === 'Records Administrator') mappedRole = 'System Admin';
-
-  if (mappedRole && ROLE_CONFIGS[mappedRole]) {
-    return ROLE_CONFIGS[mappedRole];
-  }
-  return {
-    role: roleName || 'Staff',
-    title: roleName || 'Assigned Officer',
-    badgeBg: 'bg-slate-100',
-    badgeText: 'text-slate-800',
-    badgeBorder: 'border-slate-300',
-    dotColor: 'bg-indigo-500',
-    summary: 'Custom staff member role with operational tracking, compliance, and movement capabilities.',
-    canLogIncoming: true,
-    canRecordMovement: true,
-    canIssueSupervisorRemarks: true,
-    canFulfillCompliance: true,
-    canAuthorizeClearance: true,
-    canConfigureSync: true,
-    canManageStaff: true,
-    canDeleteDocuments: false,
-  };
-}
-
-export function canUserDeleteDocuments(roleName: string): boolean {
-  let mappedRole = roleName;
-  if (mappedRole === 'Records Administrator') mappedRole = 'System Admin';
-  return mappedRole === 'System Admin' || mappedRole === 'Department Manager';
-}
-
-export function canUserDeleteDivisionThresholdOverrides(roleName: string): boolean {
-  let mappedRole = roleName;
-  if (mappedRole === 'Records Administrator') mappedRole = 'System Admin';
-  return mappedRole === 'System Admin';
-}
-
 export interface CrossDeviceSyncPayload {
   version: number;
   timestamp: string;
   staff: AppUserRole[];
-  sheetConfig?: { spreadsheetId: string; spreadsheetUrl: string } | null;
   dropdownOptions?: RegistryDropdownOptions;
 }
 
 /**
- * Encodes staff list and configuration into a compact base64 string for instant cross-device transfer
+ * Encodes staff list and dropdown configuration into a compact base64 string for URL-based roster export/import
  */
 export function encodePersonnelSyncCode(
   staff: AppUserRole[],
-  sheetConfig?: { spreadsheetId: string; spreadsheetUrl: string } | null,
   dropdownOptions?: RegistryDropdownOptions
 ): string {
   try {
@@ -572,7 +382,6 @@ export function encodePersonnelSyncCode(
       version: 1,
       timestamp: new Date().toISOString(),
       staff,
-      sheetConfig,
       dropdownOptions,
     };
     const jsonStr = JSON.stringify(payload);
@@ -585,7 +394,7 @@ export function encodePersonnelSyncCode(
 }
 
 /**
- * Decodes a cross-device transfer code
+ * Decodes a base64 roster export/transfer payload
  */
 export function decodePersonnelSyncCode(code: string): CrossDeviceSyncPayload | null {
   try {
@@ -612,25 +421,25 @@ export function decodePersonnelSyncCode(code: string): CrossDeviceSyncPayload | 
 }
 
 /**
- * Generates an instant share URL that can be opened on any device (smartphone, laptop, PC)
+ * Generates a shareable URL containing the base64-encoded roster payload
  */
 export function generateDeviceShareUrl(
   staff: AppUserRole[],
-  sheetConfig?: { spreadsheetId: string; spreadsheetUrl: string } | null
+  dropdownOptions?: RegistryDropdownOptions
 ): string {
-  const code = encodePersonnelSyncCode(staff, sheetConfig);
+  const code = encodePersonnelSyncCode(staff, dropdownOptions);
   if (!code) return window.location.href;
   const baseUrl = `${window.location.protocol}//${window.location.host}${window.location.pathname}`;
   return `${baseUrl}#sync_staff=${code}`;
 }
 
 /**
- * Broadcasts data changes across multiple browser tabs on the same computer
+ * Broadcasts data changes across multiple open tabs in the same browser session.
+ * Note: BroadcastChannel operates strictly client-side within the same browser/origin.
  */
 export type BroadcastUpdateType =
   | 'STAFF_UPDATED'
   | 'DOCUMENTS_UPDATED'
-  | 'SHEET_UPDATED'
   | 'staff'
   | 'documents'
   | 'dropdowns';
@@ -648,7 +457,7 @@ export function broadcastDataUpdate(type: BroadcastUpdateType, payload?: any) {
 }
 
 /**
- * Subscribes to cross-tab updates via BroadcastChannel
+ * Subscribes to same-browser tab notifications via BroadcastChannel.
  */
 export function onDataUpdate(callback: (type: string, payload?: any) => void): () => void {
   try {

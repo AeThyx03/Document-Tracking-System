@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { DocumentItem } from '../types';
+import { DocumentItem, getLatestMovement } from '../types';
 import {
   Inbox,
   Clock,
@@ -103,8 +103,10 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
     if (s.id === 'received' && document.dateReceived) {
        text += ` on ${document.dateReceived} ${document.timeReceived || ''}`;
     } else if (s.id === 'review' && document.movements?.length) {
-       const lastMov = document.movements[document.movements.length - 1];
-       text += `\nLast updated: ${new Date(lastMov.timestamp).toLocaleString()}\nLocation: ${lastMov.currentDesk}`;
+       const lastMov = getLatestMovement(document);
+       if (lastMov) {
+         text += `\nLast updated: ${new Date(lastMov.timestamp).toLocaleString()}\nLocation: ${lastMov.currentDesk}`;
+       }
     } else if (s.id === 'complied' && document.supervisorRemarks?.length) {
        const lastRemark = document.supervisorRemarks[document.supervisorRemarks.length - 1];
        text += `\nDirective: "${lastRemark.remarkText}"\nBy: ${lastRemark.supervisorName}`;
@@ -221,10 +223,7 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
 
   const [isTooltipOpen, setIsTooltipOpen] = useState(false);
 
-  const lastMovement =
-    document.movements && document.movements.length > 0
-      ? document.movements[document.movements.length - 1]
-      : null;
+  const lastMovement = getLatestMovement(document) || null;
 
   const activeRemark =
     document.supervisorRemarks?.find((r) => r.complianceRequired && !r.complied) ||
@@ -391,8 +390,14 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
         </div>
       )}
 
-      {/* Progress Track & Step Nodes */}
-      <div className="relative w-full py-1 cursor-pointer">
+      {/* Print-Only Clean Text Status Badge */}
+      <div className="hidden print:block text-[8.5pt] font-bold text-black leading-tight">
+        <div>{stage.stageTitle}</div>
+        <div className="text-[7.5pt] font-normal text-slate-700">{document.currentStatus} ({stage.progressPercent}%)</div>
+      </div>
+
+      {/* Progress Track & Step Nodes (Screen Only) */}
+      <div className="relative w-full py-1 cursor-pointer print:hidden">
         {/* Background track */}
         <div className="h-1.5 w-full bg-slate-200/90 dark:bg-slate-700/80 group-hover/lifecycle:bg-slate-300 dark:group-hover/lifecycle:bg-slate-600 rounded-full overflow-hidden transition-colors">
           <div

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AppUserRole, UserRoleType, DocumentItem, RegistryDropdownOptions } from '../types';
-import { ROLE_CONFIGS, getRoleConfig, encodePersonnelSyncCode, decodePersonnelSyncCode, generateDeviceShareUrl } from '../mockData';
-import { SheetMetadata } from '../lib/googleSheets';
+import { CANONICAL_ROLES, normalizeRole, ROLE_CONFIGS, getRoleConfig, encodePersonnelSyncCode, decodePersonnelSyncCode, generateDeviceShareUrl } from '../mockData';
 import { PossdLogo } from './PossdLogo';
 import {
   Users,
@@ -25,9 +24,6 @@ import {
   Settings2,
   Shield,
   Key,
-  Eye,
-  EyeOff,
-  RefreshCw,
   UserCheck,
   Ban,
   Share2,
@@ -36,13 +32,12 @@ import {
   DownloadCloud,
   UploadCloud,
   FileJson,
-  FileSpreadsheet,
 } from 'lucide-react';
 
 interface RolesManagementModalProps {
   isOpen: boolean;
   onClose: () => void;
-  currentUser: AppUserRole;
+  currentUser?: AppUserRole | null;
   onSelectUser: (user: AppUserRole) => void;
   staffList: AppUserRole[];
   onAddStaffMember: (newStaff: AppUserRole) => void;
@@ -53,17 +48,13 @@ interface RolesManagementModalProps {
   onUpdateDropdownOptions: (newOptions: RegistryDropdownOptions) => void;
   onUpdateStaffCredentials?: (
     staffId: string,
-    updates: { username?: string; password?: string; status?: 'active' | 'suspended' }
+    updates: { username?: string; status?: 'active' | 'suspended'; email?: string }
   ) => void;
-  sheetConfig?: SheetMetadata | null;
-  token?: string | null;
-  onSyncToSheet?: () => Promise<void>;
-  onPullFromSheet?: () => Promise<void>;
-  onImportStaff?: (staff: AppUserRole[], options?: RegistryDropdownOptions, sheetConfig?: SheetMetadata | null) => void;
+  onImportStaff?: (staff: AppUserRole[], options?: RegistryDropdownOptions) => void;
 }
 
 const SYSTEM_ROLES: string[] = [
-  'Admin Staff',
+  'Receiving',
   'Staff',
   'Supervisor',
   'Division Manager',
@@ -102,10 +93,6 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   dropdownOptions,
   onUpdateDropdownOptions,
   onUpdateStaffCredentials,
-  sheetConfig,
-  token,
-  onSyncToSheet,
-  onPullFromSheet,
   onImportStaff,
 }) => {
   const [activeTab, setActiveTab] = useState<'directory' | 'dropdown_options' | 'add' | 'permissions' | 'sync'>('directory');
@@ -114,8 +101,6 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   const [syncCodeInput, setSyncCodeInput] = useState('');
   const [copiedSyncUrl, setCopiedSyncUrl] = useState(false);
   const [copiedSyncCode, setCopiedSyncCode] = useState(false);
-  const [isPushingSheet, setIsPushingSheet] = useState(false);
-  const [isPullingSheet, setIsPullingSheet] = useState(false);
 
   // Combined roles, departments, and desks
   const availableRoles = Array.from(new Set([...dropdownOptions.roles, ...SYSTEM_ROLES]));
@@ -124,7 +109,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
 
   // Quick staff form state
   const [quickName, setQuickName] = useState('');
-  const [quickRole, setQuickRole] = useState<string>(availableRoles[0] || 'Admin Staff');
+  const [quickRole, setQuickRole] = useState<string>(availableRoles[0] || 'Staff');
   const [quickDivision, setQuickDivision] = useState<string>(availableDepartments[0] || 'Central Records & Receiving Desk');
 
   // Confirmation state for deletion
@@ -132,16 +117,14 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
 
   // Detailed Enrollment form state
   const [newName, setNewName] = useState('');
-  const [newRole, setNewRole] = useState<string>(availableRoles[0] || 'Admin Staff');
+  const [newRole, setNewRole] = useState<string>(availableRoles[0] || 'Staff');
   const [newDivision, setNewDivision] = useState<string>(availableDepartments[0] || 'Central Records & Receiving Desk');
   const [newDesk, setNewDesk] = useState<string>(availableDesks[0] || 'Records Receiving Counter A');
   const [newEmail, setNewEmail] = useState('');
 
   // Credentials fields for Detailed Enrollment
   const [newUsername, setNewUsername] = useState('');
-  const [newPassword, setNewPassword] = useState('password123');
   const [newStatus, setNewStatus] = useState<'active' | 'suspended'>('active');
-  const [showNewPassword, setShowNewPassword] = useState(false);
   const [isUsernameCustomized, setIsUsernameCustomized] = useState(false);
 
   // When personnel name changes in enrollment form, auto-suggest username if user hasn't customized it
@@ -167,12 +150,11 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   const [isConfirmingClearAll, setIsConfirmingClearAll] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  // Credentials Management Dialog / Drawer for existing staff
+  // Account & Identity Dialog for existing staff
   const [credentialStaff, setCredentialStaff] = useState<AppUserRole | null>(null);
   const [editUsername, setEditUsername] = useState('');
-  const [editPassword, setEditPassword] = useState('');
+  const [editEmail, setEditEmail] = useState('');
   const [editStatus, setEditStatus] = useState<'active' | 'suspended'>('active');
-  const [showEditPassword, setShowEditPassword] = useState(false);
 
   if (!isOpen) return null;
 
@@ -183,18 +165,9 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     }, 3200);
   };
 
-  const generateRandomPassword = () => {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%';
-    let result = '';
-    for (let i = 0; i < 10; i++) {
-      result += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return result;
-  };
-
   // --- Cross-Device Sync Handlers ---
   const handleCopyMultiDeviceUrl = () => {
-    const url = generateDeviceShareUrl(staffList, sheetConfig);
+    const url = generateDeviceShareUrl(staffList);
     navigator.clipboard.writeText(url);
     setCopiedSyncUrl(true);
     showFeedback('Cross-device sync link copied! Open this link on your other device to load all personnel.', 'success');
@@ -202,7 +175,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   };
 
   const handleCopySyncCode = () => {
-    const code = encodePersonnelSyncCode(staffList, sheetConfig, dropdownOptions);
+    const code = encodePersonnelSyncCode(staffList, dropdownOptions);
     navigator.clipboard.writeText(code);
     setCopiedSyncCode(true);
     showFeedback('Sync code copied! Paste it into another device to import personnel.', 'success');
@@ -221,7 +194,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     }
 
     if (onImportStaff) {
-      onImportStaff(payload.staff, payload.dropdownOptions, payload.sheetConfig);
+      onImportStaff(payload.staff, payload.dropdownOptions);
     } else {
       payload.staff.forEach((s) => onAddStaffMember(s));
     }
@@ -235,7 +208,6 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       exportedAt: new Date().toISOString(),
       staff: staffList,
       dropdownOptions,
-      sheetConfig,
     }, null, 2));
     const downloadAnchor = document.createElement('a');
     downloadAnchor.setAttribute('href', dataStr);
@@ -264,7 +236,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
           return;
         }
         if (onImportStaff) {
-          onImportStaff(importedStaff, parsed.dropdownOptions, parsed.sheetConfig);
+          onImportStaff(importedStaff, parsed.dropdownOptions);
         } else {
           importedStaff.forEach((s) => onAddStaffMember(s));
         }
@@ -403,7 +375,6 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       email: `${autoUsername}@agency.gov`,
       assignedDesk: chosenDesk,
       username: autoUsername,
-      password: 'password123',
       status: 'active',
     };
 
@@ -456,7 +427,6 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       .join('');
 
     const cleanUsername = (newUsername.trim() || (newName || '').toLowerCase().replace(/[^a-z0-9]/g, '.')).toLowerCase();
-    const cleanPassword = newPassword.trim() || 'password123';
 
     const newStaff: AppUserRole = {
       id: `staff-${Date.now()}`,
@@ -467,18 +437,16 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       email: newEmail.trim() || `${cleanUsername}@agency.gov`,
       assignedDesk: chosenDesk || `${chosenDivision} Station`,
       username: cleanUsername,
-      password: cleanPassword,
       status: newStatus,
     };
 
     onAddStaffMember(newStaff);
     setNewName('');
-    setNewRole(availableRoles[0] || 'Admin Staff');
+    setNewRole(availableRoles[0] || 'Staff');
     setNewDivision(availableDepartments[0] || 'Central Records & Receiving Desk');
     setNewDesk(availableDesks[0] || 'Records Receiving Counter A');
     setNewEmail('');
     setNewUsername('');
-    setNewPassword('password123');
     setNewStatus('active');
     setIsUsernameCustomized(false);
     setIsCustomRoleActive(false);
@@ -488,7 +456,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     setIsCustomDeskActive(false);
     setCustomDeskInput('');
     setActiveTab('directory');
-    showFeedback(`Personnel ${newStaff.name} registered with credentials (@${cleanUsername}).`);
+    showFeedback(`Personnel ${newStaff.name} registered (@${cleanUsername}).`);
   };
 
   const handleDeleteStaff = (staffId: string) => {
@@ -499,9 +467,8 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   const handleOpenCredentialsModal = (staff: AppUserRole) => {
     setCredentialStaff(staff);
     setEditUsername(staff.username || (staff.name || '').toLowerCase().replace(/[^a-z0-9]/g, '.'));
-    setEditPassword(staff.password || (staff.role === 'System Admin' ? 'admin123' : 'password123'));
+    setEditEmail(staff.email || '');
     setEditStatus(staff.status || 'active');
-    setShowEditPassword(false);
   };
 
   const handleSaveCredentials = (e: React.FormEvent) => {
@@ -509,26 +476,22 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     if (!credentialStaff) return;
 
     const trimmedUsername = editUsername.trim().toLowerCase();
-    const trimmedPassword = editPassword.trim();
+    const trimmedEmail = editEmail.trim();
 
     if (!trimmedUsername) {
       showFeedback('Username cannot be empty.', 'error');
-      return;
-    }
-    if (!trimmedPassword) {
-      showFeedback('Password cannot be empty.', 'error');
       return;
     }
 
     if (onUpdateStaffCredentials) {
       onUpdateStaffCredentials(credentialStaff.id, {
         username: trimmedUsername,
-        password: trimmedPassword,
+        email: trimmedEmail || undefined,
         status: editStatus,
       });
     }
 
-    showFeedback(`Credentials updated for ${credentialStaff.name} (@${trimmedUsername}).`);
+    showFeedback(`Account details updated for ${credentialStaff.name} (@${trimmedUsername}).`);
     setCredentialStaff(null);
   };
 
@@ -632,10 +595,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
             }`}
           >
             <Smartphone className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-            <span>Cross-Device Sync</span>
-            {sheetConfig && (
-              <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" title="Connected to Google Sheet" />
-            )}
+            <span>Roster Transfer &amp; Backup</span>
           </button>
         </div>
 
@@ -668,24 +628,24 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
               <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="w-9 h-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center font-bold text-xs shrink-0 shadow-2xs">
-                    {currentUser.avatarInitials || currentUser.name.slice(0, 2).toUpperCase()}
+                    {currentUser?.avatarInitials || (currentUser?.name ? currentUser.name.slice(0, 2).toUpperCase() : 'ST')}
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
                       <span className="text-slate-500 dark:text-slate-400 font-medium">Active Session:</span>
-                      <strong className="text-slate-900 dark:text-white text-sm font-bold">{currentUser.name}</strong>
+                      <strong className="text-slate-900 dark:text-white text-sm font-bold">{currentUser?.name || 'Unauthenticated'}</strong>
                       <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
-                        {currentUser.role}
+                        {currentUser?.role || 'Guest'}
                       </span>
-                      {currentUser.username && (
+                      {currentUser?.username && (
                         <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
                           @{currentUser.username}
                         </span>
                       )}
                     </div>
                     <p className="text-slate-500 dark:text-slate-400 text-[11px] mt-0.5">
-                      Division: <span className="font-semibold text-slate-700 dark:text-slate-200">{currentUser.division}</span>
-                      {currentUser.assignedDesk && (
+                      Division: <span className="font-semibold text-slate-700 dark:text-slate-200">{currentUser?.division || 'General'}</span>
+                      {currentUser?.assignedDesk && (
                         <span> • Station: <span className="font-semibold text-slate-700 dark:text-slate-200">{currentUser.assignedDesk}</span></span>
                       )}
                     </p>
@@ -694,7 +654,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
 
                 {/* Option to Delete Current Staff with confirmation */}
                 <div className="flex items-center gap-2 shrink-0">
-                  {confirmDeleteId === currentUser.id ? (
+                  {currentUser && confirmDeleteId === currentUser.id ? (
                     <div className="flex items-center gap-2 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900/60 px-3 py-1.5 rounded-xl">
                       <span className="text-[11px] font-bold text-rose-800 dark:text-rose-300">
                         Remove active staff?
@@ -797,7 +757,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
               {/* STAFF DIRECTORY GRID */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
                 {staffList.map((staff) => {
-                  const isCurrent = staff.id === currentUser.id || staff.name === currentUser.name;
+                  const isCurrent = currentUser ? (staff.id === currentUser.id || staff.name === currentUser.name) : false;
                   const roleConfig = getRoleConfig(staff.role);
                   const heldDocsCount = documents.filter((d) => d.currentCustodian?.includes(staff.name)).length;
                   const isConfirmingDelete = confirmDeleteId === staff.id;
@@ -899,7 +859,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                             onClick={() => handleOpenCredentialsModal(staff)}
                             className="text-[10.5px] font-semibold text-blue-600 dark:text-blue-400 hover:underline cursor-pointer"
                           >
-                            Edit Credentials
+                            Edit Account
                           </button>
                         </div>
                       </div>
@@ -1611,19 +1571,19 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                   </div>
                 </div>
 
-                {/* LOGIN CREDENTIALS SECTION ENROLLED BY SYSTEM ADMIN */}
+                {/* ACCOUNT & IDENTITY SETTINGS */}
                 <div className="p-4 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/30 dark:bg-amber-950/20 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5 font-bold text-xs text-amber-900 dark:text-amber-300">
                       <Key className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-                      <span>Portal Login Credentials (Enrolled by Admin)</span>
+                      <span>Account Identity & Access Status</span>
                     </div>
                     <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 font-semibold border border-amber-200 dark:border-amber-800">
-                      System Admin Enrolled
+                      Admin Enrolled
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {/* Username */}
                     <div>
                       <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -1640,40 +1600,6 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                         placeholder="e.g. maria.santos"
                         className="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
                       />
-                    </div>
-
-                    {/* Password */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                          Initial Password <span className="text-rose-500">*</span>
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() => setNewPassword(generateRandomPassword())}
-                          className="text-[10px] text-amber-700 dark:text-amber-400 hover:underline flex items-center gap-0.5 cursor-pointer"
-                        >
-                          <RefreshCw className="w-2.5 h-2.5" />
-                          <span>Generate</span>
-                        </button>
-                      </div>
-                      <div className="relative">
-                        <input
-                          type={showNewPassword ? 'text' : 'password'}
-                          required
-                          value={newPassword}
-                          onChange={(e) => setNewPassword(e.target.value)}
-                          placeholder="Password"
-                          className="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 pr-8 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowNewPassword(!showNewPassword)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
-                        >
-                          {showNewPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
                     </div>
 
                     {/* Account Status */}
@@ -1706,7 +1632,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                     className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <UserPlus className="w-4 h-4" />
-                    <span>Register Personnel & Credentials</span>
+                    <span>Register Personnel Profile</span>
                   </button>
                 </div>
               </form>
@@ -1770,7 +1696,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                   'System Admin',
                 ].map((roleKey) => {
                   const cfg = getRoleConfig(roleKey);
-                  const isCurrentRole = currentUser.role === cfg.role;
+                  const isCurrentRole = currentUser ? currentUser.role === cfg.role : false;
 
                   return (
                     <div
@@ -1935,7 +1861,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
             </div>
           )}
 
-          {/* TAB 5: CROSS-DEVICE SYNC & DATA PERSISTENCE */}
+          {/* TAB 5: ROSTER TRANSFER & BACKUP */}
           {activeTab === 'sync' && (
             <div className="space-y-6">
               <div className="border-b border-slate-100 dark:border-slate-800 pb-3">
@@ -1943,10 +1869,10 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                   <div>
                     <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-2">
                       <Smartphone className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-                      Cross-Device Personnel Synchronization &amp; Persistence
+                      Personnel Roster Transfer &amp; Backup
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                      Ensure all enrolled personnel and credentials are accessible seamlessly across different computers, smartphones, and browsers.
+                      Export and import enrolled personnel profiles and role definitions across workstations via secure transfer links or backup codes.
                     </p>
                   </div>
                   <span className="text-[11px] px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 rounded-lg font-semibold self-start sm:self-auto">
@@ -1955,104 +1881,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                 </div>
               </div>
 
-              {/* Section 1: Google Sheets Cloud Sync */}
-              <div className="rounded-xl border border-slate-200 dark:border-slate-700/80 bg-slate-50/70 dark:bg-slate-800/50 p-4 space-y-3">
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                      <FileSpreadsheet className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-wider">
-                        Google Sheets Cloud Persistence
-                      </h4>
-                      <p className="text-xs text-slate-500 dark:text-slate-400">
-                        {sheetConfig
-                          ? 'Automatic multi-device synchronization is enabled via Google Sheets.'
-                          : 'Connect a Google Sheet to automatically sync all enrolled personnel across every device.'}
-                      </p>
-                    </div>
-                  </div>
-                  {sheetConfig && (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 rounded-full">
-                      <CheckCircle2 className="w-3 h-3" /> Connected
-                    </span>
-                  )}
-                </div>
-
-                {sheetConfig ? (
-                  <div className="pt-2 space-y-3">
-                    <div className="flex items-center justify-between text-xs bg-white dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200 dark:border-slate-700">
-                      <span className="font-mono text-slate-700 dark:text-slate-300 truncate max-w-xs">
-                        Sheet ID: {sheetConfig.spreadsheetId}
-                      </span>
-                      <a
-                        href={sheetConfig.spreadsheetUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-emerald-700 dark:text-emerald-400 hover:underline font-semibold flex items-center gap-1 shrink-0 ml-2"
-                      >
-                        View Sheet
-                      </a>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2 pt-1">
-                      {onSyncToSheet && (
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            setIsPushingSheet(true);
-                            try {
-                              await onSyncToSheet();
-                              showFeedback('Personnel directory successfully pushed to Google Sheet!', 'success');
-                            } catch (e: any) {
-                              showFeedback(e.message || 'Failed to sync to Google Sheet.', 'error');
-                            } finally {
-                              setIsPushingSheet(false);
-                            }
-                          }}
-                          disabled={isPushingSheet || !token}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-medium transition-colors disabled:opacity-50 cursor-pointer shadow-xs"
-                        >
-                          <RefreshCw className={`w-3.5 h-3.5 ${isPushingSheet ? 'animate-spin' : ''}`} />
-                          {isPushingSheet ? 'Pushing to Sheet...' : 'Push Personnel to Google Sheet'}
-                        </button>
-                      )}
-
-                      {onPullFromSheet && (
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            setIsPullingSheet(true);
-                            try {
-                              await onPullFromSheet();
-                              showFeedback('Updated personnel roster pulled from Google Sheet!', 'success');
-                            } catch (e: any) {
-                              showFeedback(e.message || 'Failed to pull from Google Sheet.', 'error');
-                            } finally {
-                              setIsPullingSheet(false);
-                            }
-                          }}
-                          disabled={isPullingSheet || !token}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 cursor-pointer"
-                        >
-                          <DownloadCloud className={`w-3.5 h-3.5 ${isPullingSheet ? 'animate-spin' : ''}`} />
-                          {isPullingSheet ? 'Pulling from Sheet...' : 'Pull Latest from Sheet'}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="p-3 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2">
-                    <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-                    <div>
-                      Google Sheet is not currently connected in this session. You can link a sheet using the top header sync button, or use the <strong>Instant Multi-Device Link</strong> below to copy all personnel to your other device instantly.
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Section 2: Instant Multi-Device Link */}
+              {/* Section: Instant Multi-Device Link */}
               <div className="rounded-xl border border-indigo-200 dark:border-indigo-800/70 bg-indigo-50/60 dark:bg-indigo-950/40 p-4 space-y-3">
                 <div className="flex items-start gap-2.5">
                   <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center shrink-0 mt-0.5">
@@ -2158,7 +1987,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
         {/* Modal Footer */}
         <div className="px-6 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/80 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
           <span>
-            Active Role: <strong className="text-slate-800 dark:text-slate-200">{currentUser.role}</strong> ({currentUser.name})
+            Active Role: <strong className="text-slate-800 dark:text-slate-200">{currentUser?.role || 'Guest'}</strong> ({currentUser?.name || 'Unauthenticated'})
           </span>
           <button
             onClick={onClose}
@@ -2170,7 +1999,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
 
       </div>
 
-      {/* CREDENTIALS ENROLLMENT & EDITING DIALOG */}
+      {/* ACCOUNT & IDENTITY EDITING DIALOG */}
       {credentialStaff && (
         <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-900/70 dark:bg-black/80 backdrop-blur-xs animate-in fade-in">
           <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
@@ -2180,7 +2009,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                   <Key className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-white">Enroll Login Credentials</h3>
+                  <h3 className="text-sm font-bold text-white">Personnel Account Settings</h3>
                   <p className="text-[11px] text-blue-200 dark:text-slate-400">
                     Staff: <span className="font-semibold text-white">{credentialStaff.name}</span> ({credentialStaff.role})
                   </p>
@@ -2209,41 +2038,24 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
                 />
                 <p className="text-[10.5px] text-slate-400 dark:text-slate-500">
-                  Staff members use this username to authenticate into their assigned role.
+                  Unique identifier used for personnel session matching.
                 </p>
               </div>
 
               <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
-                    Password <span className="text-rose-500">*</span>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => setEditPassword(generateRandomPassword())}
-                    className="text-[11px] text-amber-600 dark:text-amber-400 font-semibold hover:underline flex items-center gap-1 cursor-pointer"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Generate Strong Password</span>
-                  </button>
-                </div>
-                <div className="relative">
-                  <input
-                    type={showEditPassword ? 'text' : 'password'}
-                    required
-                    value={editPassword}
-                    onChange={(e) => setEditPassword(e.target.value)}
-                    placeholder="Enter new password"
-                    className="w-full px-3 py-2 pr-9 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowEditPassword(!showEditPassword)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
-                  >
-                    {showEditPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  Institutional Email
+                </label>
+                <input
+                  type="email"
+                  value={editEmail}
+                  onChange={(e) => setEditEmail(e.target.value)}
+                  placeholder="e.g. user@agency.gov"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+                <p className="text-[10.5px] text-slate-400 dark:text-slate-500">
+                  Mapped to Google / Firebase SSO authentication.
+                </p>
               </div>
 
               <div className="space-y-1.5">
@@ -2291,7 +2103,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                   className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <Key className="w-3.5 h-3.5" />
-                  <span>Save Enrolled Credentials</span>
+                  <span>Save Account Details</span>
                 </button>
               </div>
             </form>

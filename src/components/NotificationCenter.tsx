@@ -1,37 +1,64 @@
 import React, { useState } from 'react';
 import { RealtimeNotification } from '../types';
-import { Bell, CheckCheck, X, FileText, ArrowRightLeft, MessageSquare, ShieldCheck, CloudUpload } from 'lucide-react';
+import {
+  Bell,
+  CheckCheck,
+  Check,
+  X,
+  FileText,
+  ArrowRightLeft,
+  MessageSquare,
+  ShieldCheck,
+  Activity,
+  AlertTriangle,
+} from 'lucide-react';
 
 interface NotificationBellProps {
   notifications: RealtimeNotification[];
   onClearNotifications: () => void;
   onSelectDocument: (trackingNumber: string) => void;
+  onMarkAsRead?: (id: string) => void;
+  onMarkAllAsRead?: () => void;
 }
 
 export const NotificationCenter: React.FC<NotificationBellProps> = ({
   notifications,
   onClearNotifications,
   onSelectDocument,
+  onMarkAsRead,
+  onMarkAllAsRead,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const unreadCount = notifications.filter(n => !n.read).length;
+  const unreadCount = notifications.filter((n) => !n.read).length;
 
   const getIcon = (type: RealtimeNotification['type']) => {
     switch (type) {
       case 'incoming':
-        return <FileText className="w-4 h-4 text-sky-600" />;
+        return <FileText className="w-4 h-4 text-sky-600 dark:text-sky-400" />;
       case 'movement':
-        return <ArrowRightLeft className="w-4 h-4 text-indigo-600" />;
+        return <ArrowRightLeft className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />;
       case 'remark':
-        return <MessageSquare className="w-4 h-4 text-amber-600" />;
+        return <MessageSquare className="w-4 h-4 text-amber-600 dark:text-amber-400" />;
       case 'compliance':
-        return <CheckCheck className="w-4 h-4 text-emerald-600" />;
+        return <CheckCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />;
       case 'clearance':
-        return <ShieldCheck className="w-4 h-4 text-emerald-600" />;
+        return <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />;
+      case 'urgent':
+        return <AlertTriangle className="w-4 h-4 text-rose-600 dark:text-rose-400" />;
+      case 'system':
       case 'sync':
-        return <CloudUpload className="w-4 h-4 text-purple-600" />;
       default:
-        return <Bell className="w-4 h-4 text-slate-500" />;
+        return <Activity className="w-4 h-4 text-blue-600 dark:text-blue-400" />;
+    }
+  };
+
+  const formatTimestamp = (ts: string) => {
+    try {
+      const date = new Date(ts);
+      if (isNaN(date.getTime())) return ts;
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return ts;
     }
   };
 
@@ -63,22 +90,37 @@ export const NotificationCenter: React.FC<NotificationBellProps> = ({
               <div className="flex items-center gap-2">
                 <Bell className="w-4 h-4 text-slate-700 dark:text-slate-300" />
                 <span className="font-semibold text-sm text-slate-800 dark:text-white">Workflow Notifications</span>
-                <span className="rounded-full bg-slate-200 dark:bg-slate-700 px-2 py-0.5 text-xs font-medium text-slate-700 dark:text-slate-200">
-                  {notifications.length}
-                </span>
+                {unreadCount > 0 && (
+                  <span className="rounded-full bg-amber-100 text-amber-900 dark:bg-amber-900/60 dark:text-amber-200 px-2 py-0.5 text-[10px] font-bold">
+                    {unreadCount} unread
+                  </span>
+                )}
               </div>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-2">
+                {unreadCount > 0 && onMarkAllAsRead && (
+                  <button
+                    type="button"
+                    onClick={() => onMarkAllAsRead()}
+                    className="text-xs text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 hover:underline cursor-pointer flex items-center gap-0.5"
+                    title="Mark all as read"
+                  >
+                    <Check className="w-3 h-3" />
+                    <span>Read all</span>
+                  </button>
+                )}
                 {notifications.length > 0 && (
                   <button
+                    type="button"
                     onClick={onClearNotifications}
-                    className="text-xs text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-white hover:underline px-2 py-1"
+                    className="text-xs text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-white hover:underline cursor-pointer"
                   >
                     Clear all
                   </button>
                 )}
                 <button
+                  type="button"
                   onClick={() => setIsOpen(false)}
-                  className="rounded p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                  className="rounded p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -91,33 +133,68 @@ export const NotificationCenter: React.FC<NotificationBellProps> = ({
                   No notifications yet. Status changes and document movements will appear here live.
                 </div>
               ) : (
-                notifications.map((n) => (
-                  <div
-                    key={n.id}
-                    onClick={() => {
-                      onSelectDocument(n.trackingNumber);
-                      setIsOpen(false);
-                    }}
-                    className="flex gap-3 p-3 hover:bg-slate-50 dark:hover:bg-slate-800/80 cursor-pointer transition-colors text-left"
-                  >
-                    <div className="mt-0.5 shrink-0 p-1.5 bg-slate-100 dark:bg-slate-800 rounded-md">
-                      {getIcon(n.type)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="font-mono text-xs font-bold text-slate-900 dark:text-white truncate">
-                          {n.trackingNumber}
-                        </span>
-                        <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0">
-                          {new Date(n.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </span>
+                notifications.map((n) => {
+                  const isUnread = !n.read;
+                  return (
+                    <div
+                      key={n.id}
+                      onClick={() => {
+                        if (onMarkAsRead && isUnread) {
+                          onMarkAsRead(n.id);
+                        }
+                        if (n.trackingNumber && n.trackingNumber !== 'POSSD-SYSTEM' && n.trackingNumber !== 'ROLE' && n.trackingNumber !== 'STAFF' && n.trackingNumber !== 'DROPDOWNS' && n.trackingNumber !== 'BATCH') {
+                          onSelectDocument(n.trackingNumber);
+                          setIsOpen(false);
+                        }
+                      }}
+                      className={`flex gap-3 p-3 cursor-pointer transition-colors text-left group ${
+                        isUnread
+                          ? 'bg-blue-50/50 dark:bg-blue-950/20 hover:bg-blue-50 dark:hover:bg-blue-950/40'
+                          : 'hover:bg-slate-50 dark:hover:bg-slate-800/80 opacity-80 hover:opacity-100'
+                      }`}
+                    >
+                      <div className="mt-0.5 shrink-0 p-1.5 bg-white dark:bg-slate-800 rounded-md border border-slate-200/60 dark:border-slate-700 shadow-2xs">
+                        {getIcon(n.type)}
                       </div>
-                      <p className="text-xs font-medium text-slate-800 dark:text-slate-200 mt-0.5 truncate">{n.title}</p>
-                      <p className="text-xs text-slate-600 dark:text-slate-400 line-clamp-2 mt-0.5">{n.message}</p>
-                      <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">By: {n.actor}</p>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-1">
+                          <div className="flex items-center gap-1.5 truncate">
+                            {isUnread && (
+                              <span className="w-1.5 h-1.5 rounded-full bg-blue-600 dark:bg-blue-400 shrink-0" />
+                            )}
+                            <span className="font-mono text-xs font-bold text-slate-900 dark:text-white truncate">
+                              {n.trackingNumber}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0">
+                            {formatTimestamp(n.timestamp)}
+                          </span>
+                        </div>
+                        <p className={`text-xs mt-0.5 truncate ${isUnread ? 'font-semibold text-slate-900 dark:text-white' : 'font-medium text-slate-700 dark:text-slate-300'}`}>
+                          {n.title}
+                        </p>
+                        <p className="text-xs text-slate-600 dark:text-slate-400 line-clamp-2 mt-0.5">
+                          {n.message}
+                        </p>
+                        <div className="flex items-center justify-between mt-1">
+                          <span className="text-[10px] text-slate-400 dark:text-slate-500">By: {n.actor}</span>
+                          {isUnread && onMarkAsRead && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onMarkAsRead(n.id);
+                              }}
+                              className="text-[10px] text-blue-600 hover:text-blue-800 dark:text-blue-400 font-medium hover:underline cursor-pointer"
+                            >
+                              Mark read
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 

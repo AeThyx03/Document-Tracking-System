@@ -7,7 +7,6 @@ import {
   Clock,
   AlertTriangle,
   ShieldCheck,
-  FileSpreadsheet,
   Sliders,
   UserCog,
   ChevronLeft,
@@ -31,12 +30,8 @@ interface VerticalNavigationSidebarProps {
   overdueCount: number;
   activeCount: number;
   clearedCount: number;
-  isSheetConnected: boolean;
-  sheetTitle?: string;
-  isSyncing: boolean;
-  quotaCooldownSeconds?: number;
-  onManualSync?: () => void;
-  onOpenSheetModal: () => void;
+  isRefreshing?: boolean;
+  onManualRefresh?: () => void;
   onOpenRolesModal: () => void;
   onOpenThresholdModal: () => void;
   onOpenShortcutsModal?: () => void;
@@ -53,12 +48,8 @@ export const VerticalNavigationSidebar: React.FC<VerticalNavigationSidebarProps>
   overdueCount,
   activeCount,
   clearedCount,
-  isSheetConnected,
-  sheetTitle,
-  isSyncing,
-  quotaCooldownSeconds = 0,
-  onManualSync,
-  onOpenSheetModal,
+  isRefreshing = false,
+  onManualRefresh,
   onOpenRolesModal,
   onOpenThresholdModal,
   onOpenShortcutsModal,
@@ -254,97 +245,40 @@ export const VerticalNavigationSidebar: React.FC<VerticalNavigationSidebarProps>
         })}
       </div>
 
-      {/* Bottom Shortcuts / Cloud Sheets Status */}
+      {/* Bottom Shortcuts / Persistence Store Status */}
       <div className="p-3 border-t border-slate-800 bg-slate-950/70 space-y-2">
-        {/* Google Sheet Live Sync Status */}
-        <div
-          className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-left transition-colors ${
-            isSheetConnected
-              ? quotaCooldownSeconds > 0
-                ? 'bg-amber-950/40 text-amber-200 border border-amber-800/60'
-                : 'bg-slate-850 bg-slate-900 text-slate-200 border border-slate-700'
-              : 'bg-slate-900/60 text-slate-400 border border-slate-800'
-          }`}
-        >
-          <button
-            type="button"
-            onClick={onOpenSheetModal}
-            title={isCollapsed ? 'Google Sheet Sync Settings' : undefined}
-            className="relative shrink-0 cursor-pointer"
-          >
-            <FileSpreadsheet
-              className={`w-4 h-4 ${
-                isSheetConnected
-                  ? quotaCooldownSeconds > 0
-                    ? 'text-amber-400'
-                    : 'text-slate-300'
-                  : 'text-slate-500'
-              }`}
-            />
-            {isSheetConnected && (
-              <span
-                className={`absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full ${
-                  quotaCooldownSeconds > 0
-                    ? 'bg-amber-400'
-                    : isSyncing
-                    ? 'bg-slate-300 animate-ping'
-                    : 'bg-emerald-400'
-                }`}
-              />
-            )}
-          </button>
+        {/* System Persistence Status */}
+        <div className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-left bg-slate-900/60 text-slate-300 border border-slate-800">
+          <div className="relative shrink-0">
+            <FolderGit2 className="w-4 h-4 text-emerald-400" />
+            <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400" />
+          </div>
 
           {!isCollapsed && (
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between gap-1">
-                <button
-                  type="button"
-                  onClick={onOpenSheetModal}
-                  className="text-[11px] font-bold truncate text-slate-200 hover:text-white text-left cursor-pointer"
-                >
-                  Google Sheet
-                </button>
+                <span className="text-[11px] font-bold truncate text-slate-200">
+                  Document Store
+                </span>
                 <div className="flex items-center gap-1">
-                  <span
-                    className={`text-[9px] font-bold px-1.5 py-0.2 rounded-full ${
-                      isSheetConnected
-                        ? quotaCooldownSeconds > 0
-                          ? 'bg-amber-950 text-amber-300 border border-amber-700/60'
-                          : isSyncing
-                          ? 'bg-slate-800 text-slate-200 border border-slate-700'
-                          : 'bg-slate-800 text-slate-300 border border-slate-700'
-                        : 'bg-slate-800 text-slate-400'
-                    }`}
-                  >
-                    {quotaCooldownSeconds > 0
-                      ? `Quota (${quotaCooldownSeconds}s)`
-                      : isSyncing
-                      ? 'Syncing...'
-                      : isSheetConnected
-                      ? 'Connected'
-                      : 'Connect'}
+                  <span className="text-[9px] font-bold px-1.5 py-0.2 rounded-full bg-slate-800 text-emerald-300 border border-slate-700">
+                    {isRefreshing ? 'Refreshing...' : 'Active'}
                   </span>
-                  {isSheetConnected && onManualSync && (
+                  {onManualRefresh && (
                     <button
                       type="button"
-                      onClick={onManualSync}
-                      disabled={isSyncing || quotaCooldownSeconds > 0}
+                      onClick={onManualRefresh}
+                      disabled={isRefreshing}
                       className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition-colors disabled:opacity-40 cursor-pointer"
-                      title={
-                        quotaCooldownSeconds > 0
-                          ? `API Quota Cooling Down (${quotaCooldownSeconds}s)`
-                          : 'Manual Sync Now'
-                      }
+                      title="Refresh document records"
                     >
-                      <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin text-slate-300' : ''}`} />
+                      <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin text-slate-300' : ''}`} />
                     </button>
                   )}
                 </div>
               </div>
               <p className="text-[10px] text-slate-400 truncate">
-                {quotaCooldownSeconds > 0
-                  ? 'Quota cooling down'
-                  : sheetTitle || 'Single Master Sheet'}
+                Local-First Persistence
               </p>
             </div>
           )}

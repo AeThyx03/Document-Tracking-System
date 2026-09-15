@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { DocumentItem, InternalMovement, SupervisorRemark, AppUserRole } from '../types';
+import { DocumentItem, AppUserRole, parsePhilippineDateToISO, AuditEventRecord } from '../types';
+import { compileDocumentAuditTrail } from '../lib/audit';
 import {
   History,
   MapPin,
@@ -21,145 +22,29 @@ import {
   AlertCircle,
 } from 'lucide-react';
 
-export interface AuditTrailEvent {
-  id: string;
-  type: 'inflow' | 'movement' | 'remark' | 'compliance' | 'clearance';
-  timestamp: string;
-  actorName: string;
-  actorRole: string;
-  actionTitle: string;
-  stageLabel: string;
-  fromDesk?: string;
-  toDesk?: string;
-  statusUpdate?: string;
-  notes?: string;
-  complianceRequired?: boolean;
-  complied?: boolean;
-  clearanceType?: string;
-  exitTrackingNumber?: string;
-  forwardedToExternal?: string;
-}
+export type AuditTrailEvent = AuditEventRecord;
 
 interface DocumentAuditTrailProps {
   document: DocumentItem;
   currentUser?: AppUserRole;
   onNavigateToTab?: (tab: 'movements' | 'remarks' | 'clearance') => void;
+  onPrintAudit?: () => void;
 }
 
 export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
   document,
   currentUser,
   onNavigateToTab,
+  onPrintAudit,
 }) => {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [filterType, setFilterType] = useState<'all' | 'movement' | 'remark' | 'clearance'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [copied, setCopied] = useState(false);
 
-  // Compile all lifecycle events into unified chronological list
-  const allEvents = useMemo<AuditTrailEvent[]>(() => {
-    const events: AuditTrailEvent[] = [];
-
-    // 1. Initial Inflow / Receipt Event
-    const inflowTime = document.createdAt || `${document.dateReceived}T${document.timeReceived}:00Z`;
-    events.push({
-      id: 'event-inflow',
-      type: 'inflow',
-      timestamp: inflowTime,
-      actorName: document.responsiblePerson || 'Records Custodian',
-      actorRole: 'Receiving Staff / Inflow Officer',
-      actionTitle: 'Incoming Document Logged & Registered',
-      stageLabel: 'Stage 1: Inflow',
-      fromDesk: document.originDepartment,
-      toDesk: document.currentLocation || document.targetDivision,
-      statusUpdate: 'Incoming Logged',
-      notes: `Document classified as "${document.documentType}" (${document.communicationType} • ${document.reportType}) with ${document.priority} Priority from origin "${document.originDepartment}". Designated target division: ${document.targetDivision}.`,
-    });
-
-    // 2. All Internal Desk Movements
-    (document.movements || []).forEach((m, idx) => {
-      events.push({
-        id: m.id || `event-mov-${idx}`,
-        type: 'movement',
-        timestamp: m.timestamp,
-        actorName: m.personnelName,
-        actorRole: m.personnelRole || 'Handling Staff',
-        actionTitle: `Transferred: ${m.currentDesk} ➔ ${m.forwardToDesk}`,
-        stageLabel: 'Internal Routing',
-        fromDesk: m.currentDesk,
-        toDesk: m.forwardToDesk,
-        statusUpdate: m.statusUpdate,
-        notes: m.notes,
-      });
-    });
-
-    // 3. Supervisor Directives and Compliances
-    (document.supervisorRemarks || []).forEach((r, idx) => {
-      // 3A. Directive Issuance
-      events.push({
-        id: `${r.id || idx}-directive`,
-        type: 'remark',
-        timestamp: r.timestamp,
-        actorName: r.supervisorName,
-        actorRole: 'Supervisor / Division Head',
-        actionTitle: 'Supervisor Directive Issued',
-        stageLabel: 'Supervisory Action',
-        statusUpdate: r.complianceRequired ? 'Compliance Required' : 'Informational Remark',
-        notes: r.remarkText,
-        complianceRequired: r.complianceRequired,
-        complied: r.complied,
-      });
-
-      // 3B. Directive Compliance Fulfilled
-      if (r.complied) {
-        events.push({
-          id: `${r.id || idx}-complied`,
-          type: 'compliance',
-          timestamp: r.compliedAt || r.timestamp,
-          actorName: r.compliedBy || 'Action Staff',
-          actorRole: 'Staff / Action Officer',
-          actionTitle: 'Supervisor Directive Complied & Verified',
-          stageLabel: 'Compliance Fulfilled',
-          statusUpdate: 'Directive Complied',
-          notes: r.complianceNotes || 'Action fulfilled according to supervisor instructions.',
-        });
-      }
-    });
-
-    // 4. Manager Clearance / Outgoing Dispatch
-    if (document.managerClearance?.isCleared) {
-      const clearance = document.managerClearance;
-      const clearanceLabel =
-        clearance.clearanceType === 'approved_for_dispatch'
-          ? 'Approved for Outgoing Dispatch'
-          : clearance.clearanceType === 'archived_completed'
-          ? 'Completed & Archived'
-          : 'Returned for Revision';
-
-      events.push({
-        id: 'event-clearance',
-        type: 'clearance',
-        timestamp: clearance.clearedAt || document.updatedAt,
-        actorName: clearance.clearedBy || 'Division Manager',
-        actorRole: 'Department Manager / Authorizing Official',
-        actionTitle: `Manager Clearance: ${clearanceLabel}`,
-        stageLabel: 'Terminal Clearance',
-        fromDesk: document.currentLocation,
-        toDesk: clearance.forwardedToExternal || 'External Recipient',
-        statusUpdate: 'Cleared for Out',
-        clearanceType: clearance.clearanceType,
-        exitTrackingNumber: clearance.exitTrackingNumber,
-        forwardedToExternal: clearance.forwardedToExternal,
-        notes: clearance.clearanceRemarks || 'Final clearance granted for outgoing transmittal.',
-      });
-    }
-
-    // Sort chronologically
-    return events.sort((a, b) => {
-      const timeA = new Date(a.timestamp).getTime();
-      const timeB = new Date(b.timestamp).getTime();
-      return sortOrder === 'asc' ? timeA - timeB : timeB - timeA;
-    });
+  // Compile all lifecycle events using the authoritative centralized audit engine
+  const allEvents = useMemo<AuditEventRecord[]>(() => {
+    return compileDocumentAuditTrail(document, sortOrder);
   }, [document, sortOrder]);
 
   // Filtered events
@@ -208,7 +93,7 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
   // Relative time from receipt
   const getElapsedString = (eventTime: string) => {
     try {
-      const baseTime = new Date(document.createdAt || `${document.dateReceived}T${document.timeReceived}:00Z`).getTime();
+      const baseTime = new Date(document.createdAt || parsePhilippineDateToISO(document.dateReceived, document.timeReceived)).getTime();
       const curTime = new Date(eventTime).getTime();
       const diffMs = curTime - baseTime;
       if (diffMs <= 60000) return 'Inflow Entry';
@@ -408,6 +293,18 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
                 <span>Copy Trail</span>
               </>
             )}
+          </button>
+
+          {/* Print Audit Trail */}
+          <button
+            type="button"
+            id="print-audit-trail-btn"
+            onClick={onPrintAudit || handlePrintAuditTrail}
+            className="flex items-center gap-1 px-3 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg font-semibold shadow-2xs transition-colors cursor-pointer"
+            title="Print official chronological document audit report (Form POSSD-DTS-AUD01)"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print Trail</span>
           </button>
         </div>
       </div>

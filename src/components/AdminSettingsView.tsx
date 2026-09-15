@@ -1,14 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { TimeInDeskConfig, DocumentItem, AppUserRole } from '../types';
 import { calculateDocumentTimeInDesk, DEFAULT_TIME_IN_DESK_CONFIG } from '../lib/timeInDesk';
-import { SheetMetadata } from '../lib/googleSheets';
 import {
   Sliders,
   Timer,
   Clock,
   AlertTriangle,
   Users,
-  FileSpreadsheet,
   Save,
   RotateCcw,
   CheckCircle2,
@@ -20,6 +18,17 @@ import {
   Wifi,
   WifiOff,
   DownloadCloud,
+  Activity,
+  HardDrive,
+  Download,
+  Check,
+  RefreshCw,
+  Layers,
+  Zap,
+  Copy,
+  FileCode,
+  ExternalLink,
+  FileText,
 } from 'lucide-react';
 import { useOnlineStatus } from './usePWAInstall';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -29,9 +38,7 @@ interface AdminSettingsViewProps {
   onSaveConfig: (newConfig: TimeInDeskConfig) => void;
   documents: DocumentItem[];
   staffList: AppUserRole[];
-  sheetConfig: SheetMetadata | null;
   onOpenRolesModal: () => void;
-  onOpenSheetModal: () => void;
   availableDivisions: string[];
 }
 
@@ -40,9 +47,7 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
   onSaveConfig,
   documents,
   staffList,
-  sheetConfig,
   onOpenRolesModal,
-  onOpenSheetModal,
   availableDivisions,
 }) => {
   const [defaultHours, setDefaultHours] = useState(timeInDeskConfig.defaultThresholdHours);
@@ -120,6 +125,48 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
 
   const unconfiguredDivisions = allDivisions.filter((d) => divisionThresholds[d] === undefined);
 
+  const [copyCodeStatus, setCopyCodeStatus] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
+  const [copyPromptStatus, setCopyPromptStatus] = useState<'idle' | 'copying' | 'copied'>('idle');
+
+  const handleCopyCodebase = async () => {
+    try {
+      setCopyCodeStatus('copying');
+      const res = await fetch('/codebase-export.txt');
+      if (!res.ok) throw new Error('Could not load bundle');
+      const text = await res.text();
+      await navigator.clipboard.writeText(text);
+      setCopyCodeStatus('copied');
+      setTimeout(() => setCopyCodeStatus('idle'), 3000);
+    } catch {
+      window.open('/FULL_CODEBASE_CONSOLIDATED.md', '_blank');
+      setCopyCodeStatus('error');
+      setTimeout(() => setCopyCodeStatus('idle'), 3000);
+    }
+  };
+
+  const handleCopyGeminiPrompt = async () => {
+    try {
+      setCopyPromptStatus('copying');
+      const promptIntro = `Please thoroughly review and verify this compiled codebase for the POSSD Document Tracking System web application:
+
+Key validation areas:
+1. Persistence and data integrity across document movements, compliance, and clearance.
+2. React state performance, re-rendering prevention, and table virtualization.
+3. SLA Time-in-Desk dwell time calculations, overdue detection, and business hour accounting.
+4. Offline storage persistence and error handling.
+
+Compiled Codebase:
+`;
+      const res = await fetch('/codebase-export.txt');
+      const code = res.ok ? await res.text() : '';
+      await navigator.clipboard.writeText(promptIntro + '\n\n' + code);
+      setCopyPromptStatus('copied');
+      setTimeout(() => setCopyPromptStatus('idle'), 3000);
+    } catch {
+      setCopyPromptStatus('idle');
+    }
+  };
+
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
       {/* Top Header Card */}
@@ -167,7 +214,9 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
         </div>
       )}
 
-      {/* Main Grid: Thresholds Configuration & Overview */}
+
+
+      {/* SLA Thresholds & Configuration Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Columns: Time-in-Desk SLA Configuration Form */}
         <div className="lg:col-span-2 space-y-6">
@@ -417,37 +466,38 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
             </button>
           </div>
 
-          {/* Google Sheets Integration Box */}
+          {/* Data Persistence Architecture Box */}
           <div className="p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <FileSpreadsheet className="w-4 h-4 text-slate-500" />
+                <HardDrive className="w-4 h-4 text-slate-500" />
                 <span className="text-xs font-bold text-slate-900 dark:text-white">
-                  Master Google Sheet Sync
+                  Database &amp; Persistence Layer
                 </span>
               </div>
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                sheetConfig
-                  ? 'bg-slate-800 text-slate-200 border border-slate-700'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-400'
-              }`}>
-                {sheetConfig ? 'Linked' : 'Not Linked'}
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                Pre-PostgreSQL Ready
               </span>
             </div>
 
             <p className="text-xs text-slate-600 dark:text-slate-400">
-              Zero-Login public synchronization is enabled. Connect a single Google Sheet set to &quot;Anyone with the link as Editor&quot; to permanently store all entries.
+              Clean local persistence is active with authoritative document tracking, full movement history, supervisor remarks, and compliance trails. Ready for PostgreSQL backend integration.
             </p>
 
-            <button
-              type="button"
-              id="admin-open-sheet-btn"
-              onClick={onOpenSheetModal}
-              className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5" />
-              <span>Configure Master Sheet Integration</span>
-            </button>
+            <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700/60 text-[11px] text-slate-600 dark:text-slate-300 space-y-1">
+              <div className="flex justify-between">
+                <span>Enrolled Documents:</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">{documents.length}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Personnel Profiles:</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">{staffList.length}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>SLA Overdue Items:</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">{overdueDocs.length}</span>
+              </div>
+            </div>
           </div>
 
           {/* Service Worker & Caching Status Box */}
@@ -476,6 +526,94 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
                   <span>Connection: Offline (Operating from local cache)</span>
                 </>
               )}
+            </div>
+          </div>
+
+          {/* Codebase Compilation & Gemini AI Checking Box */}
+          <div
+            id="codebase-export-card"
+            className="p-5 bg-gradient-to-br from-white to-blue-50/40 dark:from-slate-900 dark:to-blue-950/20 border border-blue-200/80 dark:border-blue-900/60 rounded-2xl shadow-xs space-y-3 text-xs"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FileCode className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <span className="text-xs font-bold text-slate-900 dark:text-white">
+                  Full Codebase for Google Gemini
+                </span>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200 font-bold">
+                Compiled Bundle
+              </span>
+            </div>
+
+            <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+              All 28 application source modules, TypeScript interfaces, sync engines, and UI components compiled into a single consolidated file for review in Google Gemini.
+            </p>
+
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                id="btn-copy-codebase-gemini"
+                onClick={handleCopyGeminiPrompt}
+                className="w-full py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold transition-all cursor-pointer flex items-center justify-center gap-2 shadow-2xs text-xs"
+              >
+                {copyPromptStatus === 'copying' ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Copying Code + Prompt...</span>
+                  </>
+                ) : copyPromptStatus === 'copied' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-300" />
+                    <span>Copied! Ready to paste into Gemini</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy Prompt + Code for Gemini</span>
+                  </>
+                )}
+              </button>
+
+              <div className="grid grid-cols-2 gap-2">
+                <a
+                  href="/FULL_CODEBASE_CONSOLIDATED.md"
+                  download="FULL_CODEBASE_CONSOLIDATED.md"
+                  className="py-2 px-2.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-200 dark:border-slate-700 text-center"
+                >
+                  <Download className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Download .md</span>
+                </a>
+
+                <a
+                  href="/codebase-export.txt"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="py-2 px-2.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-200 dark:border-slate-700 text-center"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Open in Tab</span>
+                </a>
+              </div>
+
+              <button
+                type="button"
+                id="btn-copy-raw-codebase"
+                onClick={handleCopyCodebase}
+                className="w-full py-2 px-3 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-200 dark:border-slate-700"
+              >
+                {copyCodeStatus === 'copied' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-500" />
+                    <span>Raw Code Copied to Clipboard</span>
+                  </>
+                ) : (
+                  <>
+                    <FileText className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Copy Raw Codebase Only</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

@@ -15,8 +15,8 @@ interface ShortcutItem {
 const SHORTCUTS: ShortcutItem[] = [
   // Actions
   { keys: ['N'], description: 'Open Log Document modal (Incoming or Outgoing)', category: 'Actions' },
-  { keys: ['S'], description: 'Open Google Sheets Integration & Live Diagnostics', category: 'Actions' },
-  { keys: ['R'], description: 'Trigger immediate push / refresh with linked Google Sheet', category: 'Actions' },
+  { keys: ['P'], description: 'Print Document Details or Document Registry', category: 'Actions' },
+  { keys: ['R'], description: 'Trigger immediate refresh of Document Registry', category: 'Actions' },
   
   // Navigation
   { keys: ['1'], description: 'Switch to Dashboard tab', category: 'Navigation' },

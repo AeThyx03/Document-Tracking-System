@@ -13,15 +13,17 @@ import {
 import {
   getStoredDocuments,
   saveStoredDocuments,
-  getStoredSheetConfig,
-  saveStoredSheetConfig,
   getStoredStaffMembers,
   saveStoredStaffMembers,
   getStoredDropdownOptions,
   saveStoredDropdownOptions,
   ROLE_CONFIGS,
   getRoleConfig,
+  getRolePermissions,
+  normalizeRole,
   canUserDeleteDocuments,
+  canUserManageSettings,
+  canUserManageStaff,
   decodePersonnelSyncCode,
   broadcastDataUpdate,
   onDataUpdate,
@@ -30,18 +32,23 @@ import {
   safeStorageRemove,
 } from './mockData';
 import {
-  SheetMetadata,
-  syncAllDocumentsToSheet,
-  syncPersonnelOnlyToSheet,
-  pullPersonnelFromSheet,
-  pullAllFromSheet,
-  isGoogleQuotaError,
-} from './lib/googleSheets';
+  executeBatchAction,
+  WorkflowActor,
+  reconcileDocumentIntegrity,
+  validateConcurrency,
+} from './lib/workflow';
+import {
+  createBusinessNotification,
+  getStoredNotifications,
+  saveStoredNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+} from './lib/notifications';
 import * as api from './lib/api';
+import { useOnlineStatus } from './components/usePWAInstall';
 import { initAuth, setAccessToken, getAccessToken, googleSignIn, logoutGoogle, getStaySignedIn } from './lib/firebase';
 import { User } from 'firebase/auth';
 import { NotificationCenter } from './components/NotificationCenter';
-import { GoogleSheetSyncModal } from './components/GoogleSheetSyncModal';
 import { IncomingDocumentModal } from './components/IncomingDocumentModal';
 import { DocumentDetailModal } from './components/DocumentDetailModal';
 import { RolesManagementModal } from './components/RolesManagementModal';
@@ -59,12 +66,13 @@ import { VerticalNavigationSidebar, WorkspaceTab } from './components/VerticalNa
 import {
   getTimeInDeskConfig,
   saveTimeInDeskConfig,
+  fetchTimeInDeskConfigFromBackend,
+  saveTimeInDeskConfigToBackend,
   calculateDocumentTimeInDesk,
 } from './lib/timeInDesk';
 import {
   FileText,
   PlusCircle,
-  FileSpreadsheet,
   Search,
   Filter,
   ArrowUpDown,
@@ -103,6 +111,7 @@ import {
   Globe,
   Keyboard,
   CheckSquare,
+  Printer,
 } from 'lucide-react';
 
 export default function App() {
@@ -139,49 +148,45 @@ export default function App() {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
   };
 
-  // Authentication & Google Sheets State
+  // Authentication State
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
-  const [sheetConfig, setSheetConfig] = useState<SheetMetadata | null>(null);
-  const [isAutoSyncing, setIsAutoSyncing] = useState<boolean>(false);
-  const [isPushingAll, setIsPushingAll] = useState<boolean>(false);
-  const [quotaCooldownSeconds, setQuotaCooldownSeconds] = useState<number>(0);
-  const [isSheetModalOpen, setIsSheetModalOpen] = useState(false);
-
-  // References to prevent quota over-consumption and circuit-breaker for rate limits
-  const quotaCooldownUntilRef = useRef<number>(0);
-  const pushTimeoutRef = useRef<any>(null);
 
   // Time-in-Desk Threshold Configuration State
-  const [timeInDeskConfig, setTimeInDeskConfig] = useState<TimeInDeskConfig>(() =>
-    getTimeInDeskConfig()
-  );
+  const [timeInDeskConfig, setTimeInDeskConfig] = useState<TimeInDeskConfig>(() => getTimeInDeskConfig());
+  
+  useEffect(() => {
+    fetchTimeInDeskConfigFromBackend().then(config => {
+      setTimeInDeskConfig(config);
+      saveTimeInDeskConfig(config); // keep local in sync for fast reload
+    });
+  }, []);
   const [isThresholdModalOpen, setIsThresholdModalOpen] = useState(false);
+
+  // Authentication & Session Loading State
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
 
   // Staff & Roles State
   const [staffList, setStaffList] = useState<AppUserRole[]>(() => getStoredStaffMembers());
-  const [currentUser, setCurrentUser] = useState<AppUserRole>(() => {
+  const [currentUser, setCurrentUser] = useState<AppUserRole | null>(() => {
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        const stored = localStorage.getItem('possd_active_user');
-        if (stored) {
-          const parsed = JSON.parse(stored);
-          if (parsed && parsed.name && parsed.role) {
-            return parsed;
+      const stored = safeStorageGet('possd_active_user');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && typeof parsed.name === 'string' && typeof parsed.role === 'string') {
+          const canonicalRole = normalizeRole(parsed.role);
+          if (canonicalRole) {
+            return {
+              ...parsed,
+              role: canonicalRole,
+            };
           }
         }
       }
     } catch (e) {
       // ignore
     }
-    const initialStaff = getStoredStaffMembers();
-    return initialStaff[0] || {
-      id: 'SYS-ADMIN-1',
-      name: 'Engr. System Admin',
-      role: 'System Admin',
-      division: 'Administrative Section',
-      username: 'admin',
-    };
+    return null;
   });
   const [isRolesModalOpen, setIsRolesModalOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
@@ -307,8 +312,53 @@ export default function App() {
   const [isExecutingBatch, setIsExecutingBatch] = useState<boolean>(false);
   const [batchDocsToDelete, setBatchDocsToDelete] = useState<DocumentItem[] | null>(null);
 
-  // Notifications State (Real-time activity log)
-  const [notifications, setNotifications] = useState<RealtimeNotification[]>([]);
+  // Notifications State (Real-time activity log with isolated persistence)
+  const [notifications, setNotifications] = useState<RealtimeNotification[]>(() => getStoredNotifications());
+
+  // Real-time notification helper tied to business events
+  const addNotification = (
+    title: string,
+    message: string,
+    performedBy: string,
+    type: 'incoming' | 'movement' | 'remark' | 'compliance' | 'clearance' | 'system' | 'sync' | 'urgent',
+    trackingNumber?: string,
+    documentId?: string
+  ) => {
+    const newNotif = createBusinessNotification({
+      title,
+      message,
+      actor: performedBy || currentUser?.name || 'System',
+      type,
+      trackingNumber,
+      documentId,
+    });
+    setNotifications((prev) => {
+      const updated = [newNotif, ...prev.slice(0, 49)];
+      saveStoredNotifications(updated);
+      return updated;
+    });
+  };
+
+  const handleMarkNotificationAsRead = (id: string) => {
+    setNotifications((prev) => {
+      const updated = markNotificationAsRead(prev, id);
+      saveStoredNotifications(updated);
+      return updated;
+    });
+  };
+
+  const handleMarkAllNotificationsAsRead = () => {
+    setNotifications((prev) => {
+      const updated = markAllNotificationsAsRead(prev);
+      saveStoredNotifications(updated);
+      return updated;
+    });
+  };
+
+  const handleClearNotifications = () => {
+    setNotifications([]);
+    saveStoredNotifications([]);
+  };
 
   // Filtering & Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -317,6 +367,7 @@ export default function App() {
   const [priorityFilter, setPriorityFilter] = useState<string>('ALL');
   const [viewMode, setViewMode] = useState<'all' | 'incoming' | 'outgoing' | 'compliance_needed' | 'overdue'>('all');
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('documents');
+  const isOnline = useOnlineStatus();
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
 
   // Table Column Sorting State
@@ -351,182 +402,42 @@ export default function App() {
     staffListRef.current = staffList;
   }, [staffList]);
 
-  const hasPendingSyncRef = useRef<boolean>(
-    safeStorageGet('possd_has_unpushed_changes') === 'true'
-  );
-
-  // Debounced push queue to batch rapid mutations and protect against Google Sheets write quota exhaustion (60 writes/min)
-  // Guarantees that any added log (incoming document, desk routing, remark, clearance) is preserved locally and synced to the sheet.
-  const scheduleSheetPush = (updatedDocs: DocumentItem[], updatedStaff?: AppUserRole[]) => {
-    hasPendingSyncRef.current = true;
-    safeStorageSet('possd_has_unpushed_changes', 'true');
-
-    if ((!token && !sheetConfig?.appsScriptUrl) || !sheetConfig?.spreadsheetId) {
-      console.log('Sync queued: Changes saved locally and will auto-push to Google Sheet once connected or Apps Script configured.');
-      return;
-    }
-
-    if (pushTimeoutRef.current) {
-      clearTimeout(pushTimeoutRef.current);
-    }
-
-    const now = Date.now();
-    const waitTime = Math.max(0, quotaCooldownUntilRef.current - now);
-    const delay = waitTime > 0 ? waitTime + 1000 : 3500;
-
-    pushTimeoutRef.current = setTimeout(async () => {
-      setIsAutoSyncing(true);
-      try {
-        await syncAllDocumentsToSheet(
-          token,
-          sheetConfig.spreadsheetId,
-          updatedDocs,
-          updatedStaff || staffListRef.current,
-          { appsScriptUrl: sheetConfig.appsScriptUrl }
-        );
-        hasPendingSyncRef.current = false;
-        safeStorageRemove('possd_has_unpushed_changes');
-      } catch (err: any) {
-        if (isGoogleQuotaError(err) || err?.message?.toLowerCase().includes('rate exceeded')) {
-          const cooldownMs = 65_000;
-          quotaCooldownUntilRef.current = Date.now() + cooldownMs;
-          setQuotaCooldownSeconds(65);
-          addNotification(
-            'Sync Quota Cooldown',
-            'Google Sheets write limit reached (60/min). Your added logs are safely preserved locally and will automatically sync once the window resets.',
-            'System Sync',
-            'sync',
-            'QUOTA'
-          );
-          // Automatically re-schedule push after cooldown so the added log is never dropped!
-          scheduleSheetPush(updatedDocs, updatedStaff);
-        } else {
-          console.error('Failed to sync changes to Google Sheet:', err);
-        }
-      } finally {
-        setIsAutoSyncing(false);
-      }
-    }, delay);
-  };
-
-  // When sheet credentials / connection become active, automatically flush any un-synced logs
+  // Background Auto-Sync: 30-second read-only polling to observe remote changes
   useEffect(() => {
-    if ((!token && !sheetConfig?.appsScriptUrl) || !sheetConfig?.spreadsheetId) return;
-    if (hasPendingSyncRef.current || safeStorageGet('possd_has_unpushed_changes') === 'true') {
-      scheduleSheetPush(documentsRef.current, staffListRef.current);
-    }
-  }, [token, sheetConfig]);
-
-  // Background Auto-Sync: 30-second read-only polling to observe remote changes without consuming write quota
-  // Supports zero-login public sheets via GViz proxy as well as OAuth sessions
-  useEffect(() => {
-    if (!sheetConfig?.spreadsheetId) return;
-
     let isSyncing = false;
 
     const performAutoPull = async () => {
-      // If currently cooling down from HTTP 429 quota, skip polling
-      if (Date.now() < quotaCooldownUntilRef.current) {
-        return;
-      }
-
-      if (isSyncing) return;
+      if (!isOnline || isSyncing) return;
       isSyncing = true;
-      setIsAutoSyncing(true);
-
       try {
-        // Read-only pull — safely merges with local documents and movements
-        const { documents: pulledDocs, personnel: pulledStaff } = await pullAllFromSheet(
-          token,
-          sheetConfig.spreadsheetId,
-          documentsRef.current,
-          staffListRef.current
-        );
-
-        // Detect if anything actually changed before re-rendering
-        const currentDocs = documentsRef.current;
-        const docsChanged =
-          pulledDocs.length !== currentDocs.length ||
-          pulledDocs.some((d, i) => {
-            const existing = currentDocs[i];
-            return (
-              !existing ||
-              existing.id !== d.id ||
-              existing.currentStatus !== d.currentStatus ||
-              existing.currentLocation !== d.currentLocation ||
-              existing.currentCustodian !== d.currentCustodian ||
-              (existing.movements?.length || 0) !== (d.movements?.length || 0) ||
-              (existing.supervisorRemarks?.length || 0) !== (d.supervisorRemarks?.length || 0) ||
-              existing.managerClearance?.isCleared !== d.managerClearance?.isCleared ||
-              existing.updatedAt !== d.updatedAt
-            );
-          });
-
-        if (docsChanged) {
-          setDocuments(pulledDocs);
-          saveStoredDocuments(pulledDocs);
+        const [docs, staff, linksData] = await Promise.all([
+          api.fetchDocuments(),
+          api.fetchStaff(),
+          api.fetchLinks()
+        ]);
+        
+        if (docs && docs.length > 0) {
+          setDocuments(docs);
+          saveStoredDocuments(docs);
         }
-
-        const currentStaff = staffListRef.current;
-        const staffChanged =
-          pulledStaff.length !== currentStaff.length ||
-          pulledStaff.some((s, i) => {
-            const existing = currentStaff[i];
-            return (
-              !existing ||
-              existing.id !== s.id ||
-              existing.role !== s.role ||
-              existing.division !== s.division ||
-              existing.status !== s.status
-            );
-          });
-
-        if (staffChanged) {
-          setStaffList(pulledStaff);
-          saveStoredStaffMembers(pulledStaff);
+        if (staff && staff.length > 0) {
+          setStaffList(staff);
+          saveStoredStaffMembers(staff);
         }
-
-        // If local had unsynced logs before or during auto-pull, push the merged state back to the sheet!
-        if (hasPendingSyncRef.current) {
-          scheduleSheetPush(pulledDocs, staffListRef.current);
+        if (linksData) {
+          setDedicatedLinks(linksData);
         }
-      } catch (err: any) {
-        if (isGoogleQuotaError(err) || err?.message?.toLowerCase().includes('rate exceeded')) {
-          const cooldownMs = 65_000;
-          quotaCooldownUntilRef.current = Date.now() + cooldownMs;
-          setQuotaCooldownSeconds(65);
-          console.warn('Google Sheets API rate limit reached. Auto-sync paused for 65 seconds (Local data preserved).');
-        } else {
-          console.warn('Auto-sync pull failed:', err);
-        }
+      } catch (err) {
+        // Silently retain local cache if network is unavailable
       } finally {
         isSyncing = false;
-        setIsAutoSyncing(false);
       }
     };
 
-    // Initial pull after 2s, then every 30s
-    const initialTimer = setTimeout(performAutoPull, 2000);
     const interval = setInterval(performAutoPull, 30000);
+    return () => clearInterval(interval);
+  }, [isOnline]);
 
-    return () => {
-      clearTimeout(initialTimer);
-      clearInterval(interval);
-    };
-  }, [token, sheetConfig]);
-
-  // Quota cooldown countdown ticker
-  useEffect(() => {
-    if (quotaCooldownSeconds <= 0) return;
-    const ticker = setInterval(() => {
-      const remaining = Math.max(0, Math.ceil((quotaCooldownUntilRef.current - Date.now()) / 1000));
-      setQuotaCooldownSeconds(remaining);
-      if (remaining <= 0) {
-        clearInterval(ticker);
-      }
-    }, 1000);
-    return () => clearInterval(ticker);
-  }, [quotaCooldownSeconds]);
 
   // Sign Out / Logout handler - Turns back to Official Portal Login Page
   const handleLogout = async () => {
@@ -543,148 +454,42 @@ export default function App() {
     setUser(null);
     setToken(null);
     setAccessToken(null);
-    fetch('/api/sheet-auth-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: null }),
-    }).catch(() => {});
     setCurrentUser(null);
     setIsLoginModalOpen(false);
   };
 
   // Manual Instant Refresh Handler
-  const handleManualSync = async () => {
-    if (!sheetConfig?.spreadsheetId) {
-      setIsSheetModalOpen(true);
-      return;
-    }
-
-    if (Date.now() < quotaCooldownUntilRef.current) {
-      const remaining = Math.max(1, Math.ceil((quotaCooldownUntilRef.current - Date.now()) / 1000));
-      addNotification(
-        'Sync Cooling Down',
-        `Google Sheets API quota is resetting. Please wait ${remaining}s before manual sync.`,
-        'System Sync',
-        'sync',
-        'COOLDOWN'
-      );
-      return;
-    }
-
-    setIsAutoSyncing(true);
+  const handleManualRefresh = async () => {
     try {
-      const { documents: pulledDocs, personnel: pulledStaff } = await pullAllFromSheet(
-        token,
-        sheetConfig.spreadsheetId,
-        documentsRef.current,
-        staffListRef.current
-      );
-      setDocuments(pulledDocs);
-      saveStoredDocuments(pulledDocs);
-      setStaffList(pulledStaff);
-      saveStoredStaffMembers(pulledStaff);
-
-      addNotification(
-        'Google Sheet Synchronized',
-        `Refreshed ${pulledDocs.length} documents and ${pulledStaff.length} personnel profiles from Google Sheet.`,
-        'System Sync',
-        'sync',
-        'MANUAL-SYNC'
-      );
-    } catch (err: any) {
-      if (isGoogleQuotaError(err) || err?.message?.toLowerCase().includes('rate exceeded')) {
-        quotaCooldownUntilRef.current = Date.now() + 65_000;
-        setQuotaCooldownSeconds(65);
-        addNotification(
-          'Sync Quota Cooldown',
-          'Google Sheets rate limit reached (60/min). Local data is safely preserved and sync will resume automatically.',
-          'System Sync',
-          'sync',
-          'QUOTA'
-        );
-      } else {
-        console.error('Manual sync failed:', err);
+      const [docs, staff, linksData] = await Promise.all([
+        api.fetchDocuments(),
+        api.fetchStaff(),
+        api.fetchLinks()
+      ]);
+      if (docs && docs.length > 0) {
+        setDocuments(docs);
+        saveStoredDocuments(docs);
       }
-    } finally {
-      setIsAutoSyncing(false);
-    }
-  };
-
-  // Dedicated Force Push All Handler for Top Ribbon & Manual Action
-  const handlePushAllNow = async () => {
-    if (!sheetConfig?.spreadsheetId) {
-      setIsSheetModalOpen(true);
-      return;
-    }
-
-    let activeToken = token;
-    // If no active token, check if Apps Script URL is set or server has shared token
-    if (!activeToken && !sheetConfig.appsScriptUrl) {
-      try {
-        const tokenRes = await fetch('/api/sheet-auth-token').then((r) => r.json());
-        if (tokenRes.success && tokenRes.token) {
-          activeToken = tokenRes.token;
-          setToken(tokenRes.token);
-          setAccessToken(tokenRes.token);
-        }
-      } catch {}
-    }
-
-    setIsPushingAll(true);
-    try {
-      const res = await syncAllDocumentsToSheet(
-        activeToken,
-        sheetConfig.spreadsheetId,
-        documentsRef.current,
-        staffListRef.current,
-        { forceHeaders: true, appsScriptUrl: sheetConfig.appsScriptUrl }
-      );
-
-      hasPendingSyncRef.current = false;
-      safeStorageRemove('possd_has_unpushed_changes');
-
-      // Update URL with direct gid tab link if not present
-      if (res.masterSheetId !== undefined && !sheetConfig.spreadsheetUrl.includes('#gid=')) {
-        const updatedConfig: SheetMetadata = {
-          ...sheetConfig,
-          spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${sheetConfig.spreadsheetId}/edit#gid=${res.masterSheetId}`,
-          sheetName: res.masterTabName,
-        };
-        setSheetConfig(updatedConfig);
-        saveStoredSheetConfig(updatedConfig);
+      if (staff && staff.length > 0) {
+        setStaffList(staff);
+        saveStoredStaffMembers(staff);
       }
-
+      if (linksData) {
+        setDedicatedLinks(linksData);
+      }
       addNotification(
-        'Google Sheet Synchronized',
-        `Successfully logged ${res.rowsUpdated} document records and ${res.personnelUpdated} personnel profiles to tab "${res.masterTabName}".`,
+        'Registry Refreshed',
+        'Successfully retrieved the latest records from persistence store.',
         currentUser?.name || 'System',
-        'sync',
-        'PUSH-ALL-SUCCESS'
+        'system'
       );
-    } catch (err: any) {
-      if (isGoogleQuotaError(err) || err?.message?.toLowerCase().includes('rate exceeded')) {
-        quotaCooldownUntilRef.current = Date.now() + 65_000;
-        setQuotaCooldownSeconds(65);
-        addNotification(
-          'Sync Quota Cooldown',
-          'Google Sheets write quota reached (60 requests/min). All records are safely preserved locally and will sync once the window resets.',
-          'System Sync',
-          'sync',
-          'QUOTA'
-        );
-      } else {
-        console.error('Failed to push all records to Google Sheet:', err);
-        addNotification(
-          'Sync Failed',
-          err?.message || 'Failed to push all entries to Google Sheet. Check permissions or network.',
-          'System Sync',
-          'sync',
-          'SYNC-FAILED'
-        );
-        setIsSheetModalOpen(true);
-      }
-    } finally {
-      setIsPushingAll(false);
+    } catch {
+      addNotification(
+        'Offline Notice',
+        'Working with local cached records.',
+        currentUser?.name || 'System',
+        'system'
+      );
     }
   };
 
@@ -704,25 +509,8 @@ export default function App() {
   useEffect(() => {
     const localDocs = getStoredDocuments();
     setDocuments(localDocs);
-    const existingConfig = getStoredSheetConfig();
-    setSheetConfig(existingConfig);
 
-    // Cross-Device Backend Hydration
-    fetch('/api/sheet-config')
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success && data.sheetConfig) {
-          setSheetConfig((prev) => prev || data.sheetConfig);
-          if (!existingConfig) {
-            saveStoredSheetConfig(data.sheetConfig);
-          }
-        }
-      })
-      .catch(() => {});
-
-    // Hydration now happens in initAuth successfully
-
-    // Cross-Device Instant Sync URL & Hash Detection
+    // Personnel Roster Transfer URL & Hash Detection
     try {
       const hash = window.location.hash || '';
       const params = new URLSearchParams(window.location.search);
@@ -756,18 +544,13 @@ export default function App() {
             saveStoredDropdownOptions(payload.dropdownOptions);
           }
 
-          if (payload.sheetConfig && !existingConfig) {
-            setSheetConfig(payload.sheetConfig);
-            saveStoredSheetConfig(payload.sheetConfig);
-          }
-
-          // Clean URL so the token is not exposed in address bar
+          // Clean URL so the transfer payload is not exposed in address bar
           window.history.replaceState(null, '', window.location.pathname);
 
           setTimeout(() => {
             addNotification(
-              'Multi-Device Sync Applied',
-              `Successfully loaded ${payload.staff.length} personnel profiles and credentials from device transfer link.`,
+              'Roster Transfer Applied',
+              `Successfully loaded ${payload.staff.length} personnel profiles and credentials from transfer link.`,
               'System',
               'sync',
               'DEVICE-SYNC'
@@ -775,33 +558,11 @@ export default function App() {
           }, 600);
         }
       }
-
-      // Check ?sheet=<spreadsheetId> parameter for fast sheet linking across devices
-      const sheetParam = params.get('sheet');
-      if (sheetParam && (!existingConfig || existingConfig.spreadsheetId !== sheetParam)) {
-        const newSheetCfg: SheetMetadata = {
-          spreadsheetId: sheetParam,
-          spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${sheetParam}/edit`,
-          title: 'POSSD Document Tracking & Personnel Directory',
-          linkedAt: new Date().toISOString(),
-        };
-        setSheetConfig(newSheetCfg);
-        saveStoredSheetConfig(newSheetCfg);
-        setTimeout(() => {
-          addNotification(
-            'Google Sheet Linked',
-            `Linked to Google Sheet ID: ${sheetParam}`,
-            'System',
-            'sync',
-            'SHEET-AUTO-CONNECT'
-          );
-        }, 800);
-      }
     } catch (e) {
-      console.warn('Could not parse multi-device sync params', e);
+      console.warn('Could not parse roster transfer params', e);
     }
 
-    // Cross-Tab Broadcast Channel listener
+    // Same-Browser Cross-Tab Broadcast Channel listener
     const cleanupBroadcast = onDataUpdate((type, data) => {
       if (type === 'staff' && Array.isArray(data)) {
         setStaffList(data);
@@ -819,7 +580,7 @@ export default function App() {
         setAccessToken(oauthToken);
         
         try {
-          // Cross-device backend hydration
+          // Initial backend hydration
           const [docs, staff, links] = await Promise.all([
             api.fetchDocuments(),
             api.fetchStaff(),
@@ -837,54 +598,66 @@ export default function App() {
             currentStaffList = staff;
           }
           
-          // Map Firebase user to personnel directory
-          let matchedStaff = currentStaffList.find(s => s.email === authedUser.email || ((s.name || '').includes('Rey Reginald') && authedUser.email === 'reymojica01@gmail.com'));
-          
-          if (authedUser.email === 'reymojica01@gmail.com') {
-             if (matchedStaff) {
-                matchedStaff = { ...matchedStaff, role: 'System Admin', email: authedUser.email };
-             } else {
-                matchedStaff = {
-                   id: authedUser.uid,
-                   name: authedUser.displayName || 'Rey Reginald A. Mojica',
-                   role: 'System Admin',
-                   division: 'CMED',
-                   username: 'reymojica01',
-                   email: authedUser.email
-                };
-             }
-             
-             // Ensure it's in the staff list so it persists correctly
-             const updatedList = currentStaffList.some(s => s.id === matchedStaff.id)
-                ? currentStaffList.map(s => s.id === matchedStaff.id ? matchedStaff : s)
-                : [...currentStaffList, matchedStaff];
-             setStaffList(updatedList);
-             saveStoredStaffMembers(updatedList);
-          }
-          
+          // Map Firebase user to personnel directory by institutional email or ID
+          const userEmail = (authedUser.email || '').toLowerCase().trim();
+          let matchedStaff = currentStaffList.find(
+            s => (s.email && s.email.toLowerCase().trim() === userEmail) || s.id === authedUser.uid
+          );
+
           if (matchedStaff) {
-             setCurrentUser(matchedStaff);
-             localStorage.setItem('possd_active_user', JSON.stringify(matchedStaff));
+            const canonicalRole = normalizeRole(matchedStaff.role);
+            const normalizedStaff: AppUserRole = {
+              ...matchedStaff,
+              role: canonicalRole,
+            };
+            setCurrentUser(normalizedStaff);
+            safeStorageSet('possd_active_user', JSON.stringify(normalizedStaff));
           } else if (authedUser.email) {
-             // Default viewer role
-             const viewer: AppUserRole = {
-               id: authedUser.uid,
-               name: authedUser.displayName || authedUser.email.split('@')[0],
-               role: 'Viewer', division: 'General', username: authedUser.email.split('@')[0], email: authedUser.email
-             };
-             setCurrentUser(viewer);
-             localStorage.setItem('possd_active_user', JSON.stringify(viewer));
+            // Default authenticated staff role with standard permissions
+            const defaultStaff: AppUserRole = {
+              id: authedUser.uid,
+              name: authedUser.displayName || authedUser.email.split('@')[0],
+              role: 'Staff',
+              division: 'General',
+              username: authedUser.email.split('@')[0],
+              email: authedUser.email,
+              status: 'active',
+            };
+            setCurrentUser(defaultStaff);
+            safeStorageSet('possd_active_user', JSON.stringify(defaultStaff));
           }
-          // The links are currently not being set into state here, but can be managed by DedicatedLinksView
         } catch (e) {
           console.error("Failed to hydrate from backend:", e);
+        } finally {
+          setAuthLoading(false);
         }
       },
       () => {
         setUser(null);
         setToken(null);
         setAccessToken(null);
-        setCurrentUser(null);
+        // If not authenticated with Firebase, inspect locally stored enrolled session
+        try {
+          const stored = safeStorageGet('possd_active_user');
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            if (parsed && typeof parsed.name === 'string' && typeof parsed.role === 'string') {
+              const canonicalRole = normalizeRole(parsed.role);
+              if (canonicalRole) {
+                setCurrentUser({ ...parsed, role: canonicalRole });
+              } else {
+                setCurrentUser(null);
+              }
+            } else {
+              setCurrentUser(null);
+            }
+          } else {
+            setCurrentUser(null);
+          }
+        } catch {
+          setCurrentUser(null);
+        }
+        setAuthLoading(false);
       }
     );
 
@@ -917,10 +690,6 @@ export default function App() {
         }
         if (isIncomingModalOpen) {
           setIsIncomingModalOpen(false);
-          return;
-        }
-        if (isSheetModalOpen) {
-          setIsSheetModalOpen(false);
           return;
         }
         if (isRolesModalOpen) {
@@ -978,17 +747,17 @@ export default function App() {
         return;
       }
 
-      // Action: Google Sheets Integration & Diagnostics ('s' or 'S')
-      if (e.key === 's' || e.key === 'S') {
+      // Action: Refresh Registry ('r' or 'R')
+      if (e.key === 'r' || e.key === 'R') {
         e.preventDefault();
-        setIsSheetModalOpen(true);
+        handleManualRefresh();
         return;
       }
 
-      // Action: Refresh / Manual Sync ('r' or 'R')
-      if (e.key === 'r' || e.key === 'R') {
+      // Action: Print ('p' or 'P')
+      if (e.key === 'p' || e.key === 'P') {
         e.preventDefault();
-        handleManualSync();
+        window.print();
         return;
       }
 
@@ -1021,48 +790,28 @@ export default function App() {
     isShortcutsModalOpen,
     selectedDoc,
     isIncomingModalOpen,
-    isSheetModalOpen,
     isRolesModalOpen,
     isLoginModalOpen,
     isThresholdModalOpen,
     batchDocsToDelete,
     docToDelete,
-    handleManualSync,
+    handleManualRefresh,
   ]);
-
-  // Real-time notification helper
-  const addNotification = (
-    title: string,
-    message: string,
-    performedBy: string,
-    type: 'incoming' | 'movement' | 'remark' | 'compliance' | 'clearance' | 'sync' | 'urgent',
-    trackingNumber?: string
-  ) => {
-    const newNotif: RealtimeNotification = {
-      id: `notif-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-      title,
-      message,
-      actor: performedBy,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      type,
-      trackingNumber,
-      read: false,
-    };
-    setNotifications((prev) => [newNotif, ...prev.slice(0, 49)]);
-  };
 
   // Quick switch role
   const handleQuickSwitchRole = (role: UserRoleType) => {
     const match = staffList.find((s) => s.role === role);
     if (match) {
       setCurrentUser(match);
+      safeStorageSet('possd_active_user', JSON.stringify(match));
       addNotification('Role Switched', `Switched active perspective to ${match.name} (${role})`, match.name, 'movement', 'ROLE');
-    } else {
+    } else if (currentUser) {
       const updated: AppUserRole = {
         ...currentUser,
         role,
       };
       setCurrentUser(updated);
+      safeStorageSet('possd_active_user', JSON.stringify(updated));
     }
   };
 
@@ -1072,11 +821,6 @@ export default function App() {
     setStaffList(updated);
     saveStoredStaffMembers(updated);
     broadcastDataUpdate('staff', updated);
-
-    // Auto-sync to Google Sheet if connected (debounced to avoid rate limits)
-    if (token && sheetConfig) {
-      scheduleSheetPush(documents, updated);
-    }
 
     addNotification(
       'Staff Enrolled',
@@ -1102,10 +846,6 @@ export default function App() {
     saveStoredStaffMembers(updated);
     broadcastDataUpdate('staff', updated);
 
-    if (token && sheetConfig) {
-      scheduleSheetPush(documents, updated);
-    }
-
     if (currentUser?.id === staffId) {
       setCurrentUser((prev) => ({
         ...prev,
@@ -1125,7 +865,7 @@ export default function App() {
 
   const handleUpdateStaffCredentials = (
     staffId: string,
-    updates: { username?: string; password?: string; status?: 'active' | 'suspended' }
+    updates: { username?: string; status?: 'active' | 'suspended'; email?: string }
   ) => {
     const updated = staffList.map((s) => {
       if (s.id === staffId) {
@@ -1140,20 +880,16 @@ export default function App() {
     saveStoredStaffMembers(updated);
     broadcastDataUpdate('staff', updated);
 
-    if (token && sheetConfig) {
-      scheduleSheetPush(documents, updated);
-    }
-
     if (currentUser?.id === staffId) {
-      setCurrentUser((prev) => ({
+      setCurrentUser((prev) => (prev ? {
         ...prev,
         ...updates,
-      }));
+      } : null));
     }
 
     addNotification(
-      'Credentials Enrolled',
-      `Admin updated portal login credentials for personnel ID ${staffId}.`,
+      'Account Updated',
+      `Admin updated account profile for personnel ID ${staffId}.`,
       currentUser?.name || 'System',
       'sync',
       staffId
@@ -1165,10 +901,6 @@ export default function App() {
     setStaffList(updated);
     saveStoredStaffMembers(updated);
     broadcastDataUpdate('staff', updated);
-
-    if (token && sheetConfig) {
-      scheduleSheetPush(documents, updated);
-    }
 
     addNotification('Staff Removed', `Removed personnel ID ${staffId}`, currentUser?.name || 'System', 'sync', 'STAFF');
   };
@@ -1209,8 +941,23 @@ export default function App() {
   // HANDLER: Update Document
   const handleUpdateDocument = async (updatedDoc: DocumentItem) => {
     try {
-      const oldDoc = documents.find((d) => d.id === updatedDoc.id);
-      const savedDoc = await api.updateDocument(updatedDoc);
+      const cleanDoc = reconcileDocumentIntegrity(updatedDoc);
+      const oldDoc = documents.find((d) => d.id === cleanDoc.id);
+
+      if (oldDoc) {
+        const concurrencyCheck = validateConcurrency(oldDoc, cleanDoc);
+        if (concurrencyCheck.hasConflict) {
+          addNotification(
+            'Concurrency Conflict',
+            concurrencyCheck.reason || 'Document was modified concurrently.',
+            currentUser?.name || 'System',
+            'urgent',
+            cleanDoc.trackingNumber
+          );
+        }
+      }
+
+      const savedDoc = await api.updateDocument(cleanDoc);
       
       const updatedList = documents.map((d) => (d.id === savedDoc.id ? savedDoc : d));
       setDocuments(updatedList);
@@ -1230,7 +977,7 @@ export default function App() {
         oldDoc &&
         (!oldDoc.supervisorRemarks || oldDoc.supervisorRemarks.length < (savedDoc.supervisorRemarks?.length || 0))
       ) {
-        const latestRemark = savedDoc.supervisorRemarks?.[savedDoc.supervisorRemarks.length - 1];
+        const latestRemark = savedDoc.supervisorRemarks?.[0];
         addNotification(
           'Supervisor Remark Added',
           `${savedDoc.trackingNumber}: ${latestRemark?.supervisorName} added directive ("${latestRemark?.remarkText}")`,
@@ -1319,40 +1066,65 @@ export default function App() {
     }
   };
 
-  // Filtered documents calculation
-  const filteredDocuments = documents.filter((doc) => {
-    const query = (searchQuery || '').toLowerCase();
-    const matchesSearch =
-      (doc.trackingNumber || '').toLowerCase().includes(query) ||
-      (doc.title || '').toLowerCase().includes(query) ||
-      (doc.originDepartment || '').toLowerCase().includes(query) ||
-      (doc.responsiblePerson || '').toLowerCase().includes(query) ||
-      (doc.targetDivision || '').toLowerCase().includes(query) ||
-      (doc.currentLocation || '').toLowerCase().includes(query);
+  // 1. FILTERED DOCUMENTS (Explicit Filter State Evaluation)
+  const filteredDocuments = useMemo(() => {
+    const query = (searchQuery || '').toLowerCase().trim();
+    return documents.filter((doc) => {
+      if (query) {
+        const matchesSearch =
+          (doc.trackingNumber || '').toLowerCase().includes(query) ||
+          (doc.title || '').toLowerCase().includes(query) ||
+          (doc.originDepartment || '').toLowerCase().includes(query) ||
+          (doc.responsiblePerson || '').toLowerCase().includes(query) ||
+          (doc.targetDivision || '').toLowerCase().includes(query) ||
+          (doc.currentLocation || '').toLowerCase().includes(query);
+        if (!matchesSearch) return false;
+      }
 
-    let matchesViewMode = true;
-    if (viewMode === 'incoming') {
-      matchesViewMode = doc.currentStatus === 'Incoming Logged' || doc.currentStatus === 'Under Review';
-    } else if (viewMode === 'outgoing') {
-      matchesViewMode = doc.currentStatus === 'Cleared for Out' || doc.currentStatus === 'Dispatched / Completed';
-    } else if (viewMode === 'compliance_needed') {
-      matchesViewMode =
-        doc.currentStatus === 'Supervisor Comment Needed' ||
-        doc.supervisorRemarks?.some((r) => r.complianceRequired && !r.complied);
-    } else if (viewMode === 'overdue') {
-      matchesViewMode = calculateDocumentTimeInDesk(doc, timeInDeskConfig).isOverdue;
+      if (viewMode === 'incoming') {
+        if (doc.currentStatus !== 'Incoming Logged' && doc.currentStatus !== 'Under Review') return false;
+      } else if (viewMode === 'outgoing') {
+        if (doc.currentStatus !== 'Cleared for Out' && doc.currentStatus !== 'Dispatched / Completed') return false;
+      } else if (viewMode === 'compliance_needed') {
+        const needsCompliance =
+          doc.currentStatus === 'Supervisor Comment Needed' ||
+          doc.supervisorRemarks?.some((r) => r.complianceRequired && !r.complied);
+        if (!needsCompliance) return false;
+      } else if (viewMode === 'overdue') {
+        const isOverdue = calculateDocumentTimeInDesk(doc, timeInDeskConfig).isOverdue;
+        if (!isOverdue) return false;
+      }
+
+      if (statusFilter !== 'ALL' && doc.currentStatus !== statusFilter) return false;
+      if (divisionFilter !== 'ALL' && doc.targetDivision !== divisionFilter) return false;
+      if (priorityFilter !== 'ALL' && doc.priority !== priorityFilter) return false;
+
+      return true;
+    });
+  }, [documents, searchQuery, viewMode, statusFilter, divisionFilter, priorityFilter, timeInDeskConfig]);
+
+  // 2. SORTED DOCUMENTS (Deterministic Sorting with Pre-calculated Metrics & Stable Tie-breaker)
+  const sortedDocuments = useMemo(() => {
+    if (filteredDocuments.length <= 1) return filteredDocuments;
+
+    // Pre-calculate timeInDesk elapsed hours once per item if sorting by timeInDesk to avoid O(N log N) re-calculations
+    const timeInDeskMap = new Map<string, number>();
+    if (sortField === 'timeInDesk') {
+      filteredDocuments.forEach((doc) => {
+        timeInDeskMap.set(doc.id, calculateDocumentTimeInDesk(doc, timeInDeskConfig).elapsedHours);
+      });
     }
 
-    const matchesStatus = statusFilter === 'ALL' || doc.currentStatus === statusFilter;
-    const matchesDivision = divisionFilter === 'ALL' || doc.targetDivision === divisionFilter;
-    const matchesPriority = priorityFilter === 'ALL' || doc.priority === priorityFilter;
-
-    return matchesSearch && matchesViewMode && matchesStatus && matchesDivision && matchesPriority;
-  });
-
-  // Sorted documents calculation with stable multi-field comparisons
-  const sortedDocuments = useMemo(() => {
     const list = [...filteredDocuments];
+    const statusOrder: Record<string, number> = {
+      'Incoming Logged': 1,
+      'Under Review': 2,
+      'Supervisor Comment Needed': 3,
+      'Complied / Ready for Clearance': 4,
+      'Cleared for Out': 5,
+      'Dispatched / Completed': 6,
+    };
+
     list.sort((a, b) => {
       let comparison = 0;
       switch (sortField) {
@@ -1375,19 +1147,12 @@ export default function App() {
           comparison = (a.currentCustodian || '').localeCompare(b.currentCustodian || '', undefined, { sensitivity: 'base' });
           break;
         case 'timeInDesk': {
-          const elapsedA = calculateDocumentTimeInDesk(a, timeInDeskConfig).elapsedHours;
-          const elapsedB = calculateDocumentTimeInDesk(b, timeInDeskConfig).elapsedHours;
+          const elapsedA = timeInDeskMap.get(a.id) ?? 0;
+          const elapsedB = timeInDeskMap.get(b.id) ?? 0;
           comparison = elapsedA - elapsedB;
           break;
         }
         case 'lifecycle': {
-          const statusOrder: Record<string, number> = {
-            'Incoming Logged': 1,
-            'Under Review': 2,
-            'Supervisor Comment Needed': 3,
-            'Cleared for Out': 4,
-            'Dispatched / Completed': 5,
-          };
           comparison = (statusOrder[a.currentStatus] || 0) - (statusOrder[b.currentStatus] || 0);
           break;
         }
@@ -1395,36 +1160,113 @@ export default function App() {
           comparison = 0;
       }
 
+      // Strictly deterministic secondary and tertiary tie-breakers
       if (comparison === 0) {
         comparison = (b.updatedAt || '').localeCompare(a.updatedAt || '');
+      }
+      if (comparison === 0) {
+        comparison = (a.id || '').localeCompare(b.id || '');
       }
 
       return sortDirection === 'asc' ? comparison : -comparison;
     });
+
     return list;
   }, [filteredDocuments, sortField, sortDirection, timeInDeskConfig]);
 
-  // Statistics
-  const totalCount = documents.length;
-  const activeInOfficeCount = documents.filter(
-    (d) => d.currentStatus !== 'Cleared for Out' && d.currentStatus !== 'Dispatched / Completed'
-  ).length;
-  const pendingComplianceCount = documents.filter((d) =>
-    d.supervisorRemarks?.some((r) => r.complianceRequired && !r.complied)
-  ).length;
-  const clearedForOutCount = documents.filter(
-    (d) => d.managerClearance?.isCleared || d.currentStatus === 'Cleared for Out'
-  ).length;
-  const overdueCount = documents.filter(
-    (d) => calculateDocumentTimeInDesk(d, timeInDeskConfig).isOverdue
-  ).length;
-  const focalPendingCount = documents.filter(
-    (d) =>
-      ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson) &&
-      !d.managerClearance?.isCleared &&
-      d.currentStatus !== 'Cleared for Out' &&
-      d.currentStatus !== 'Dispatched / Completed'
-  ).length;
+  // 3. PAGINATION STATE (Separated from Filter and Sort State, prepared for future server-side pagination)
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(25);
+
+  // Reset pagination to page 1 whenever filters or sorting change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, viewMode, statusFilter, divisionFilter, priorityFilter, sortField, sortDirection]);
+
+  const totalItems = sortedDocuments.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const activePage = Math.min(Math.max(1, currentPage), totalPages);
+  const startIndex = (activePage - 1) * pageSize;
+  const endIndex = Math.min(totalItems, startIndex + pageSize);
+
+  // Track browser print event to render all filtered records in printed report without truncation
+  const [isPrinting, setIsPrinting] = useState(false);
+  useEffect(() => {
+    const handleBeforePrint = () => setIsPrinting(true);
+    const handleAfterPrint = () => setIsPrinting(false);
+    window.addEventListener('beforeprint', handleBeforePrint);
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', handleBeforePrint);
+      window.removeEventListener('afterprint', handleAfterPrint);
+    };
+  }, []);
+
+  const handlePrintRegistry = () => {
+    setIsPrinting(true);
+    setTimeout(() => {
+      window.print();
+    }, 50);
+  };
+
+  // Paginated window for screen view, or complete sorted list for printer-friendly output
+  const visibleDocuments = useMemo(() => {
+    if (isPrinting) return sortedDocuments;
+    return sortedDocuments.slice(startIndex, endIndex);
+  }, [sortedDocuments, startIndex, endIndex, isPrinting]);
+
+  // Statistics (Single-pass computation with unified clearance & SLA business rules)
+  const stats = useMemo(() => {
+    let activeInOfficeCount = 0;
+    let pendingComplianceCount = 0;
+    let clearedForOutCount = 0;
+    let overdueCount = 0;
+    let focalPendingCount = 0;
+
+    for (let i = 0; i < documents.length; i++) {
+      const d = documents[i];
+      const isCleared = !!d.managerClearance?.isCleared || d.currentStatus === 'Cleared for Out' || d.currentStatus === 'Dispatched / Completed';
+      if (!isCleared) {
+        activeInOfficeCount++;
+      } else {
+        clearedForOutCount++;
+      }
+
+      if (d.supervisorRemarks?.some((r) => r.complianceRequired && !r.complied)) {
+        pendingComplianceCount++;
+      }
+
+      const metrics = calculateDocumentTimeInDesk(d, timeInDeskConfig);
+      if (metrics.isOverdue) {
+        overdueCount++;
+      }
+
+      if (
+        ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson) &&
+        !isCleared
+      ) {
+        focalPendingCount++;
+      }
+    }
+
+    return {
+      totalCount: documents.length,
+      activeInOfficeCount,
+      pendingComplianceCount,
+      clearedForOutCount,
+      overdueCount,
+      focalPendingCount,
+    };
+  }, [documents, timeInDeskConfig]);
+
+  const {
+    totalCount,
+    activeInOfficeCount,
+    pendingComplianceCount,
+    clearedForOutCount,
+    overdueCount,
+    focalPendingCount,
+  } = stats;
 
   const currentRoleConfig = currentUser ? getRoleConfig(currentUser?.role) : getRoleConfig('Viewer');
   const canDeleteLogs = currentUser ? canUserDeleteDocuments(currentUser?.role) : false;
@@ -1485,111 +1327,60 @@ export default function App() {
 
     try {
       setIsExecutingBatch(true);
-      const nowIso = new Date().toISOString();
       const currentUserName = currentUser?.name || 'System Admin';
       const currentUserRole = currentUser?.role || 'Staff';
 
-      let actionLabel = '';
+      const actor: WorkflowActor = {
+        id: currentUser?.id,
+        name: currentUserName,
+        role: currentUserRole,
+        division: currentUser?.division,
+        assignedDesk: currentUser?.assignedDesk,
+      };
 
-      const updatedDocs = await Promise.all(
-        documents.map(async (doc) => {
-          if (!selectedDocIds.has(doc.id)) return doc;
+      const selectedDocs = documents.filter((d) => selectedDocIds.has(d.id));
+      const actionCode = batchAction === 'mark_cleared' ? 'clear_out' : batchAction;
+      const batchResult = executeBatchAction(selectedDocs, actionCode, actor);
 
-          let updated = { ...doc };
+      // Build updated list of all documents
+      const updatedMap = new Map(batchResult.updatedDocuments.map((d) => [d.id, d]));
+      const allUpdatedDocs = documents.map((d) => updatedMap.get(d.id) || d);
 
-          if (batchAction === 'mark_cleared') {
-            actionLabel = 'Mark as Cleared';
-            const newMovement: InternalMovement = {
-              id: `mov-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-              timestamp: nowIso,
-              personnelName: currentUserName,
-              personnelRole: currentUserRole,
-              currentDesk: doc.currentLocation || 'Section Desk',
-              forwardToDesk: 'Dispatch / Outbox Desk',
-              statusUpdate: 'dispatched',
-              notes: 'Batch clearance authorized for outgoing dispatch.',
-            };
-
-            const newClearance: ManagerClearance = {
-              isCleared: true,
-              clearedBy: currentUserName,
-              clearedAt: nowIso,
-              clearanceType: 'approved_for_dispatch',
-              clearanceRemarks: 'Bulk clearance approved.',
-            };
-
-            updated = {
-              ...updated,
-              managerClearance: newClearance,
-              currentStatus: 'Cleared for Out',
-              currentLocation: 'Dispatch / Outbox Desk',
-              movements: [...(updated.movements || []), newMovement],
-              updatedAt: nowIso,
-            };
-          } else if (batchAction.startsWith('forward:')) {
-            const targetDept = batchAction.replace('forward:', '');
-            actionLabel = `Forward to ${targetDept}`;
-
-            const newMovement: InternalMovement = {
-              id: `mov-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-              timestamp: nowIso,
-              personnelName: currentUserName,
-              personnelRole: currentUserRole,
-              currentDesk: doc.currentLocation || 'Incoming Records Desk',
-              forwardToDesk: `${targetDept} Desk`,
-              statusUpdate: 'forwarded',
-              notes: `Bulk forwarded to ${targetDept} by ${currentUserName}.`,
-            };
-
-            updated = {
-              ...updated,
-              targetDivision: targetDept,
-              currentLocation: `${targetDept} Desk`,
-              movements: [...(updated.movements || []), newMovement],
-              updatedAt: nowIso,
-            };
-          } else if (batchAction.startsWith('priority:')) {
-            const newPriority = batchAction.replace('priority:', '') as 'Routine' | 'Urgent' | 'Rush';
-            actionLabel = `Set Priority to ${newPriority}`;
-            updated = {
-              ...updated,
-              priority: newPriority,
-              updatedAt: nowIso,
-            };
-          } else if (batchAction.startsWith('status:')) {
-            const newStatus = batchAction.replace('status:', '') as DocumentItem['currentStatus'];
-            actionLabel = `Set Status to ${newStatus}`;
-            updated = {
-              ...updated,
-              currentStatus: newStatus,
-              updatedAt: nowIso,
-            };
-          }
-
+      // Persist changes to API/backend
+      for (const updatedDoc of batchResult.updatedDocuments) {
+        if (selectedDocIds.has(updatedDoc.id)) {
           try {
-            await api.updateDocument(updated);
+            await api.updateDocument(updatedDoc);
           } catch (e) {
-            console.warn(`Failed to sync bulk update for doc ${doc.id}:`, e);
+            console.warn(`Failed to sync bulk update for doc ${updatedDoc.id}:`, e);
           }
+        }
+      }
 
-          return updated;
-        })
-      );
+      setDocuments(allUpdatedDocs);
+      saveStoredDocuments(allUpdatedDocs);
+      broadcastDataUpdate('documents', allUpdatedDocs);
 
-      setDocuments(updatedDocs);
-      saveStoredDocuments(updatedDocs);
-      broadcastDataUpdate('documents', updatedDocs);
-      scheduleSheetPush(updatedDocs);
+      if (batchResult.failed > 0) {
+        const errPreview = batchResult.errors.map((e) => `${e.trackingNumber}: ${e.reason}`).join('; ');
+        addNotification(
+          'Batch Action Completed with Warnings',
+          `Processed ${batchResult.succeeded} document(s). ${batchResult.failed} skipped due to business rules (${errPreview}).`,
+          currentUserName,
+          'urgent',
+          'BATCH'
+        );
+      } else {
+        addNotification(
+          'Batch Action Executed',
+          `Successfully applied batch action to ${batchResult.succeeded} document(s).`,
+          currentUserName,
+          'sync',
+          'BATCH'
+        );
+      }
 
-      addNotification(
-        'Batch Action Executed',
-        `Successfully applied "${actionLabel}" to ${selectedDocIds.size} document(s).`,
-        currentUserName,
-        'sync',
-        'BATCH'
-      );
-
-      api.logAudit("BATCH ACTION", "", currentUserName, "", `Executed ${actionLabel} on ${selectedDocIds.size} documents`);
+      api.logAudit("BATCH ACTION", "", currentUserName, "", `Executed ${batchAction} on ${batchResult.succeeded} docs (${batchResult.failed} rejected)`);
 
       setSelectedDocIds(new Set());
       setBatchAction('');
@@ -1620,7 +1411,6 @@ export default function App() {
       setDocuments(updatedList);
       saveStoredDocuments(updatedList);
       broadcastDataUpdate('documents', updatedList);
-      scheduleSheetPush(updatedList);
 
       if (selectedDoc && idsToDelete.has(selectedDoc.id)) {
         setSelectedDoc(null);
@@ -1647,6 +1437,58 @@ export default function App() {
     }
   };
 
+  // 1. Auth Loading Gate
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white p-4">
+        <div className="flex flex-col items-center space-y-4 text-center max-w-sm">
+          <div className="w-16 h-16 rounded-2xl bg-white p-2 flex items-center justify-center shadow-xl ring-1 ring-slate-700">
+            <PossdLogo className="w-12 h-12 text-slate-900" variant="black" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-slate-100">POSSD Document Tracking System</h1>
+            <p className="text-xs text-slate-400 mt-1">Verifying session security &amp; authorization...</p>
+          </div>
+          <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mt-2" />
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Unauthenticated Gate
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-[#f3f6fa] dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col justify-center items-center p-4">
+        <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 p-8 flex flex-col items-center text-center">
+          <div className="w-16 h-16 rounded-2xl bg-white p-2 flex items-center justify-center shadow-xl ring-1 ring-slate-200 dark:ring-slate-700 mb-4 border border-slate-200">
+            <PossdLogo className="w-12 h-12 text-slate-900" variant="black" />
+          </div>
+          <h1 className="text-xl font-bold text-slate-900 dark:text-white">POSSD Document Tracking System</h1>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 mb-6">
+            Official Provincial Operations &amp; Strategic Services Portal
+          </p>
+
+          <LoginModal
+            isOpen={true}
+            currentUser={null}
+            onLoginSuccess={(authedStaff) => {
+              setCurrentUser(authedStaff);
+              safeStorageSet('possd_active_user', JSON.stringify(authedStaff));
+              addNotification(
+                'Authenticated Session',
+                `Signed in as ${authedStaff.name} (${authedStaff.role}) via enrolled portal credentials.`,
+                authedStaff.name,
+                'movement',
+                'AUTH-LOGIN'
+              );
+            }}
+            staffList={staffList}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#f3f6fa] dark:bg-slate-950 text-slate-800 dark:text-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white transition-colors duration-200">
       
@@ -1669,7 +1511,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* User Session Profile, Log Out, Thresholds, Sheet & Actions */}
+          {/* User Session Profile, Log Out, Thresholds & Actions */}
           <div className="flex items-center flex-wrap gap-2.5 w-full lg:w-auto justify-end">
             
             {/* Time-in-Desk Thresholds (Available ONLY for System Admin, moved to the left) */}
@@ -1742,20 +1584,6 @@ export default function App() {
               <span className="hidden sm:inline">Log Out</span>
             </button>
 
-            {/* Google Sheets Sync Trigger */}
-            <button
-              id="open-sheet-sync-btn"
-              onClick={() => setIsSheetModalOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white transition-all shadow-2xs cursor-pointer"
-              title="Google Sheet Integration"
-            >
-              <FileSpreadsheet className={`w-4 h-4 ${sheetConfig ? 'text-emerald-400' : 'text-slate-400'}`} />
-              <span className="hidden sm:inline">
-                {sheetConfig ? 'Sheet Linked' : 'Connect Sheet'}
-              </span>
-              {sheetConfig && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>}
-            </button>
-
             {/* Theme Toggle Button (Light/Dark Mode) */}
             <button
               id="theme-toggle-btn"
@@ -1768,13 +1596,27 @@ export default function App() {
               {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-300" /> : <Moon className="w-4 h-4 text-slate-300" />}
             </button>
 
+            {/* Instant Registry Refresh */}
+            <button
+              id="manual-refresh-btn"
+              type="button"
+              onClick={handleManualRefresh}
+              className="p-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition-all shadow-2xs cursor-pointer"
+              title="Refresh document registry from store"
+              aria-label="Refresh document records"
+            >
+              <RefreshCw className="w-4 h-4 text-slate-300" />
+            </button>
+
             {/* PWA App Install Button */}
             <PWAInstallButton className="hidden sm:inline-flex" />
 
             {/* Real-time Notification Center */}
             <NotificationCenter
               notifications={notifications}
-              onClearNotifications={() => setNotifications([])}
+              onClearNotifications={handleClearNotifications}
+              onMarkAsRead={handleMarkNotificationAsRead}
+              onMarkAllAsRead={handleMarkAllNotificationsAsRead}
               onSelectDocument={(trk) => {
                 const doc = documents.find((d) => d.trackingNumber === trk);
                 if (doc) setSelectedDoc(doc);
@@ -1842,16 +1684,6 @@ export default function App() {
               );
             })}
           </nav>
-
-          <div className="flex items-center gap-1 shrink-0">
-            <button
-              onClick={() => setIsSheetModalOpen(true)}
-              className="p-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs border border-slate-700 cursor-pointer"
-              title="Google Sheets"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5" />
-            </button>
-          </div>
         </div>
       </div>
 
@@ -1867,12 +1699,7 @@ export default function App() {
             overdueCount={overdueCount}
             activeCount={activeInOfficeCount}
             clearedCount={clearedForOutCount}
-            isSheetConnected={!!sheetConfig}
-            sheetTitle={sheetConfig?.title}
-            isSyncing={isAutoSyncing}
-            quotaCooldownSeconds={quotaCooldownSeconds}
-            onManualSync={handleManualSync}
-            onOpenSheetModal={() => setIsSheetModalOpen(true)}
+            onManualRefresh={handleManualRefresh}
             onOpenRolesModal={() => setIsRolesModalOpen(true)}
             onOpenThresholdModal={() => setIsThresholdModalOpen(true)}
             onOpenShortcutsModal={() => setIsShortcutsModalOpen(true)}
@@ -1962,6 +1789,7 @@ export default function App() {
           <DocumentAnalyticsDashboard
             documents={documents}
             staffList={staffList}
+            timeInDeskConfig={timeInDeskConfig}
             onSelectDocument={(doc) => setSelectedDoc(doc)}
           />
         ) : activeTab === 'links' ? (
@@ -1980,9 +1808,7 @@ export default function App() {
             onSaveConfig={handleSaveThresholdConfig}
             documents={documents}
             staffList={staffList}
-            sheetConfig={sheetConfig}
             onOpenRolesModal={() => setIsRolesModalOpen(true)}
-            onOpenSheetModal={() => setIsSheetModalOpen(true)}
             availableDivisions={dropdownOptions.departments}
           />
         ) : (
@@ -2100,49 +1926,6 @@ export default function App() {
           </div>
 
         </div>
-
-        {/* Google Sheet Sync Alert Ribbon (if connected) - Professional Slate Theme */}
-        {sheetConfig && (
-          <div className="bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs shadow-2xs transition-colors text-slate-800 dark:text-slate-200">
-            <div className="flex items-center gap-2.5 truncate">
-              <div className="w-2.5 h-2.5 rounded-full shrink-0 bg-slate-500 animate-pulse" />
-              <div className="flex items-center gap-2 truncate">
-                <span className="font-bold text-slate-900 dark:text-white">
-                  Google Sheet Connected:
-                </span>
-                <span className="text-slate-600 dark:text-slate-400 truncate">
-                  {sheetConfig.sheetName || 'Master Tracking'} ({documents.length} doc{documents.length === 1 ? '' : 's'} in registry)
-                </span>
-              </div>
-              {(hasPendingSyncRef.current || safeStorageGet('possd_has_unpushed_changes') === 'true') && (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 shrink-0">
-                  Unpushed Changes
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-2.5 shrink-0">
-              <button
-                id="ribbon-push-all-btn"
-                onClick={handlePushAllNow}
-                disabled={isPushingAll || isAutoSyncing}
-                title="Force push all document registry rows to the linked Google Sheet"
-                className="inline-flex items-center gap-1.5 font-bold cursor-pointer transition-colors px-2.5 py-1 rounded-lg text-xs disabled:opacity-50 bg-slate-800 hover:bg-slate-700 text-white shadow-2xs"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isPushingAll ? 'animate-spin' : ''}`} />
-                {isPushingAll ? 'Pushing All...' : 'Push All'}
-              </button>
-              <span className="text-slate-300 dark:text-slate-700">|</span>
-              <a
-                href={sheetConfig.spreadsheetUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
-              >
-                Open File <ExternalLink className="w-3 h-3" />
-              </a>
-            </div>
-          </div>
-        )}
 
         {/* Search, Filter Bar & Controls */}
         <div className="bg-white dark:bg-slate-900 p-4 sm:p-5 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-2xs space-y-3.5 transition-colors">
@@ -2288,7 +2071,7 @@ export default function App() {
         </div>
 
         {/* Documents Table View - Professional Monochrome Slate Theme */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-2xs overflow-hidden transition-colors">
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-2xs overflow-hidden transition-colors print-table-wrapper print:border-none print:shadow-none print:rounded-none">
           
           {/* Table Header Batch Actions Toolbar */}
           <div
@@ -2343,7 +2126,7 @@ export default function App() {
               )}
             </div>
 
-            {/* Batch Action Select Dropdown & Bulk Execute Button */}
+            {/* Batch Action Select Dropdown & Bulk Execute Button & Print Button */}
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex items-center gap-1.5">
                 <label
@@ -2425,15 +2208,63 @@ export default function App() {
                   </>
                 )}
               </button>
+
+              {/* Print Registry Report Button */}
+              <button
+                type="button"
+                id="print-table-registry-btn"
+                onClick={handlePrintRegistry}
+                className="no-print inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold rounded-lg border border-slate-300 dark:border-slate-700 shadow-2xs transition-colors cursor-pointer"
+                title="Print official document registry report (Shortcut: P)"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+                <span className="hidden sm:inline">Print Registry</span>
+              </button>
             </div>
           </div>
 
-          <div className="overflow-x-auto">
+          {/* OFFICIAL PRINTER-FRIENDLY REGISTRY REPORT HEADER (Visible ONLY during print) */}
+          <div className="hidden print:block p-4 border-b-2 border-slate-900 bg-white text-black">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <PossdLogo className="w-12 h-12 text-black" variant="black" />
+                <div>
+                  <p className="text-[10px] tracking-widest uppercase font-semibold text-slate-600">
+                    Republic of the Philippines &bull; Province of Siquijor
+                  </p>
+                  <h1 className="text-base font-black tracking-wide uppercase text-black">
+                    Provincial Operations &amp; Strategic Services Division (POSSD)
+                  </h1>
+                  <h2 className="text-xs font-bold text-slate-800 uppercase tracking-tight">
+                    Official Document Tracking Registry &amp; Inventory Report
+                  </h2>
+                  <p className="text-[9px] text-slate-500 font-mono">
+                    Report Control No.: POSSD-REG-LEDGER &bull; Standard Operating Ledger
+                  </p>
+                </div>
+              </div>
+              <div className="text-right text-xs">
+                <div className="border border-black px-3 py-1 bg-slate-100 rounded text-center mb-1">
+                  <span className="text-[9px] font-bold text-slate-600 uppercase block">Total Records</span>
+                  <span className="font-mono text-base font-black text-black">{sortedDocuments.length}</span>
+                </div>
+                <p className="text-[9px] text-slate-600">
+                  Generated: {new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', year: 'numeric' })}{' '}
+                  {new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' })} PST
+                </p>
+                <p className="text-[9px] text-slate-500">
+                  Filter: {divisionFilter !== 'ALL' ? divisionFilter : 'All Divisions'} &bull; {priorityFilter !== 'ALL' ? priorityFilter : 'All Priorities'} &bull; {statusFilter !== 'ALL' ? statusFilter : 'All Statuses'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto print:overflow-visible">
             <table className="w-full text-left text-xs border-collapse">
               <thead>
-                <tr className="bg-slate-900 dark:bg-slate-950 text-white font-bold uppercase tracking-wider text-[11px] border-b border-slate-800">
+                <tr className="bg-slate-900 dark:bg-slate-950 text-white font-bold uppercase tracking-wider text-[11px] border-b border-slate-800 print:bg-slate-200 print:text-black print:border-slate-400">
                   {/* Selection Checkbox Column */}
-                  <th scope="col" className="w-10 py-3.5 px-3 text-center select-none">
+                  <th scope="col" className="w-10 py-3.5 px-3 text-center select-none no-print print:hidden">
                     <input
                       type="checkbox"
                       id="select-all-table-header"
@@ -2631,7 +2462,7 @@ export default function App() {
                   </th>
 
                   {/* Actions Column (Non-sortable) */}
-                  <th scope="col" className="py-3.5 px-4 text-right">Actions</th>
+                  <th scope="col" className="py-3.5 px-4 text-right no-print print:hidden">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -2646,7 +2477,7 @@ export default function App() {
                     </td>
                   </tr>
                 ) : (
-                  sortedDocuments.map((doc, _idx_doc) => {
+                  visibleDocuments.map((doc, _idx_doc) => {
                     const hasPendingRemarks = doc.supervisorRemarks?.some(
                       (r) => r.complianceRequired && !r.complied
                     );
@@ -2671,7 +2502,7 @@ export default function App() {
                       >
                         {/* Checkbox Column */}
                         <td
-                          className="py-3.5 px-3 text-center whitespace-nowrap"
+                          className="py-3.5 px-3 text-center whitespace-nowrap no-print print:hidden"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <input
@@ -2799,7 +2630,7 @@ export default function App() {
                         </td>
 
                         {/* Action Link & Deletion */}
-                        <td className="py-3.5 px-4 text-right">
+                        <td className="py-3.5 px-4 text-right no-print print:hidden">
                           <div className="flex items-center justify-end gap-1.5">
                             {canDeleteLogs ? (
                               <button
@@ -2843,6 +2674,118 @@ export default function App() {
               </tbody>
             </table>
           </div>
+
+          {/* OFFICIAL PRINTER-FRIENDLY REGISTRY REPORT FOOTER (Visible ONLY during print) */}
+          <div className="hidden print:block p-4 border-t-2 border-slate-900 bg-white text-black text-xs">
+            <div className="grid grid-cols-3 gap-8 mb-6 text-center">
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">Prepared &amp; Extracted By:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">{currentUser?.name || 'Authorized Custodian'}</p>
+                <p className="text-[9px] text-slate-500">{currentUser?.role || 'Staff'} &bull; POSSD Registry Custodian</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">Reviewed &amp; Verified By:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">Records Management Officer</p>
+                <p className="text-[9px] text-slate-500">Administrative Services Unit</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">Attested &amp; Noted By:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">Division Head / Department Manager</p>
+                <p className="text-[9px] text-slate-500">POSSD Head of Office</p>
+              </div>
+            </div>
+            <div className="flex justify-between items-center text-[9px] text-slate-500 font-mono border-t border-slate-300 pt-2">
+              <span>POSSD Document Tracking System &bull; Official Registry Ledger &bull; Siquijor Province</span>
+              <span>Confidential &amp; For Official Government Use Only</span>
+            </div>
+          </div>
+
+          {/* Document Registry Pagination Controls */}
+          {totalItems > 0 && (
+            <div
+              id="main-table-pagination-footer"
+              className="p-3.5 sm:p-4 bg-slate-50 dark:bg-slate-800/80 border-t border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-600 dark:text-slate-400 no-print print:hidden"
+            >
+              <div className="flex flex-wrap items-center gap-3">
+                <span>
+                  Showing <strong className="text-slate-900 dark:text-white font-mono">{startIndex + 1}</strong> to{' '}
+                  <strong className="text-slate-900 dark:text-white font-mono">{endIndex}</strong> of{' '}
+                  <strong className="text-slate-900 dark:text-white font-mono">{totalItems}</strong> entries
+                </span>
+                <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200 dark:border-slate-700">
+                  <label htmlFor="select-page-size" className="text-slate-500 dark:text-slate-400 text-xs">
+                    Per page:
+                  </label>
+                  <select
+                    id="select-page-size"
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-200 text-xs rounded-lg px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer"
+                  >
+                    <option value={10}>10</option>
+                    <option value={25}>25</option>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                  </select>
+                </div>
+              </div>
+
+              {totalPages > 1 && (
+                <div className="flex items-center gap-1 shrink-0" role="navigation" aria-label="Registry Pagination">
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage(1)}
+                    disabled={activePage <= 1}
+                    aria-label="Go to first page"
+                    className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-600 font-semibold shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors text-xs"
+                  >
+                    First
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    disabled={activePage <= 1}
+                    aria-label="Go to previous page"
+                    className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-600 font-semibold shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors text-xs"
+                  >
+                    Previous
+                  </button>
+
+                  <div className="flex items-center gap-1 px-1">
+                    <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      Page <span className="font-mono font-bold text-blue-600 dark:text-blue-400">{activePage}</span> of{' '}
+                      <span className="font-mono">{totalPages}</span>
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={activePage >= totalPages}
+                    aria-label="Go to next page"
+                    className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-600 font-semibold shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors text-xs"
+                  >
+                    Next
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCurrentPage(totalPages)}
+                    disabled={activePage >= totalPages}
+                    aria-label="Go to last page"
+                    className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-600 font-semibold shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors text-xs"
+                  >
+                    Last
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
           </>
         )}
@@ -2885,20 +2828,7 @@ export default function App() {
         documents={documents}
         dropdownOptions={dropdownOptions}
         onUpdateDropdownOptions={handleUpdateDropdownOptions}
-        sheetConfig={sheetConfig}
-        token={token}
-        onSyncToSheet={async () => {
-          if (!token || !sheetConfig) return;
-          await syncPersonnelOnlyToSheet(token, sheetConfig.spreadsheetId, staffList);
-        }}
-        onPullFromSheet={async () => {
-          if (!token || !sheetConfig) return;
-          const pulled = await pullPersonnelFromSheet(token, sheetConfig.spreadsheetId, staffList);
-          setStaffList(pulled);
-          saveStoredStaffMembers(pulled);
-          broadcastDataUpdate('staff', pulled);
-        }}
-        onImportStaff={(importedStaff, newOptions, newSheetConfig) => {
+        onImportStaff={(importedStaff, newOptions) => {
           setStaffList(importedStaff);
           saveStoredStaffMembers(importedStaff);
           broadcastDataUpdate('staff', importedStaff);
@@ -2906,10 +2836,6 @@ export default function App() {
             setDropdownOptions(newOptions);
             saveStoredDropdownOptions(newOptions);
             broadcastDataUpdate('dropdowns', newOptions);
-          }
-          if (newSheetConfig && !sheetConfig) {
-            setSheetConfig(newSheetConfig);
-            saveStoredSheetConfig(newSheetConfig);
           }
         }}
       />
@@ -2946,46 +2872,6 @@ export default function App() {
         currentUserRole={currentUser?.role}
         documents={documents}
         availableDivisions={dropdownOptions.departments}
-      />
-
-      {/* Modal: Google Sheet Sync & Integration */}
-      <GoogleSheetSyncModal
-        isOpen={isSheetModalOpen}
-        onClose={() => setIsSheetModalOpen(false)}
-        user={user}
-        token={token}
-        onAuthSuccess={(u, t) => {
-          setUser(u);
-          setToken(t);
-          setAccessToken(t);
-        }}
-        onSignOut={() => {
-          setUser(null);
-          setToken(null);
-          setAccessToken(null);
-        }}
-        sheetConfig={sheetConfig}
-        onSaveSheetConfig={(cfg) => {
-          setSheetConfig(cfg);
-          saveStoredSheetConfig(cfg);
-        }}
-        documents={documents}
-        staffList={staffList}
-        onNotify={(title, msg, type) =>
-          addNotification(title, msg, currentUser?.name || 'System', type, 'SHEET-SYNC')
-        }
-        onPullSuccess={(pulledDocs, pulledStaff) => {
-          if (pulledDocs && pulledDocs.length > 0) {
-            setDocuments(pulledDocs);
-            saveStoredDocuments(pulledDocs);
-            broadcastDataUpdate('documents', pulledDocs);
-          }
-          if (pulledStaff && pulledStaff.length > 0) {
-            setStaffList(pulledStaff);
-            saveStoredStaffMembers(pulledStaff);
-            broadcastDataUpdate('staff', pulledStaff);
-          }
-        }}
       />
 
       {/* Modal: Keyboard Shortcuts Guide */}
@@ -3128,7 +3014,7 @@ export default function App() {
             {/* Modal Body */}
             <div className="p-5 space-y-4">
               <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                Are you sure you want to permanently delete this document from the registry logs? This action will remove all internal tracking history, routing records, supervisor remarks, and linked Google Sheet rows.
+                Are you sure you want to permanently delete this document from the registry logs? This action will remove all internal tracking history, routing records, supervisor remarks, and associated movement logs.
               </p>
 
               {/* Target Document Summary Card */}

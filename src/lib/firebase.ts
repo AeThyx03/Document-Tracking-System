@@ -17,7 +17,6 @@ const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 
 export const SCOPES = [
-  'https://www.googleapis.com/auth/spreadsheets',
   'https://www.googleapis.com/auth/drive.file'
 ];
 
@@ -106,9 +105,6 @@ export const initAuth = (
       } else {
         // If we don't have the token, let's just get it since the user is authenticated in firebase
         try {
-            // Since we need OAuth token and not ID token for Google Sheets, if the token is lost from session, we cannot retrieve the OAuth token from just getIdToken() which is a Firebase JWT.
-            // We must prompt the user to re-authenticate or they will be signed out from spreadsheet capability.
-            // However, we just return the user for now. Google Sheet writes might fail and prompt re-auth.
             cachedAccessToken = null;
             if (!isSigningIn && onAuthFailure) onAuthFailure();
         } catch (e) {

@@ -17,7 +17,7 @@ export default defineConfig(() => {
           id: '/',
           name: 'POSSD Document Tracking System',
           short_name: 'POSSD Track',
-          description: 'Official Port Operations & Services Support Division Document Tracking System with offline asset caching and live sync.',
+          description: 'Official Provincial Operations & Strategic Services Division Document Tracking System with offline document registry access.',
           theme_color: '#0f172a',
           background_color: '#0f172a',
           display: 'standalone',

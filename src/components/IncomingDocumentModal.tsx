@@ -1,18 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { DocumentItem, TimeInDeskConfig, RegistryDropdownOptions } from '../types';
+import { DocumentItem, TimeInDeskConfig, RegistryDropdownOptions, generatePOSSDTrackingNumber } from '../types';
+import { generateEntityId, reconcileDocumentIntegrity } from '../lib/workflow';
 import { PossdLogo } from './PossdLogo';
-import { PlusCircle, Clock, Hash, Building2, User, Send, Inbox, FileText, AlertTriangle, Timer, Link2, ExternalLink, CheckCircle2, Tag } from 'lucide-react';
+import { PlusCircle, Clock, Hash, Building2, User, Send, Inbox, FileText, AlertTriangle, Timer, Link2, ExternalLink, CheckCircle2, Tag, RefreshCw, AlertCircle } from 'lucide-react';
 import { getDivisionThreshold, DEFAULT_TIME_IN_DESK_CONFIG } from '../lib/timeInDesk';
 
 interface IncomingDocumentModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSubmit: (newDoc: DocumentItem) => void;
-  currentUser: { name: string; role: string; division: string };
+  currentUser?: { name?: string; role?: string; division?: string } | null;
   availableDivisions?: string[];
   dropdownOptions?: RegistryDropdownOptions;
   staffList?: { name: string }[];
   timeInDeskConfig?: TimeInDeskConfig;
+  existingDocuments?: DocumentItem[];
 }
 
 
@@ -37,6 +39,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
   dropdownOptions,
   timeInDeskConfig,
   staffList,
+  existingDocuments = [],
 }) => {
   const divisionList = availableDivisions && availableDivisions.length > 0 ? availableDivisions : DIVISIONS;
   
@@ -62,10 +65,14 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
   
   const [fileLink, setFileLink] = useState('');
   const [notes, setNotes] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   // Clock tick to automatically show current date and time upon opening
   useEffect(() => {
     if (isOpen) {
+      setValidationError(null);
+      setIsSubmitting(false);
       const now = new Date();
       const yyyy = now.getFullYear();
       const mm = String(now.getMonth() + 1).padStart(2, '0');
@@ -78,9 +85,8 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       setTimeReceived(`${hh}:${min}:${ss}`);
 
       if (direction === 'Incoming') {
-        // Auto tracking number for incoming
-        const rand = Math.floor(1000 + Math.random() * 9000);
-        setTrackingNumber(`TRK-${yyyy}-${rand}`);
+        // Auto tracking number for incoming: POSSD-YYYY-MM-XXXX
+        setTrackingNumber(generatePOSSDTrackingNumber(existingDocuments));
       } else {
         // Outgoing is blank so user can type into it
         setTrackingNumber('');
@@ -90,16 +96,14 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
 
   const handleDirectionChange = (newDirection: 'Incoming' | 'Outgoing') => {
     setDirection(newDirection);
+    setValidationError(null);
     if (newDirection === 'Outgoing') {
       // User specifically requested: tracking number is blank and can be typed into if outgoing document is selected
       setTrackingNumber('');
     } else {
       // If switching back to Incoming, generate an auto ID if blank or was empty
       if (!trackingNumber.trim()) {
-        const now = new Date();
-        const yyyy = now.getFullYear();
-        const rand = Math.floor(1000 + Math.random() * 9000);
-        setTrackingNumber(`TRK-${yyyy}-${rand}`);
+        setTrackingNumber(generatePOSSDTrackingNumber(existingDocuments));
       }
     }
   };
@@ -108,62 +112,86 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!trackingNumber.trim() || !title.trim() || !originDepartment.trim() || !responsiblePerson.trim()) {
+    if (isSubmitting) return;
+
+    if (!trackingNumber.trim()) {
+      setValidationError('Tracking number is required.');
+      return;
+    }
+    if (!title.trim()) {
+      setValidationError('Document title is required.');
+      return;
+    }
+    if (!originDepartment.trim()) {
+      setValidationError(direction === 'Outgoing' ? 'Destination / recipient entity is required.' : 'Originating department / agency is required.');
+      return;
+    }
+    if (!responsiblePerson.trim()) {
+      setValidationError('Action officer / responsible person is required.');
       return;
     }
 
-    const nowIso = new Date().toISOString();
-    const newDoc: DocumentItem = {
-      id: trackingNumber.trim(),
-      trackingNumber: trackingNumber.trim(),
-      title: title.trim(),
-      direction,
-      documentType,
-      communicationType,
-      reportType,
-      originDepartment: originDepartment.trim(),
-      dateReceived,
-      timeReceived,
-      targetDivision,
-      responsiblePerson: responsiblePerson.trim(),
-      priority,
-      currentStatus: direction === 'Outgoing' ? 'Cleared for Out' : 'Incoming Logged',
-      currentLocation: direction === 'Outgoing' ? 'Dispatch / Outbox Desk' : 'Receiving Station',
-      currentCustodian: currentUser.name || 'Receiving Clerk',
-      fileLink: fileLink.trim() || undefined,
-      movements: [
-        {
-          id: `mov-${Date.now()}`,
-          timestamp: nowIso,
-          personnelName: currentUser.name || 'Receiving Clerk',
-          personnelRole: currentUser.role,
-          currentDesk: direction === 'Outgoing' ? currentUser.division || 'Originating Desk' : 'Receiving Desk',
-          forwardToDesk: targetDivision,
-          statusUpdate: direction === 'Outgoing' ? 'dispatched' : 'received',
-          notes: notes.trim() || (direction === 'Outgoing' 
-            ? 'Outgoing document recorded and dispatched in official registry.' 
-            : 'Incoming document received and logged in official office registry.'),
-        },
-      ],
-      supervisorRemarks: [],
-      managerClearance: {
-        isCleared: direction === 'Outgoing',
-        clearedBy: direction === 'Outgoing' ? currentUser.name : undefined,
-        clearedAt: direction === 'Outgoing' ? nowIso : undefined,
-        clearanceType: direction === 'Outgoing' ? 'approved_for_dispatch' : undefined,
-      },
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
+    setValidationError(null);
+    setIsSubmitting(true);
 
-    onSubmit(newDoc);
-    onClose();
-    // Reset form
-    setTitle('');
-    setOriginDepartment('');
-    setResponsiblePerson('');
-    setFileLink('');
-    setNotes('');
+    try {
+      const nowIso = new Date().toISOString();
+      const rawDoc: DocumentItem = {
+        id: generateEntityId('doc'),
+        trackingNumber: trackingNumber.trim(),
+        title: title.trim(),
+        direction,
+        documentType,
+        communicationType,
+        reportType,
+        originDepartment: originDepartment.trim(),
+        dateReceived,
+        timeReceived,
+        targetDivision,
+        responsiblePerson: responsiblePerson.trim(),
+        priority,
+        currentStatus: direction === 'Outgoing' ? 'Cleared for Out' : 'Incoming Logged',
+        currentLocation: direction === 'Outgoing' ? 'Dispatch / Outbox Desk' : 'Receiving Station',
+        currentCustodian: currentUser?.name || 'Receiving Clerk',
+        fileLink: fileLink.trim() || undefined,
+        movements: [
+          {
+            id: generateEntityId('mov'),
+            timestamp: nowIso,
+            personnelName: currentUser?.name || 'Receiving Clerk',
+            personnelRole: currentUser?.role || 'Staff',
+            currentDesk: direction === 'Outgoing' ? currentUser?.division || 'Originating Desk' : 'Receiving Desk',
+            forwardToDesk: targetDivision,
+            statusUpdate: direction === 'Outgoing' ? 'dispatched' : 'received',
+            notes: notes.trim() || (direction === 'Outgoing' 
+              ? 'Outgoing document recorded and dispatched in official registry.' 
+              : 'Incoming document received and logged in official office registry.'),
+          },
+        ],
+        supervisorRemarks: [],
+        managerClearance: {
+          isCleared: direction === 'Outgoing',
+          clearedBy: direction === 'Outgoing' ? (currentUser?.name || 'Authorized Manager') : undefined,
+          clearedAt: direction === 'Outgoing' ? nowIso : undefined,
+          clearanceType: direction === 'Outgoing' ? 'approved_for_dispatch' : undefined,
+        },
+        version: 1,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      const newDoc = reconcileDocumentIntegrity(rawDoc);
+      onSubmit(newDoc);
+      onClose();
+      // Reset form
+      setTitle('');
+      setOriginDepartment('');
+      setResponsiblePerson('');
+      setFileLink('');
+      setNotes('');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -194,6 +222,13 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[75vh] overflow-y-auto bg-white dark:bg-slate-900">
           
+          {validationError && (
+            <div className="p-3.5 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2.5 animate-in fade-in duration-150">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 dark:text-rose-400" />
+              <span className="font-semibold">{validationError}</span>
+            </div>
+          )}
+
           {/* Incoming vs Outgoing Mode Option */}
           <div className="p-1.5 bg-slate-100 dark:bg-slate-800/80 rounded-xl border border-slate-200 dark:border-slate-700">
             <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 px-1 mb-1 uppercase tracking-wider">
@@ -450,7 +485,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
             {fileLink.trim() ? (
               <p className="text-[11px] text-emerald-700 dark:text-emerald-400 font-medium mt-1.5 flex items-center gap-1">
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                Cloud document linked. Will be accessible to officers and synced to Google Sheet.
+                Cloud document linked. Will be accessible to authorized officers across tracking stages.
               </p>
             ) : (
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
@@ -486,10 +521,20 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
             <button
               type="submit"
               id="submit-incoming-doc-btn"
-              className="px-5 py-2.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+              disabled={isSubmitting}
+              className="px-5 py-2.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
             >
-              <PlusCircle className="w-4 h-4" />
-              {direction === 'Outgoing' ? 'Log & Dispatch Document' : 'Log & Forward Document'}
+              {isSubmitting ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Recording Entry...</span>
+                </>
+              ) : (
+                <>
+                  <PlusCircle className="w-4 h-4" />
+                  <span>{direction === 'Outgoing' ? 'Log & Dispatch Document' : 'Log & Forward Document'}</span>
+                </>
+              )}
             </button>
           </div>
         </form>

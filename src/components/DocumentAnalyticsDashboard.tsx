@@ -1,5 +1,10 @@
 import React, { useState, useMemo } from 'react';
-import { DocumentItem, AppUserRole } from '../types';
+import { DocumentItem, AppUserRole, TimeInDeskConfig } from '../types';
+import {
+  calculateDocumentTimeInDesk,
+  DEFAULT_TIME_IN_DESK_CONFIG,
+  PRIORITY_SLA_HOURS,
+} from '../lib/timeInDesk';
 import {
   ResponsiveContainer,
   BarChart,
@@ -35,6 +40,7 @@ import {
 interface DocumentAnalyticsDashboardProps {
   documents: DocumentItem[];
   staffList?: AppUserRole[];
+  timeInDeskConfig?: TimeInDeskConfig;
   onSelectDocument?: (doc: DocumentItem) => void;
 }
 
@@ -68,11 +74,18 @@ const STATUS_COLORS: Record<string, string> = {
 export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProps> = ({
   documents,
   staffList,
+  timeInDeskConfig = DEFAULT_TIME_IN_DESK_CONFIG,
   onSelectDocument,
 }) => {
   const [selectedDeptFilter, setSelectedDeptFilter] = useState<string>('ALL');
   const [selectedPriorityFilter, setSelectedPriorityFilter] = useState<string>('ALL');
   const [metricUnit, setMetricUnit] = useState<'hours' | 'days'>('hours');
+
+  // Unified business rule for clearance status
+  const isDocCleared = (doc: DocumentItem) =>
+    !!doc.managerClearance?.isCleared ||
+    doc.currentStatus === 'Cleared for Out' ||
+    doc.currentStatus === 'Dispatched / Completed';
 
   // Filtered dataset for responsive insights
   const filteredDocs = useMemo(() => {
@@ -123,7 +136,7 @@ export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProp
         };
       }
       deptMap[dept].total += 1;
-      if (doc.currentStatus === 'Cleared for Out' || doc.currentStatus === 'Dispatched / Completed') {
+      if (isDocCleared(doc)) {
         deptMap[dept].cleared += 1;
       } else if (doc.currentStatus === 'Supervisor Comment Needed') {
         deptMap[dept].supervisorReview += 1;
@@ -137,13 +150,12 @@ export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProp
     return Object.values(deptMap).sort((a, b) => b.total - a.total);
   }, [filteredDocs]);
 
-  // 2. DATA: Average Processing Time per Priority Level
-  // Calculates real elapsed duration from creation/receipt to clearance or current time
+  // 2. DATA: Average Processing Time per Priority Level using unified timeInDesk calculator
   const priorityProcessingData = useMemo(() => {
     const priorities = ['Rush', 'Urgent', 'Routine'] as const;
-    const now = Date.now();
 
     return priorities.map((prio) => {
+      const targetSlaHours = PRIORITY_SLA_HOURS[prio];
       const prioDocs = filteredDocs.filter((d) => d.priority === prio);
       if (prioDocs.length === 0) {
         return {
@@ -152,34 +164,23 @@ export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProp
           avgHours: 0,
           avgDays: 0,
           clearedCount: 0,
-          targetSlaHours: prio === 'Rush' ? 4 : prio === 'Urgent' ? 8 : 24,
-          onTimeRate: 100,
+          targetSlaHours,
+          onTimeRate: 0,
         };
       }
 
       let totalElapsedHours = 0;
       let onTimeCount = 0;
       let clearedCount = 0;
-      const targetSlaHours = prio === 'Rush' ? 4 : prio === 'Urgent' ? 8 : 24;
 
       prioDocs.forEach((doc) => {
-        const startMillis = new Date(doc.createdAt || `${doc.dateReceived}T${doc.timeReceived}Z`).getTime();
-        let endMillis = now;
-
-        if (doc.managerClearance?.isCleared && doc.managerClearance.clearedAt) {
-          endMillis = new Date(doc.managerClearance.clearedAt).getTime();
-          clearedCount += 1;
-        } else if (doc.movements && doc.movements.length > 0) {
-          // Use latest movement for elapsed measurement if active
-          const lastMov = doc.movements[doc.movements.length - 1];
-          if (doc.currentStatus === 'Cleared for Out' || doc.currentStatus === 'Dispatched / Completed') {
-            endMillis = new Date(lastMov.timestamp).getTime();
-            clearedCount += 1;
-          }
-        }
-
-        const elapsedHours = Math.max(0.2, (endMillis - startMillis) / (1000 * 60 * 60));
+        const metrics = calculateDocumentTimeInDesk(doc, timeInDeskConfig);
+        const elapsedHours = Math.max(0.1, metrics.elapsedHours);
         totalElapsedHours += elapsedHours;
+
+        if (isDocCleared(doc)) {
+          clearedCount += 1;
+        }
 
         if (elapsedHours <= targetSlaHours) {
           onTimeCount += 1;
@@ -200,7 +201,7 @@ export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProp
         onTimeRate,
       };
     });
-  }, [filteredDocs]);
+  }, [filteredDocs, timeInDeskConfig]);
 
   // 3. DATA: Document Type Distribution
   const documentTypeData = useMemo(() => {
@@ -216,9 +217,7 @@ export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProp
 
   // Executive KPI summary numbers
   const totalVolume = filteredDocs.length;
-  const clearedTotal = filteredDocs.filter(
-    (d) => d.currentStatus === 'Cleared for Out' || d.currentStatus === 'Dispatched / Completed'
-  ).length;
+  const clearedTotal = filteredDocs.filter(isDocCleared).length;
   const clearanceRate = totalVolume > 0 ? Math.round((clearedTotal / totalVolume) * 100) : 0;
 
   const overallAvgHours = useMemo(() => {
@@ -230,9 +229,7 @@ export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProp
   const topDepartment = departmentVolumeData[0]?.department || 'None';
   const topDeptCount = departmentVolumeData[0]?.total || 0;
 
-  const pendingClearance = filteredDocs.filter(
-    (d) => d.currentStatus !== 'Cleared for Out' && d.currentStatus !== 'Dispatched / Completed'
-  ).length;
+  const pendingClearance = filteredDocs.filter((d) => !isDocCleared(d)).length;
 
   return (
     <div className="space-y-6">
@@ -761,9 +758,205 @@ export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProp
             <span className="font-semibold text-slate-700 dark:text-slate-300">{totalVolume} total</span>
           </div>
         </div>
-
       </div>
+
+      {/* Virtualized / Lazy-Loaded Document Performance & Flow Ledger */}
+      <AnalyticsDrillDownTable
+        documents={filteredDocs}
+        onSelectDocument={onSelectDocument}
+      />
 
     </div>
   );
 };
+
+// Sub-component for virtualized / lazy-loaded document flow inspection to minimize re-renders
+const AnalyticsDrillDownTable: React.FC<{
+  documents: DocumentItem[];
+  onSelectDocument?: (doc: DocumentItem) => void;
+}> = ({ documents, onSelectDocument }) => {
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'CLEARED' | 'REMARKS'>('ALL');
+  const [visibleCount, setVisibleCount] = useState<number>(20);
+
+  const filtered = useMemo(() => {
+    return documents.filter((doc) => {
+      const matchSearch =
+        !search ||
+        doc.trackingNumber.toLowerCase().includes(search.toLowerCase()) ||
+        doc.title.toLowerCase().includes(search.toLowerCase()) ||
+        doc.originDepartment.toLowerCase().includes(search.toLowerCase()) ||
+        doc.targetDivision.toLowerCase().includes(search.toLowerCase());
+
+      if (!matchSearch) return false;
+
+      if (statusFilter === 'ACTIVE') return !doc.managerClearance?.isCleared;
+      if (statusFilter === 'CLEARED') return !!doc.managerClearance?.isCleared;
+      if (statusFilter === 'REMARKS') {
+        return doc.supervisorRemarks?.some((r) => r.complianceRequired && !r.complied);
+      }
+      return true;
+    });
+  }, [documents, search, statusFilter]);
+
+  const visibleDocs = useMemo(() => {
+    return filtered.slice(0, visibleCount);
+  }, [filtered, visibleCount]);
+
+  return (
+    <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+      <div className="p-5 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+            <Layers className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+            <span>Executive Flow &amp; SLA Audit Ledger</span>
+          </h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            Paginated audit table to inspect high-frequency document movement records and status clearances.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            aria-label="Filter ledger documents by tracking number or title"
+            placeholder="Search tracking, title..."
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setVisibleCount(20);
+            }}
+            className="px-3 py-1.5 text-xs rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500 w-44"
+          />
+
+          <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-1 rounded-xl text-xs" role="tablist" aria-label="Filter status tabs">
+            {(['ALL', 'ACTIVE', 'REMARKS', 'CLEARED'] as const).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                aria-selected={statusFilter === tab}
+                onClick={() => {
+                  setStatusFilter(tab);
+                  setVisibleCount(20);
+                }}
+                className={`px-2.5 py-1 rounded-lg font-semibold cursor-pointer transition-colors ${
+                  statusFilter === tab
+                    ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-2xs'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                {tab === 'ALL' ? 'All' : tab === 'ACTIVE' ? 'In Routing' : tab === 'REMARKS' ? 'Remarks' : 'Cleared'}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs border-collapse">
+          <thead>
+            <tr className="bg-slate-50 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 font-bold border-b border-slate-200 dark:border-slate-700">
+              <th className="py-2.5 px-4 whitespace-nowrap">Tracking #</th>
+              <th className="py-2.5 px-4">Subject / Title</th>
+              <th className="py-2.5 px-4">Origin &bull; Division</th>
+              <th className="py-2.5 px-4 text-center">Priority</th>
+              <th className="py-2.5 px-4 text-center">Current Status</th>
+              <th className="py-2.5 px-4 text-right">Inspection</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            {visibleDocs.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="py-8 text-center text-slate-400">
+                  No records match current filter.
+                </td>
+              </tr>
+            ) : (
+              visibleDocs.map((doc) => {
+                const isCleared = !!doc.managerClearance?.isCleared;
+                const hasRemarks = doc.supervisorRemarks?.some((r) => r.complianceRequired && !r.complied);
+
+                return (
+                  <tr
+                    key={doc.id}
+                    onClick={() => onSelectDocument?.(doc)}
+                    className="hover:bg-blue-50/40 dark:hover:bg-slate-800/50 transition-colors cursor-pointer"
+                  >
+                    <td className="py-2.5 px-4 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
+                      {doc.trackingNumber}
+                    </td>
+                    <td className="py-2.5 px-4 max-w-xs truncate font-medium text-slate-800 dark:text-slate-200">
+                      {doc.title}
+                    </td>
+                    <td className="py-2.5 px-4 text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                      <span className="font-semibold">{doc.originDepartment}</span>
+                      <span className="text-slate-400 block text-[11px]">&rarr; {doc.targetDivision}</span>
+                    </td>
+                    <td className="py-2.5 px-4 text-center whitespace-nowrap">
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded font-bold text-[10px] ${
+                          doc.priority === 'Rush'
+                            ? 'bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300'
+                            : doc.priority === 'Urgent'
+                            ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300'
+                            : 'bg-blue-100 dark:bg-blue-950 text-blue-800 dark:text-blue-300'
+                        }`}
+                      >
+                        {doc.priority}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-4 text-center whitespace-nowrap">
+                      <span
+                        className={`inline-block px-2 py-0.5 rounded-full font-bold text-[10px] ${
+                          isCleared
+                            ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300'
+                            : hasRemarks
+                            ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        {isCleared ? 'Cleared' : hasRemarks ? 'Remarks Pending' : doc.currentStatus}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-4 text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        aria-label={`View details for document ${doc.trackingNumber}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectDocument?.(doc);
+                        }}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 cursor-pointer"
+                      >
+                        <span>View</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {filtered.length > visibleCount && (
+        <div className="p-3 bg-slate-50 dark:bg-slate-800/60 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+          <span>
+            Displaying <strong className="text-slate-800 dark:text-white font-mono">{visibleDocs.length}</strong> of{' '}
+            <strong className="text-slate-800 dark:text-white font-mono">{filtered.length}</strong> items
+          </span>
+          <button
+            type="button"
+            onClick={() => setVisibleCount((prev) => Math.min(filtered.length, prev + 20))}
+            className="px-3 py-1 rounded-lg bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 font-semibold text-slate-800 dark:text-white border border-slate-200 dark:border-slate-600 cursor-pointer shadow-2xs"
+          >
+            Load More Records
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+

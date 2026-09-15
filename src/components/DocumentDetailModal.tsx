@@ -1,5 +1,12 @@
 import React, { useState } from 'react';
-import { DocumentItem, InternalMovement, SupervisorRemark, ManagerClearance, AppUserRole, UserRoleType } from '../types';
+import { DocumentItem, InternalMovement, SupervisorRemark, ManagerClearance, AppUserRole, UserRoleType, getSortedMovements } from '../types';
+import {
+  WorkflowActor,
+  recordDocumentMovement,
+  addSupervisorRemark,
+  fulfillSupervisorCompliance,
+  applyManagerClearance,
+} from '../lib/workflow';
 import { PossdLogo } from './PossdLogo';
 import {
   FileText,
@@ -23,22 +30,25 @@ import {
   AlertTriangle,
   Lock,
   ArrowRightLeft,
+  RefreshCw,
   Trash2,
   Sliders,
   Link2,
   ExternalLink,
   Edit3,
+  Printer,
 } from 'lucide-react';
 import { canUserDeleteDocuments } from '../mockData';
 import { TimeInDeskConfig } from '../types';
 import { calculateDocumentTimeInDesk, DEFAULT_TIME_IN_DESK_CONFIG } from '../lib/timeInDesk';
 import { DocumentLifecycleProgress } from './DocumentLifecycleProgress';
 import { DocumentAuditTrail } from './DocumentAuditTrail';
+import { compileDocumentAuditTrail } from '../lib/audit';
 
 interface DocumentDetailModalProps {
   document: DocumentItem | null;
   onClose: () => void;
-  currentUser: AppUserRole;
+  currentUser?: AppUserRole | null;
   onUpdateDocument: (updated: DocumentItem, notificationMessage: string) => void;
   onSwitchRole?: (role: UserRoleType) => void;
   onDeleteDocument?: (doc: DocumentItem) => void;
@@ -58,10 +68,34 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
 }) => {
   if (!document) return null;
 
-  const canDelete = canUserDeleteDocuments(currentUser.role);
+  const canDelete = currentUser ? canUserDeleteDocuments(currentUser.role) : false;
   const timeMetrics = calculateDocumentTimeInDesk(document, timeInDeskConfig || DEFAULT_TIME_IN_DESK_CONFIG);
 
   const [activeTab, setActiveTab] = useState<'audit' | 'movements' | 'remarks' | 'clearance'>('audit');
+  const [printTarget, setPrintTarget] = useState<'routing-slip' | 'audit-trail'>('audit-trail');
+
+  // Synchronize printTarget with active tab
+  React.useEffect(() => {
+    if (activeTab === 'audit') {
+      setPrintTarget('audit-trail');
+    } else {
+      setPrintTarget('routing-slip');
+    }
+  }, [activeTab]);
+
+  const handlePrintSlip = () => {
+    setPrintTarget('routing-slip');
+    setTimeout(() => {
+      window.print();
+    }, 40);
+  };
+
+  const handlePrintAuditTrail = () => {
+    setPrintTarget('audit-trail');
+    setTimeout(() => {
+      window.print();
+    }, 40);
+  };
 
   const totalAuditEvents =
     1 +
@@ -124,185 +158,245 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
     }
   };
 
+  // Double-submission protection and inline validation states
+  const [isSubmittingMovement, setIsSubmittingMovement] = useState(false);
+  const [isSubmittingRemark, setIsSubmittingRemark] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [movementError, setMovementError] = useState<string | null>(null);
+  const [remarkError, setRemarkError] = useState<string | null>(null);
+  const [clearanceError, setClearanceError] = useState<string | null>(null);
+
   // HANDLER: Record new internal movement
-  const handleAddMovement = (e: React.FormEvent) => {
+  const handleAddMovement = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!currentDeskInput.trim() || !forwardToInput.trim()) return;
-
-    const nowIso = new Date().toISOString();
-    const newMovement: InternalMovement = {
-      id: `mov-${Date.now()}`,
-      timestamp: nowIso,
-      personnelName: currentUser.name,
-      personnelRole: currentUser.role,
-      currentDesk: currentDeskInput.trim(),
-      forwardToDesk: forwardToInput.trim(),
-      statusUpdate: movementAction,
-      notes: movementNotes.trim(),
-    };
-
-    let nextStatus = document.currentStatus;
-    if (document.currentStatus === 'Incoming Logged') {
-      nextStatus = 'Under Review';
+    if (isSubmittingMovement) return;
+    if (!currentDeskInput.trim()) {
+      setMovementError('Current desk location is required.');
+      return;
     }
+    if (!forwardToInput.trim()) {
+      setMovementError('Forward destination desk is required.');
+      return;
+    }
+    setMovementError(null);
+    setIsSubmittingMovement(true);
 
-    const updated: DocumentItem = {
-      ...document,
-      
-      currentCustodian: currentUser.name,
-      currentStatus: nextStatus,
-      updatedAt: nowIso,
-      movements: [newMovement, ...(document.movements || [])],
-    };
+    try {
+      const actor: WorkflowActor = {
+        id: currentUser?.id || 'sys-actor',
+        name: currentUser?.name || 'Authorized Custodian',
+        role: currentUser?.role || 'Staff',
+        division: currentUser?.division || 'General',
+        assignedDesk: currentUser?.assignedDesk,
+      };
 
-    const notif = `Moved from "${currentDeskInput}" to "${forwardToInput}" by ${currentUser.name}`;
-    onUpdateDocument(updated, notif);
+      const result = recordDocumentMovement(
+        document,
+        {
+          fromDesk: currentDeskInput.trim(),
+          toDesk: forwardToInput.trim(),
+          statusUpdate: movementAction,
+          notes: movementNotes.trim(),
+        },
+        actor
+      );
 
-    // Reset movement inputs
-    setCurrentDeskInput(forwardToInput.trim());
-    setForwardToInput('');
-    setMovementNotes('');
+      if (!result.success) {
+        setMovementError(result.error || 'Failed to record movement.');
+        return;
+      }
+
+      onUpdateDocument(result.document, result.notificationMessage || `Moved to ${forwardToInput.trim()}`);
+
+      // Reset movement inputs
+      setCurrentDeskInput(forwardToInput.trim());
+      setForwardToInput('');
+      setMovementNotes('');
+    } finally {
+      setIsSubmittingMovement(false);
+    }
   };
 
   // HANDLER: Add supervisor remark
-  const handleAddSupervisorRemark = (e: React.FormEvent) => {
+  const handleAddSupervisorRemark = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!remarkText.trim()) return;
+    if (isSubmittingRemark) return;
+    if (!remarkText.trim()) {
+      setRemarkError('Remark or directive text cannot be empty.');
+      return;
+    }
+    setRemarkError(null);
+    setIsSubmittingRemark(true);
 
-    const nowIso = new Date().toISOString();
-    const newRemark: SupervisorRemark = {
-      id: `rem-${Date.now()}`,
-      supervisorName: currentUser.name,
-      timestamp: nowIso,
-      remarkText: remarkText.trim(),
-      complianceRequired,
-      complied: false,
-    };
+    try {
+      const actor: WorkflowActor = {
+        id: currentUser?.id || 'sys-actor',
+        name: currentUser?.name || 'Authorized Custodian',
+        role: currentUser?.role || 'Supervisor',
+        division: currentUser?.division || 'General',
+      };
 
-    const updated: DocumentItem = {
-      ...document,
-      currentStatus: complianceRequired ? 'Supervisor Comment Needed' : document.currentStatus,
-      updatedAt: nowIso,
-      supervisorRemarks: [newRemark, ...(document.supervisorRemarks || [])],
-    };
+      const result = addSupervisorRemark(
+        document,
+        {
+          remarkText: remarkText.trim(),
+          complianceRequired,
+        },
+        actor
+      );
 
-    const notif = `Supervisor remark added by ${currentUser.name}: "${remarkText.slice(0, 45)}..."`;
-    onUpdateDocument(updated, notif);
-    setRemarkText('');
+      if (!result.success) {
+        setRemarkError(result.error || 'Failed to add supervisor remark.');
+        return;
+      }
+
+      onUpdateDocument(result.document, result.notificationMessage || 'Supervisor directive added.');
+      setRemarkText('');
+    } finally {
+      setIsSubmittingRemark(false);
+    }
   };
 
   // HANDLER: Mark supervisor remark as complied
   const handleMarkComplied = (remarkId: string) => {
     const note = complianceInputNotes[remarkId] || 'Complied and verified requirements.';
-    const nowIso = new Date().toISOString();
-
-    const updatedRemarks = (document.supervisorRemarks || []).map((r) => {
-      if (r.id === remarkId) {
-        return {
-          ...r,
-          complied: true,
-          compliedAt: nowIso,
-          compliedBy: currentUser.name,
-          complianceNotes: note,
-        };
-      }
-      return r;
-    });
-
-    // Check if all remarks requiring compliance are now complied
-    const allComplied = updatedRemarks.every((r) => !r.complianceRequired || r.complied);
-
-    const updated: DocumentItem = {
-      ...document,
-      supervisorRemarks: updatedRemarks,
-      currentStatus: allComplied ? 'Complied / Ready for Clearance' : document.currentStatus,
-      updatedAt: nowIso,
+    const actor: WorkflowActor = {
+      id: currentUser?.id || 'sys-actor',
+      name: currentUser?.name || 'Authorized Custodian',
+      role: currentUser?.role || 'Staff',
+      division: currentUser?.division || 'General',
     };
 
-    const notif = `Compliance completed by ${currentUser.name} for remark #${remarkId.slice(-4)}`;
-    onUpdateDocument(updated, notif);
+    const result = fulfillSupervisorCompliance(document, remarkId, note, actor);
+    if (!result.success) {
+      alert(result.error || 'Failed to record compliance.');
+      return;
+    }
+
+    onUpdateDocument(result.document, result.notificationMessage || 'Compliance fulfilled.');
   };
 
   // HANDLER: Manager Clearance (Clear document for Out / Dispatch)
-  const handleClearDocument = (e: React.FormEvent) => {
+  const handleClearDocument = async (e: React.FormEvent) => {
     e.preventDefault();
-    const nowIso = new Date().toISOString();
+    if (isClearing) return;
+    if (clearanceType === 'returned_for_revision' && !clearanceRemarks.trim()) {
+      setClearanceError('Please specify the revisions required before returning.');
+      return;
+    }
+    setClearanceError(null);
+    setIsClearing(true);
 
-    const updatedClearance: ManagerClearance = {
-      isCleared: true,
-      clearedBy: currentUser.name,
-      clearedAt: nowIso,
-      clearanceType,
-      exitTrackingNumber: exitTrackingNumber.trim(),
-      forwardedToExternal: forwardedToExternal.trim(),
-      clearanceRemarks: clearanceRemarks.trim(),
-    };
+    try {
+      const actor: WorkflowActor = {
+        id: currentUser?.id || 'sys-actor',
+        name: currentUser?.name || 'Authorized Custodian',
+        role: currentUser?.role || 'Department Manager',
+        division: currentUser?.division || 'General',
+      };
 
-    const updated: DocumentItem = {
-      ...document,
-      managerClearance: updatedClearance,
-      currentStatus: clearanceType === 'approved_for_dispatch' ? 'Cleared for Out' : 'Dispatched / Completed',
-      
-      updatedAt: nowIso,
-    };
+      const result = applyManagerClearance(
+        document,
+        {
+          clearanceType,
+          exitTrackingNumber: exitTrackingNumber.trim(),
+          forwardedToExternal: forwardedToExternal.trim(),
+          clearanceRemarks: clearanceRemarks.trim(),
+        },
+        actor
+      );
 
-    const notif = `Document CLEARED FOR OUT by Manager ${currentUser.name} (${clearanceType})`;
-    onUpdateDocument(updated, notif);
+      if (!result.success) {
+        setClearanceError(result.error || 'Failed to apply clearance.');
+        return;
+      }
+
+      onUpdateDocument(result.document, result.notificationMessage || `Clearance updated (${clearanceType})`);
+    } finally {
+      setIsClearing(false);
+    }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs">
-      <div className="bg-white dark:bg-slate-900 w-full max-w-4xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[92vh] flex flex-col animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs document-detail-modal-overlay print:p-0 print:m-0 print:bg-white print:static print:inset-auto">
+      <div className="bg-white dark:bg-slate-900 w-full max-w-4xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-h-[92vh] flex flex-col animate-in fade-in zoom-in-95 duration-150 document-detail-modal-container print:max-h-none print:max-w-none print:w-full print:border-none print:shadow-none print:rounded-none print:overflow-visible">
         
-        {/* Modal Top Banner - Professional Slate Grayscale Palette */}
-        <div className="px-6 py-4 border-b border-slate-800 bg-slate-900 text-white flex items-start justify-between">
-          <div className="flex items-start gap-3.5">
-            <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-sm ring-1 ring-amber-400/50 mt-0.5">
-              <PossdLogo className="w-8 h-8" variant="black" />
-            </div>
-            <div className="space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-sm font-bold text-blue-950 bg-white px-2.5 py-1 rounded-lg border border-blue-200 shadow-2xs">
-                  {document.trackingNumber}
-                </span>
-                <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${getStatusColor(document.currentStatus)}`}>
-                  {document.currentStatus}
-                </span>
-                
-                <span className="text-xs px-2 py-0.5 rounded bg-blue-900/60 dark:bg-blue-950 text-blue-200 border border-blue-700/50 dark:border-blue-800 font-medium">
-                  {document.communicationType}
-                </span>
-                <span className="text-xs px-2 py-0.5 rounded bg-purple-900/60 dark:bg-purple-950 text-purple-200 border border-purple-700/50 dark:border-purple-800 font-medium">
-                  {document.documentType}
-                </span>
-                <span className="text-xs px-2 py-0.5 rounded bg-indigo-900/60 dark:bg-indigo-950 text-indigo-200 border border-indigo-700/50 dark:border-indigo-800 font-medium truncate max-w-[200px]">
-                  {document.reportType}
-                </span>
-
-                <span
-                  className={`text-xs px-2 py-0.5 rounded font-bold ${
-                    document.priority === 'Rush'
-                      ? 'bg-rose-100 dark:bg-rose-950/70 text-rose-800 dark:text-rose-200'
-                      : document.priority === 'Urgent'
-                      ? 'bg-amber-100 dark:bg-amber-950/70 text-amber-900 dark:text-amber-200'
-                      : 'bg-blue-100 dark:bg-blue-950/70 text-blue-900 dark:text-blue-200'
-                  }`}
-                >
-                  {document.priority} Priority
-                </span>
+        {/* SCREEN VIEW OF DOCUMENT DETAIL MODAL (Hidden when printing) */}
+        <div className="flex flex-col flex-1 overflow-hidden print:hidden">
+          {/* Modal Top Banner - Professional Slate Grayscale Palette */}
+          <div className="px-6 py-4 border-b border-slate-800 bg-slate-900 text-white flex items-start justify-between">
+            <div className="flex items-start gap-3.5">
+              <div className="w-10 h-10 rounded-xl bg-white p-1 flex items-center justify-center shrink-0 shadow-sm ring-1 ring-amber-400/50 mt-0.5">
+                <PossdLogo className="w-8 h-8" variant="black" />
               </div>
-              <h2 className="text-base sm:text-lg font-bold text-white leading-snug">
-                {document.title}
-              </h2>
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-sm font-bold text-blue-950 bg-white px-2.5 py-1 rounded-lg border border-blue-200 shadow-2xs">
+                    {document.trackingNumber}
+                  </span>
+                  <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${getStatusColor(document.currentStatus)}`}>
+                    {document.currentStatus}
+                  </span>
+                  
+                  <span className="text-xs px-2 py-0.5 rounded bg-blue-900/60 dark:bg-blue-950 text-blue-200 border border-blue-700/50 dark:border-blue-800 font-medium">
+                    {document.communicationType}
+                  </span>
+                  <span className="text-xs px-2 py-0.5 rounded bg-purple-900/60 dark:bg-purple-950 text-purple-200 border border-purple-700/50 dark:border-purple-800 font-medium">
+                    {document.documentType}
+                  </span>
+                  <span className="text-xs px-2 py-0.5 rounded bg-indigo-900/60 dark:bg-indigo-950 text-indigo-200 border border-indigo-700/50 dark:border-indigo-800 font-medium truncate max-w-[200px]">
+                    {document.reportType}
+                  </span>
+
+                  <span
+                    className={`text-xs px-2 py-0.5 rounded font-bold ${
+                      document.priority === 'Rush'
+                        ? 'bg-rose-100 dark:bg-rose-950/70 text-rose-800 dark:text-rose-200'
+                        : document.priority === 'Urgent'
+                        ? 'bg-amber-100 dark:bg-amber-950/70 text-amber-900 dark:text-amber-200'
+                        : 'bg-blue-100 dark:bg-blue-950/70 text-blue-900 dark:text-blue-200'
+                    }`}
+                  >
+                    {document.priority} Priority
+                  </span>
+                </div>
+                <h2 className="text-base sm:text-lg font-bold text-white leading-snug">
+                  {document.title}
+                </h2>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 ml-2">
+              {activeTab === 'audit' ? (
+                <button
+                  type="button"
+                  onClick={handlePrintAuditTrail}
+                  id="print-audit-trail-header-btn"
+                  className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-700 hover:bg-blue-600 active:bg-blue-800 text-white rounded-lg text-xs font-semibold border border-blue-600 transition-colors cursor-pointer shadow-xs"
+                  title="Print official chronological document audit report (Form POSSD-DTS-AUD01)"
+                >
+                  <Printer className="w-3.5 h-3.5 text-white" />
+                  <span>Print Trail</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handlePrintSlip}
+                  id="print-tracking-slip-btn"
+                  className="no-print inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-100 rounded-lg text-xs font-semibold border border-slate-700 transition-colors cursor-pointer shadow-xs"
+                  title="Print official document routing and tracking slip (Form POSSD-DTS-F01)"
+                >
+                  <Printer className="w-3.5 h-3.5 text-slate-300" />
+                  <span>Print Slip</span>
+                </button>
+              )}
+              <button
+                onClick={onClose}
+                className="text-slate-300 hover:text-white p-1.5 rounded-lg hover:bg-white/10 text-base font-medium transition-colors cursor-pointer"
+              >
+                ✕
+              </button>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-slate-300 hover:text-white p-1.5 rounded-lg hover:bg-white/10 text-base font-medium transition-colors cursor-pointer"
-          >
-            ✕
-          </button>
-        </div>
 
         {/* Metadata Strip */}
         <div className="px-6 py-3 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
@@ -417,9 +511,9 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
         <div className="px-6 py-2.5 bg-slate-50 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-2">
             <span className="text-slate-500 dark:text-slate-400 font-medium">Session Active User:</span>
-            <span className="font-bold text-slate-800 dark:text-white">{currentUser.name}</span>
+            <span className="font-bold text-slate-800 dark:text-white">{currentUser?.name || 'Authorized Custodian'}</span>
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 dark:bg-blue-950/70 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-              {currentUser.role}
+              {currentUser?.role || 'Staff'}
             </span>
           </div>
           {onSwitchRole && (
@@ -428,7 +522,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Admin Staff')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser.role === 'Admin Staff' || currentUser.role === 'Receiving Staff' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Admin Staff' || currentUser?.role === 'Receiving Staff' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Admin Staff
               </button>
@@ -436,7 +530,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Staff')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser.role === 'Staff' || currentUser.role === 'Personnel / Handler' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Staff' || currentUser?.role === 'Personnel / Handler' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Staff
               </button>
@@ -444,7 +538,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Supervisor')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser.role === 'Supervisor' ? 'text-amber-700 dark:text-amber-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Supervisor' ? 'text-amber-700 dark:text-amber-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Supervisor
               </button>
@@ -452,7 +546,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Division Manager')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser.role === 'Division Manager' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Division Manager' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Division Mgr
               </button>
@@ -460,7 +554,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Department Manager')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser.role === 'Department Manager' ? 'text-emerald-700 dark:text-emerald-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Department Manager' ? 'text-emerald-700 dark:text-emerald-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Dept Mgr
               </button>
@@ -468,7 +562,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('System Admin')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser.role === 'System Admin' || currentUser.role === 'Records Administrator' ? 'text-blue-900 dark:text-blue-300 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'System Admin' || currentUser?.role === 'Records Administrator' ? 'text-blue-900 dark:text-blue-300 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 System Admin
               </button>
@@ -649,6 +743,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               document={document}
               currentUser={currentUser}
               onNavigateToTab={(tab) => setActiveTab(tab)}
+              onPrintAudit={handlePrintAuditTrail}
             />
           )}
 
@@ -669,6 +764,12 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                 </p>
 
                 <form onSubmit={handleAddMovement} className="space-y-3">
+                  {movementError && (
+                    <div className="p-2.5 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600" />
+                      <span>{movementError}</span>
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -731,15 +832,25 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
 
                   <div className="flex items-center justify-between pt-2">
                     <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                      Logging as: <strong>{currentUser.name}</strong> ({currentUser.role})
+                      Logging as: <strong>{currentUser?.name || 'Authorized Custodian'}</strong> ({currentUser?.role || 'Staff'})
                     </span>
                     <button
                       type="submit"
                       id="log-movement-btn"
-                      className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
+                      disabled={isSubmittingMovement}
+                      className="px-4 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
                     >
-                      <Send className="w-3.5 h-3.5" />
-                      Log Movement & Transfer
+                      {isSubmittingMovement ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Routing...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Send className="w-3.5 h-3.5" />
+                          <span>Log Movement & Transfer</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 </form>
@@ -764,7 +875,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   <p className="text-xs text-slate-500 dark:text-slate-400 italic">No movement recorded yet.</p>
                 ) : (
                   <div className="relative pl-6 space-y-4 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-200 dark:before:bg-slate-700">
-                    {document.movements.map((m, idx) => (
+                    {getSortedMovements(document.movements, 'desc').map((m, idx) => (
                       <div key={m.id || idx} className="relative group">
                         {/* Dot indicator */}
                         <div className="absolute -left-6 top-1.5 w-3 h-3 rounded-full bg-blue-600 border-2 border-white dark:border-slate-900 ring-2 ring-blue-200 dark:ring-blue-900" />
@@ -811,12 +922,12 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
             <div className="space-y-6">
               
               {/* Role Awareness Banner for Supervisor Remarks */}
-              {currentUser.role !== 'Supervisor' && currentUser.role !== 'Division Manager' && currentUser.role !== 'Department Manager' && currentUser.role !== 'System Admin' && currentUser.role !== 'Records Administrator' && (
+              {currentUser?.role !== 'Supervisor' && currentUser?.role !== 'Division Manager' && currentUser?.role !== 'Department Manager' && currentUser?.role !== 'System Admin' && currentUser?.role !== 'Records Administrator' && (
                 <div className="p-3 bg-amber-100/70 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-900/60 rounded-xl text-xs text-amber-950 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <AlertCircle className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
                     <span>
-                      Notice: Official directives and compliance instructions are issued by <strong>Supervisors</strong> and <strong>Division Managers</strong>. You are currently logged in as <strong>{currentUser.name}</strong> ({currentUser.role}).
+                      Notice: Official directives and compliance instructions are issued by <strong>Supervisors</strong> and <strong>Division Managers</strong>. You are currently logged in as <strong>{currentUser?.name || 'Guest User'}</strong> ({currentUser?.role || 'Staff'}).
                     </span>
                   </div>
                   {onSwitchRole && (
@@ -853,6 +964,12 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                 </p>
 
                 <form onSubmit={handleAddSupervisorRemark} className="space-y-3">
+                  {remarkError && (
+                    <div className="p-2.5 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600" />
+                      <span>{remarkError}</span>
+                    </div>
+                  )}
                   <div>
                     <textarea
                       id="supervisor-remark-input"
@@ -879,10 +996,20 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                     <button
                       type="submit"
                       id="submit-remark-btn"
-                      className="px-4 py-2 bg-amber-700 hover:bg-amber-800 text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
+                      disabled={isSubmittingRemark}
+                      className="px-4 py-2 bg-amber-700 hover:bg-amber-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
                     >
-                      <Plus className="w-3.5 h-3.5" />
-                      Post Supervisor Remark
+                      {isSubmittingRemark ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Posting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>Post Supervisor Remark</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 </form>
@@ -1052,14 +1179,14 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   </p>
 
                   {/* Role Gate Notice for Non-Managers */}
-                  {currentUser.role !== 'Department Manager' && currentUser.role !== 'System Admin' && currentUser.role !== 'Records Administrator' && (
+                  {currentUser?.role !== 'Department Manager' && currentUser?.role !== 'System Admin' && currentUser?.role !== 'Records Administrator' && (
                     <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-xl text-xs text-emerald-950 dark:text-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div className="flex items-start gap-2.5">
                         <Lock className="w-4 h-4 text-emerald-700 dark:text-emerald-400 shrink-0 mt-0.5" />
                         <div>
                           <strong className="block">Department Manager Executive Privilege Required</strong>
                           <p className="text-emerald-800 dark:text-emerald-300 text-[11px] mt-0.5">
-                            Executive clearance sign-off is restricted to the Department Manager. You are currently logged in as <strong>{currentUser.name}</strong> ({currentUser.role}).
+                            Executive clearance sign-off is restricted to the Department Manager. You are currently logged in as <strong>{currentUser?.name || 'Guest User'}</strong> ({currentUser?.role || 'Staff'}).
                           </p>
                         </div>
                       </div>
@@ -1087,6 +1214,12 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   )}
 
                   <form onSubmit={handleClearDocument} className="space-y-4 bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200 dark:border-slate-700">
+                    {clearanceError && (
+                      <div className="p-2.5 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600" />
+                        <span>{clearanceError}</span>
+                      </div>
+                    )}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -1147,15 +1280,25 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
 
                     <div className="pt-2 flex items-center justify-between">
                       <span className="text-xs text-slate-500 dark:text-slate-400">
-                        Signatory: <strong>{currentUser.name}</strong> ({currentUser.role})
+                        Signatory: <strong>{currentUser?.name || 'Authorized Signatory'}</strong> ({currentUser?.role || 'Department Manager'})
                       </span>
                       <button
                         type="submit"
                         id="authorize-clearance-btn"
-                        className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-sm cursor-pointer"
+                        disabled={isClearing}
+                        className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-sm cursor-pointer"
                       >
-                        <ShieldCheck className="w-4 h-4" />
-                        Authorize Clearance & Release for Out
+                        {isClearing ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            <span>Authorizing Clearance...</span>
+                          </>
+                        ) : (
+                          <>
+                            <ShieldCheck className="w-4 h-4" />
+                            <span>Authorize Clearance & Release for Out</span>
+                          </>
+                        )}
                       </button>
                     </div>
                   </form>
@@ -1206,6 +1349,482 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
             Close
           </button>
         </div>
+      </div>
+      {/* END OF SCREEN VIEW */}
+
+      {/* =====================================================================
+          OFFICIAL PRINTER-FRIENDLY ROUTING SLIP (Form POSSD-DTS-F01)
+          ===================================================================== */}
+      {printTarget === 'routing-slip' && (
+        <div id="printable-routing-slip" className="hidden print:block w-full p-4 bg-white text-black font-sans text-xs">
+          {/* Official Government / Division Letterhead */}
+          <div className="border-b-2 border-slate-900 pb-3 mb-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <PossdLogo className="w-12 h-12 text-black" variant="black" />
+                <div>
+                  <p className="text-[10px] tracking-widest uppercase font-semibold text-slate-600">Republic of the Philippines</p>
+                  <h1 className="text-sm font-black tracking-wide uppercase text-black">
+                    Provincial Operations &amp; Strategic Services Division (POSSD)
+                  </h1>
+                  <h2 className="text-xs font-bold text-slate-800 uppercase tracking-tight">
+                    Official Document Tracking &amp; Routing Slip
+                  </h2>
+                  <p className="text-[9px] text-slate-500 font-mono">Form No. POSSD-DTS-F01 &bull; ISO-Compliant Quality Management Record</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="border-2 border-black px-3 py-1 bg-slate-100 rounded text-center">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-slate-600">Tracking Code</p>
+                  <p className="font-mono text-base font-black text-black">{document.trackingNumber}</p>
+                </div>
+                <p className="text-[9px] text-slate-500 mt-1">
+                  Printed: {new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', year: 'numeric' })}{' '}
+                  {new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' })} PST
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Section I: Document Profile & Classification Matrix */}
+          <div className="mb-3 border border-slate-400 rounded overflow-hidden print-avoid-break">
+            <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400">
+              I. Document Profile &amp; Basic Classification
+            </div>
+            <div className="p-2.5 grid grid-cols-4 gap-2 text-xs">
+              <div className="col-span-4 border-b border-slate-200 pb-1.5 mb-0.5">
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Document Title / Subject:</span>
+                <span className="text-sm font-bold text-black">{document.title}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Communication Type:</span>
+                <span className="font-semibold text-black">{document.communicationType}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Document Type:</span>
+                <span className="font-semibold text-black">{document.documentType}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Report Classification:</span>
+                <span className="font-semibold text-black">{document.reportType}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Priority Level:</span>
+                <span className="font-bold text-black uppercase">{document.priority} Priority</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Originating Office / Sender:</span>
+                <span className="font-semibold text-black">{document.originDepartment}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Date &amp; Time Received:</span>
+                <span className="font-semibold text-black">{document.dateReceived} at {document.timeReceived}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Target Division:</span>
+                <span className="font-semibold text-black">{document.targetDivision}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Assigned Focal Person:</span>
+                <span className="font-semibold text-black">{document.responsiblePerson}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Current Lifecycle Status:</span>
+                <span className="font-bold text-black">{document.currentStatus}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Current Desk Location:</span>
+                <span className="font-semibold text-black">{document.currentLocation}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Current Custodian:</span>
+                <span className="font-semibold text-black">{document.currentCustodian}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Processing Duration / SLA:</span>
+                <span className="font-semibold text-black">
+                  {timeMetrics.elapsedFormatted} ({timeMetrics.isOverdue ? 'OVERDUE' : 'Within SLA'})
+                </span>
+              </div>
+              {document.fileLink && (
+                <div className="col-span-4 border-t border-slate-200 pt-1 mt-0.5">
+                  <span className="text-[10px] uppercase font-bold text-slate-500 block">Digital Record Reference:</span>
+                  <span className="font-mono text-[10px] text-slate-800 break-all">{document.fileLink}</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Section II: Internal Routing & Custody Movement History */}
+          <div className="mb-3 border border-slate-400 rounded overflow-hidden print-avoid-break">
+            <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400 flex justify-between items-center">
+              <span>II. Internal Movement &amp; Custody Transfer History</span>
+              <span className="text-[10px] text-slate-600 font-normal">({document.movements?.length || 0} Recorded Movements)</span>
+            </div>
+            <table className="w-full text-left text-[10px] border-collapse">
+              <thead>
+                <tr className="bg-slate-100 border-b border-slate-300 font-bold">
+                  <th className="p-1.5 border-r border-slate-300 w-8 text-center">#</th>
+                  <th className="p-1.5 border-r border-slate-300 w-28">Timestamp (PST)</th>
+                  <th className="p-1.5 border-r border-slate-300 w-32">From Desk / Station</th>
+                  <th className="p-1.5 border-r border-slate-300 w-32">Forwarded To</th>
+                  <th className="p-1.5 border-r border-slate-300 w-32">Custodian &amp; Role</th>
+                  <th className="p-1.5 border-r border-slate-300 w-24">Action</th>
+                  <th className="p-1.5">Action Notes / Routing Instructions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {document.movements && document.movements.length > 0 ? (
+                  getSortedMovements(document.movements).map((m, idx) => (
+                    <tr key={m.id} className="border-b border-slate-200">
+                      <td className="p-1.5 border-r border-slate-200 text-center font-mono">{idx + 1}</td>
+                      <td className="p-1.5 border-r border-slate-200 font-mono text-[9px]">
+                        {new Date(m.timestamp).toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric' })}{' '}
+                        {new Date(m.timestamp).toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' })}
+                      </td>
+                      <td className="p-1.5 border-r border-slate-200 font-medium">{m.currentDesk}</td>
+                      <td className="p-1.5 border-r border-slate-200 font-semibold">{m.forwardToDesk}</td>
+                      <td className="p-1.5 border-r border-slate-200">
+                        {m.personnelName} <span className="text-[9px] text-slate-500">({m.personnelRole})</span>
+                      </td>
+                      <td className="p-1.5 border-r border-slate-200 font-medium uppercase text-[9px]">{m.statusUpdate}</td>
+                      <td className="p-1.5 italic text-slate-700">{m.notes || '—'}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={7} className="p-2 text-center text-slate-500 italic">
+                      Initial incoming intake logged at {document.currentLocation}. No subsequent forwarding recorded.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Section III: Supervisor Directives & Compliance Action */}
+          <div className="mb-3 border border-slate-400 rounded overflow-hidden print-avoid-break">
+            <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400 flex justify-between items-center">
+              <span>III. Supervisory Directives &amp; Compliance Action</span>
+              <span className="text-[10px] text-slate-600 font-normal">({document.supervisorRemarks?.length || 0} Directives)</span>
+            </div>
+            <table className="w-full text-left text-[10px] border-collapse">
+              <thead>
+                <tr className="bg-slate-100 border-b border-slate-300 font-bold">
+                  <th className="p-1.5 border-r border-slate-300 w-8 text-center">#</th>
+                  <th className="p-1.5 border-r border-slate-300 w-28">Supervisor &amp; Date</th>
+                  <th className="p-1.5 border-r border-slate-300">Directive / Instructions</th>
+                  <th className="p-1.5 border-r border-slate-300 w-20 text-center">Required</th>
+                  <th className="p-1.5 border-r border-slate-300 w-20 text-center">Status</th>
+                  <th className="p-1.5 w-44">Compliance Action / Verification</th>
+                </tr>
+              </thead>
+              <tbody>
+                {document.supervisorRemarks && document.supervisorRemarks.length > 0 ? (
+                  document.supervisorRemarks.map((r, idx) => (
+                    <tr key={r.id} className="border-b border-slate-200">
+                      <td className="p-1.5 border-r border-slate-200 text-center font-mono">{idx + 1}</td>
+                      <td className="p-1.5 border-r border-slate-200">
+                        <span className="font-bold block">{r.supervisorName}</span>
+                        <span className="text-[9px] text-slate-500 font-mono">
+                          {new Date(r.timestamp).toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric' })}{' '}
+                          {new Date(r.timestamp).toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </td>
+                      <td className="p-1.5 border-r border-slate-200 font-medium">{r.remarkText}</td>
+                      <td className="p-1.5 border-r border-slate-200 text-center font-semibold">
+                        {r.complianceRequired ? 'YES' : 'INFO'}
+                      </td>
+                      <td className="p-1.5 border-r border-slate-200 text-center">
+                        <span className={`font-bold px-1.5 py-0.2 rounded text-[9px] ${r.complied ? 'bg-slate-200 text-black border border-black' : 'bg-slate-100 text-slate-700'}`}>
+                          {r.complied ? 'COMPLIED' : 'PENDING'}
+                        </span>
+                      </td>
+                      <td className="p-1.5 text-[9px]">
+                        {r.complied ? (
+                          <div>
+                            <span className="font-semibold text-black">By: {r.compliedBy || 'Assigned Staff'}</span>
+                            <p className="italic text-slate-600">{r.complianceNotes || 'Action verified.'}</p>
+                          </div>
+                        ) : (
+                          <span className="text-slate-400 italic">Awaiting compliance</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={6} className="p-2 text-center text-slate-500 italic">
+                      No supervisory directives or action remarks issued for this document.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Section IV: Division Manager Clearance & Final Authorization */}
+          <div className="mb-3 border border-slate-400 rounded overflow-hidden print-avoid-break">
+            <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400">
+              IV. Division Manager Clearance &amp; Final Release Authorization
+            </div>
+            <div className="p-2.5 grid grid-cols-3 gap-2 text-xs">
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Clearance Status:</span>
+                <span className="font-bold text-black">
+                  {document.managerClearance?.isCleared ? '✓ APPROVED & CLEARED FOR RELEASE' : 'PENDING MANAGER CLEARANCE'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Clearance Action Type:</span>
+                <span className="font-semibold text-black">
+                  {document.managerClearance?.clearanceType ? document.managerClearance.clearanceType.replace(/_/g, ' ').toUpperCase() : 'N/A'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Exit Tracking / Outflow Ref:</span>
+                <span className="font-mono font-bold text-black">{document.managerClearance?.exitTrackingNumber || '—'}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Cleared / Authorized By:</span>
+                <span className="font-bold text-black">{document.managerClearance?.clearedBy || '—'}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">External Destination / Transmitted To:</span>
+                <span className="font-semibold text-black">{document.managerClearance?.forwardedToExternal || '—'}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Date &amp; Time Cleared:</span>
+                <span className="font-mono text-black">
+                  {document.managerClearance?.clearedAt
+                    ? `${new Date(document.managerClearance.clearedAt).toLocaleDateString('en-US', { timeZone: 'Asia/Manila' })} ${new Date(document.managerClearance.clearedAt).toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' })}`
+                    : '—'}
+                </span>
+              </div>
+              {document.managerClearance?.clearanceRemarks && (
+                <div className="col-span-3 border-t border-slate-200 pt-1 mt-0.5">
+                  <span className="text-[10px] uppercase font-bold text-slate-500 block">Manager Endorsement / Release Remarks:</span>
+                  <p className="italic text-slate-800">{document.managerClearance.clearanceRemarks}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Section V: Sign-off & Chain-of-Custody Certification */}
+          <div className="mb-3 border border-slate-400 rounded overflow-hidden print-avoid-break">
+            <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400">
+              V. Custody Chain Certification &amp; Sign-off
+            </div>
+            <div className="p-4 grid grid-cols-3 gap-6 text-center text-xs">
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">1. Received &amp; Logged By:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">{document.responsiblePerson || 'Receiving Staff'}</p>
+                <p className="text-[9px] text-slate-500">Administrative Receiving Officer</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">2. Reviewed &amp; Actioned By:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">
+                  {document.supervisorRemarks?.[0]?.supervisorName || 'Supervising Officer'}
+                </p>
+                <p className="text-[9px] text-slate-500">Technical Supervisor / Section Head</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">3. Final Clearance Approved By:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">
+                  {document.managerClearance?.clearedBy || 'Division Manager'}
+                </p>
+                <p className="text-[9px] text-slate-500">Division / Department Manager</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Official Footer Notice */}
+          <div className="border-t border-slate-400 pt-2 flex justify-between items-center text-[9px] text-slate-500 font-mono">
+            <span>POSSD-DTS &bull; Form POSSD-DTS-F01 &bull; Confidential &amp; For Official Use Only</span>
+            <span>Printed by: {currentUser?.name || 'Authorized Personnel'} ({currentUser?.role || 'Staff'})</span>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          OFFICIAL PRINTER-FRIENDLY CHRONOLOGICAL AUDIT TRAIL (Form POSSD-DTS-AUD01)
+          ===================================================================== */}
+      {printTarget === 'audit-trail' && (
+        <div id="printable-audit-trail" className="hidden print:block w-full p-4 bg-white text-black font-sans text-xs">
+          {/* Official Government Letterhead */}
+          <div className="border-b-2 border-slate-900 pb-3 mb-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <PossdLogo className="w-12 h-12 text-black" variant="black" />
+                <div>
+                  <p className="text-[10px] tracking-widest uppercase font-semibold text-slate-600">Republic of the Philippines</p>
+                  <h1 className="text-sm font-black tracking-wide uppercase text-black">
+                    Provincial Operations &amp; Strategic Services Division (POSSD)
+                  </h1>
+                  <h2 className="text-xs font-bold text-slate-800 uppercase tracking-tight">
+                    Official Chronological Document Lifecycle &amp; Audit Trail Report
+                  </h2>
+                  <p className="text-[9px] text-slate-500 font-mono">Form No. POSSD-DTS-AUD01 &bull; Permanent Quality &amp; Compliance Audit Record</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="border-2 border-black px-3 py-1 bg-slate-100 rounded text-center">
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-slate-600">Tracking Code</p>
+                  <p className="font-mono text-base font-black text-black">{document.trackingNumber}</p>
+                </div>
+                <p className="text-[9px] text-slate-500 mt-1">
+                  Printed: {new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', year: 'numeric' })}{' '}
+                  {new Date().toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' })} PST
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Section I: Document Information & Classification Matrix */}
+          <div className="mb-3 border border-slate-400 rounded overflow-hidden print-avoid-break">
+            <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400 flex justify-between items-center">
+              <span>I. Document Profile &amp; Metadata</span>
+              <span className="text-[10px] text-slate-600 font-normal">SLA Duration: {timeMetrics.elapsedFormatted} ({timeMetrics.isOverdue ? 'OVERDUE' : 'Within SLA'})</span>
+            </div>
+            <div className="p-2.5 grid grid-cols-4 gap-2 text-xs">
+              <div className="col-span-4 border-b border-slate-200 pb-1.5 mb-0.5">
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Document Title / Subject:</span>
+                <span className="text-sm font-bold text-black">{document.title}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Communication Type:</span>
+                <span className="font-semibold text-black">{document.communicationType}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Document Type:</span>
+                <span className="font-semibold text-black">{document.documentType}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Classification:</span>
+                <span className="font-semibold text-black">{document.reportType}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Priority:</span>
+                <span className="font-bold text-black uppercase">{document.priority} Priority</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Originating Office:</span>
+                <span className="font-semibold text-black">{document.originDepartment}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Date &amp; Time Received:</span>
+                <span className="font-semibold text-black">{document.dateReceived} at {document.timeReceived}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Current Location:</span>
+                <span className="font-semibold text-black">{document.currentLocation}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Current Custodian:</span>
+                <span className="font-semibold text-black">{document.currentCustodian}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Section II: Chronological Audit Ledger Table */}
+          <div className="mb-3 border border-slate-400 rounded overflow-hidden">
+            <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400 flex justify-between items-center">
+              <span>II. Chronological Lifecycle Audit Ledger (Immutable Historical Record)</span>
+              <span className="text-[10px] text-slate-600 font-normal">
+                ({compileDocumentAuditTrail(document, 'asc').length} Verified Audit Events)
+              </span>
+            </div>
+            <table className="w-full text-left text-[10px] border-collapse">
+              <thead>
+                <tr className="bg-slate-100 border-b border-slate-300 font-bold">
+                  <th className="p-1.5 border-r border-slate-300 w-8 text-center">#</th>
+                  <th className="p-1.5 border-r border-slate-300 w-32">Timestamp (PST)</th>
+                  <th className="p-1.5 border-r border-slate-300 w-28">Stage / Category</th>
+                  <th className="p-1.5 border-r border-slate-300 w-36">Actor &amp; Role</th>
+                  <th className="p-1.5 border-r border-slate-300 w-32">Station Routing</th>
+                  <th className="p-1.5">Action Details, Directives &amp; Compliance Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {compileDocumentAuditTrail(document, 'asc').map((event, idx) => (
+                  <tr key={event.id} className="border-b border-slate-200">
+                    <td className="p-1.5 border-r border-slate-200 text-center font-mono font-bold">{idx + 1}</td>
+                    <td className="p-1.5 border-r border-slate-200 font-mono text-[9px]">
+                      {new Date(event.timestamp).toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', year: 'numeric' })}{' '}
+                      {new Date(event.timestamp).toLocaleTimeString('en-US', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit' })}
+                    </td>
+                    <td className="p-1.5 border-r border-slate-200">
+                      <span className="font-semibold uppercase text-[9px] text-black">
+                        {event.stageLabel || event.action.replace(/_/g, ' ')}
+                      </span>
+                    </td>
+                    <td className="p-1.5 border-r border-slate-200">
+                      <span className="font-bold text-black block">{event.actorName}</span>
+                      <span className="text-[9px] text-slate-600 font-mono">{event.actorRole}</span>
+                    </td>
+                    <td className="p-1.5 border-r border-slate-200 text-[9px]">
+                      {event.fromDesk || event.toDesk ? (
+                        <span>
+                          {event.fromDesk || '—'} &rarr; <strong className="text-black">{event.toDesk || '—'}</strong>
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </td>
+                    <td className="p-1.5 text-[9.5px]">
+                      <p className="font-medium text-black">{event.actionTitle}</p>
+                      {event.notes && (
+                        <p className="italic text-slate-700 mt-0.5 text-[9px]">Notes: {event.notes}</p>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Section III: Audit & Custody Certification Sign-off */}
+          <div className="mb-3 border border-slate-400 rounded overflow-hidden print-avoid-break">
+            <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400">
+              III. Quality &amp; Compliance Audit Attestation
+            </div>
+            <div className="p-4 grid grid-cols-3 gap-6 text-center text-xs">
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">1. Certified by Records Custodian:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">{document.responsiblePerson || 'Intake Officer'}</p>
+                <p className="text-[9px] text-slate-500">Document Custodian / Administrative Officer</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">2. Reviewed by Supervising Officer:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">
+                  {document.supervisorRemarks?.[0]?.supervisorName || 'Supervising Officer'}
+                </p>
+                <p className="text-[9px] text-slate-500">Quality Assurance Reviewer</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">3. Attested by Division Manager:</p>
+                <div className="border-b border-black mx-4 mb-1"></div>
+                <p className="font-bold text-black">
+                  {document.managerClearance?.clearedBy || 'Division Manager'}
+                </p>
+                <p className="text-[9px] text-slate-500">Head of Office / Division Manager</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Official Footer Notice */}
+          <div className="border-t border-slate-400 pt-2 flex justify-between items-center text-[9px] text-slate-500 font-mono">
+            <span>POSSD-DTS &bull; Form POSSD-DTS-AUD01 &bull; Permanent Quality &amp; Compliance Audit Record</span>
+            <span>Printed by: {currentUser?.name || 'Authorized Personnel'} ({currentUser?.role || 'Staff'})</span>
+          </div>
+        </div>
+      )}
+      {/* END OF PRINTER-FRIENDLY CONTAINERS */}
       </div>
     </div>
   );
