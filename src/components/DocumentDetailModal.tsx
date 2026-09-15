@@ -68,7 +68,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
 }) => {
   if (!document) return null;
 
-  const canDelete = currentUser ? canUserDeleteDocuments(currentUser.role) : false;
+  const canDelete = currentUser ? canUserDeleteDocuments(currentUser) : false;
   const timeMetrics = calculateDocumentTimeInDesk(document, timeInDeskConfig || DEFAULT_TIME_IN_DESK_CONFIG);
 
   const [activeTab, setActiveTab] = useState<'audit' | 'movements' | 'remarks' | 'clearance'>('audit');
@@ -444,7 +444,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   type="url"
                   value={fileLinkInput}
                   onChange={(e) => setFileLinkInput(e.target.value)}
-                  placeholder="Paste URL (e.g., https://drive.google.com/...)"
+                  placeholder="Paste URL (e.g., https://storage.agency.gov/file/...)"
                   className="text-xs bg-white dark:bg-slate-800 text-slate-900 dark:text-white border border-blue-300 dark:border-blue-700 rounded-lg px-2.5 py-1 w-full focus:outline-none focus:ring-1 focus:ring-blue-500"
                 />
                 <button
@@ -521,8 +521,8 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <span className="hidden sm:inline">Switch Role perspective:</span>
               <button
                 type="button"
-                onClick={() => onSwitchRole('Admin Staff')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Admin Staff' || currentUser?.role === 'Receiving Staff' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                onClick={() => onSwitchRole('Receiving')}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Receiving' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Admin Staff
               </button>
@@ -530,7 +530,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Staff')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Staff' || currentUser?.role === 'Personnel / Handler' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Staff' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Staff
               </button>
@@ -562,7 +562,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('System Admin')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'System Admin' || currentUser?.role === 'Records Administrator' ? 'text-blue-900 dark:text-blue-300 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'System Admin' ? 'text-blue-900 dark:text-blue-300 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 System Admin
               </button>
@@ -922,7 +922,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
             <div className="space-y-6">
               
               {/* Role Awareness Banner for Supervisor Remarks */}
-              {currentUser?.role !== 'Supervisor' && currentUser?.role !== 'Division Manager' && currentUser?.role !== 'Department Manager' && currentUser?.role !== 'System Admin' && currentUser?.role !== 'Records Administrator' && (
+              {currentUser?.role !== 'Supervisor' && currentUser?.role !== 'Division Manager' && currentUser?.role !== 'Department Manager' && currentUser?.role !== 'System Admin' && (
                 <div className="p-3 bg-amber-100/70 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-900/60 rounded-xl text-xs text-amber-950 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <AlertCircle className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
@@ -1179,7 +1179,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   </p>
 
                   {/* Role Gate Notice for Non-Managers */}
-                  {currentUser?.role !== 'Department Manager' && currentUser?.role !== 'System Admin' && currentUser?.role !== 'Records Administrator' && (
+                  {currentUser?.role !== 'Department Manager' && currentUser?.role !== 'System Admin' && (
                     <div className="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-xl text-xs text-emerald-950 dark:text-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div className="flex items-start gap-2.5">
                         <Lock className="w-4 h-4 text-emerald-700 dark:text-emerald-400 shrink-0 mt-0.5" />
@@ -1619,7 +1619,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <div>
                 <p className="text-[10px] font-bold uppercase text-slate-600 mb-8">1. Received &amp; Logged By:</p>
                 <div className="border-b border-black mx-4 mb-1"></div>
-                <p className="font-bold text-black">{document.responsiblePerson || 'Receiving Staff'}</p>
+                <p className="font-bold text-black">{document.responsiblePerson || 'Receiving'}</p>
                 <p className="text-[9px] text-slate-500">Administrative Receiving Officer</p>
               </div>
               <div>

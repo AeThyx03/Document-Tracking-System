@@ -53,15 +53,15 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
 
   const [formTitle, setFormTitle] = useState('');
   const [formUrl, setFormUrl] = useState('');
-  const [formCategory, setFormCategory] = useState<DedicatedLinkItem['category']>('Google Drive');
+  const [formCategory, setFormCategory] = useState<DedicatedLinkItem['category']>('Cloud Storage');
   const [formDescription, setFormDescription] = useState('');
   const [formDivision, setFormDivision] = useState('All Divisions');
-  const [formIconType, setFormIconType] = useState<DedicatedLinkItem['iconType']>('drive');
+  const [formIconType, setFormIconType] = useState<DedicatedLinkItem['iconType']>('storage');
   const [formIsPinned, setFormIsPinned] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   const categories: Array<DedicatedLinkItem['category']> = [
-    'Google Drive',
+    'Cloud Storage',
     'Official Files',
     'Portals & Systems',
     'Reference Guidelines',
@@ -72,10 +72,10 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
     setEditingLinkId(null);
     setFormTitle('');
     setFormUrl('');
-    setFormCategory('Google Drive');
+    setFormCategory('Cloud Storage');
     setFormDescription('');
     setFormDivision('All Divisions');
-    setFormIconType('drive');
+    setFormIconType('storage');
     setFormIsPinned(false);
     setFormError(null);
     setIsModalOpen(true);
@@ -89,7 +89,7 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
     setFormCategory(link.category);
     setFormDescription(link.description || '');
     setFormDivision(link.targetDivision || 'All Divisions');
-    setFormIconType(link.iconType || 'drive');
+    setFormIconType(link.iconType || 'storage');
     setFormIsPinned(!!link.isPinned);
     setFormError(null);
     setIsModalOpen(true);
@@ -169,7 +169,7 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
     });
 
   const getIcon = (type?: string, category?: string) => {
-    if (type === 'drive' || category === 'Google Drive') {
+    if (type === 'storage' || category === 'Cloud Storage') {
       return <HardDrive className="w-5 h-5 text-sky-400" />;
     }
     if (type === 'file' || category === 'Reference Guidelines' || category === 'Official Files') {
@@ -183,7 +183,7 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
 
   const getCategoryBadgeClass = (category: string) => {
     switch (category) {
-      case 'Google Drive':
+      case 'Cloud Storage':
         return 'bg-sky-950/70 text-sky-300 border-sky-800/80';
       case 'Official Files':
         return 'bg-emerald-950/70 text-emerald-300 border-emerald-800/80';
@@ -215,10 +215,10 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-              Dedicated Drives, Files & URLs
+              Dedicated Storage, Files & URLs
             </h1>
             <p className="text-sm text-slate-400 mt-1 max-w-2xl">
-              Centralized repository of verified Google Drive folders, standard office templates, and external tracking systems accessible to all POSSD personnel.
+              Centralized repository of verified cloud folders, standard office templates, and external tracking systems accessible to all POSSD personnel.
             </p>
           </div>
 
@@ -250,7 +250,7 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
           <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
           <input
             type="text"
-            placeholder="Search drives, files, circulars, or web links..."
+            placeholder="Search files, circulars, or web links..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full pl-10 pr-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
@@ -484,7 +484,7 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. Master Operations Google Drive"
+                  placeholder="e.g. Master Operations Cloud Storage"
                   value={formTitle}
                   onChange={(e) => setFormTitle(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-blue-500"
@@ -494,11 +494,11 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
               {/* URL */}
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  URL / Drive Link *
+                  URL / Link *
                 </label>
                 <input
                   type="text"
-                  placeholder="https://drive.google.com/drive/folders/..."
+                  placeholder="https://storage.agency.gov/folders/..."
                   value={formUrl}
                   onChange={(e) => setFormUrl(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-blue-500 font-mono text-xs"
@@ -533,7 +533,7 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
                     onChange={(e) => setFormIconType(e.target.value as any)}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-blue-500"
                   >
-                    <option value="drive">Cloud Drive</option>
+                    <option value="storage">Cloud Storage</option>
                     <option value="folder">Shared Folder</option>
                     <option value="file">Document / PDF</option>
                     <option value="link">Web Portal / System</option>
@@ -567,7 +567,7 @@ export const DedicatedLinksView: React.FC<DedicatedLinksViewProps> = ({
                 </label>
                 <textarea
                   rows={2}
-                  placeholder="Provide guidance on what is stored in this drive or file..."
+                  placeholder="Provide guidance on what is stored in this location or file..."
                   value={formDescription}
                   onChange={(e) => setFormDescription(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm text-white focus:outline-none focus:border-blue-500 resize-none"

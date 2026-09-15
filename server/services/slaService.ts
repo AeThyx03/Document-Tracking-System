@@ -14,6 +14,7 @@ export interface HolidayEntry {
   name: string;
   isWorkingDayOverride?: boolean;
   isHalfDay?: boolean;
+  halfDayCloseTime?: string; // Optional custom close time for half days (defaults to '12:00')
 }
 
 export interface SlaWorkingConfig {
@@ -157,14 +158,18 @@ export function calculateWorkingMinutes(
     const dayOfWeek = currentParts.dayOfWeek;
 
     const holiday = holidayMap.get(dateStr);
-    const isHoliday = !!holiday && !holiday.isWorkingDayOverride;
+    const isFullHoliday = !!holiday && !holiday.isWorkingDayOverride && !holiday.isHalfDay;
+    const isHalfDayHoliday = !!holiday && !holiday.isWorkingDayOverride && !!holiday.isHalfDay;
 
     const schedule = hoursMap.get(dayOfWeek);
     const isOpenDay = schedule ? schedule.isOpen : dayOfWeek >= 1 && dayOfWeek <= 5; // Default Mon-Fri open
 
-    if (isOpenDay && !isHoliday) {
+    if (isOpenDay && !isFullHoliday) {
       const openTime = schedule?.openTime || '08:00';
-      const closeTime = schedule?.closeTime || '17:00';
+      // If half-day holiday, use configurable halfDayCloseTime or standard 12:00 midday cutoff
+      const closeTime = isHalfDayHoliday
+        ? (holiday?.halfDayCloseTime || '12:00')
+        : (schedule?.closeTime || '17:00');
 
       const windowStartMs = parseManilaTimeToUtc(dateStr, openTime);
       const windowEndMs = parseManilaTimeToUtc(dateStr, closeTime);

@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import { desks } from '../db/schema.ts';
 import { sendApiSuccess, sendApiError } from '../middleware/errorHandler.ts';
+import { authorizeSettingsManagement } from '../middleware/authorize.ts';
 
 export const desksRouter = Router();
 
@@ -17,7 +18,7 @@ desksRouter.get('/desks', async (req, res) => {
 });
 
 // POST /api/desks - Add new desk
-desksRouter.post('/desks', async (req, res) => {
+desksRouter.post('/desks', authorizeSettingsManagement, async (req, res) => {
   try {
     const { name, departmentId, code, description } = req.body;
     if (!name || !name.trim()) {

@@ -93,9 +93,9 @@ export const VerticalNavigationSidebar: React.FC<VerticalNavigationSidebarProps>
     },
     {
       id: 'links' as WorkspaceTab,
-      label: 'Dedicated Links & Drives',
-      shortLabel: 'Drives & Links',
-      description: 'Institutional drives, files & reference URLs',
+      label: 'Dedicated Links & Files',
+      shortLabel: 'Links & Files',
+      description: 'Institutional storage, files & reference URLs',
       icon: ExternalLink,
       badgeLabel: 'Shared',
       badgeType: 'pill' as const,

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   DocumentItem,
   InternalMovement,
@@ -11,12 +11,6 @@ import {
   DedicatedLinkItem,
 } from './types';
 import {
-  getStoredDocuments,
-  saveStoredDocuments,
-  getStoredStaffMembers,
-  saveStoredStaffMembers,
-  getStoredDropdownOptions,
-  saveStoredDropdownOptions,
   ROLE_CONFIGS,
   getRoleConfig,
   getRolePermissions,
@@ -24,7 +18,7 @@ import {
   canUserDeleteDocuments,
   canUserManageSettings,
   canUserManageStaff,
-  decodePersonnelSyncCode,
+  hasSupervisorPermissions,
   broadcastDataUpdate,
   onDataUpdate,
   safeStorageGet,
@@ -38,6 +32,12 @@ import {
   validateConcurrency,
 } from './lib/workflow';
 import {
+  executeBatchDocumentAction,
+  executeBatchDocumentDelete,
+  formatBatchNotification,
+  BatchExecutionReport,
+} from './lib/batchOperations';
+import {
   createBusinessNotification,
   getStoredNotifications,
   saveStoredNotifications,
@@ -46,8 +46,6 @@ import {
 } from './lib/notifications';
 import * as api from './lib/api';
 import { useOnlineStatus } from './components/usePWAInstall';
-import { initAuth, setAccessToken, getAccessToken, googleSignIn, logoutGoogle, getStaySignedIn } from './lib/firebase';
-import { User } from 'firebase/auth';
 import { NotificationCenter } from './components/NotificationCenter';
 import { IncomingDocumentModal } from './components/IncomingDocumentModal';
 import { DocumentDetailModal } from './components/DocumentDetailModal';
@@ -149,8 +147,6 @@ export default function App() {
   };
 
   // Authentication State
-  const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
 
   // Time-in-Desk Threshold Configuration State
   const [timeInDeskConfig, setTimeInDeskConfig] = useState<TimeInDeskConfig>(() => getTimeInDeskConfig());
@@ -167,7 +163,6 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState<boolean>(true);
 
   // Staff & Roles State
-  const [staffList, setStaffList] = useState<AppUserRole[]>(() => getStoredStaffMembers());
   const [currentUser, setCurrentUser] = useState<AppUserRole | null>(() => {
     try {
       const stored = safeStorageGet('possd_active_user');
@@ -188,70 +183,30 @@ export default function App() {
     }
     return null;
   });
+  const [staffList, setStaffList] = useState<AppUserRole[]>([]);
   const [isRolesModalOpen, setIsRolesModalOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isShortcutsModalOpen, setIsShortcutsModalOpen] = useState(false);
-  const [dropdownOptions, setDropdownOptions] = useState<RegistryDropdownOptions>(() => getStoredDropdownOptions());
 
-  // Dedicated Institutional Links State (Google Drives, Files, External Portals)
+  // Dedicated Institutional Links State (Cloud Storage, Files, External Portals)
+  const [dropdownOptions, setDropdownOptions] = useState<RegistryDropdownOptions>({
+    roles: ["Receiving", "Staff", "Supervisor", "Division Manager", "Department Manager", "System Admin"],
+    departments: ["Administrative Section", "Billing & Collections Section", "Finance & Budget Division", "Legal & Regulatory Affairs", "Safety & Environmental Division"],
+    documentTypes: ["Memorandum", "Letter", "Indorsement", "Report"],
+    communicationTypes: ["Internal", "External"],
+    reportTypes: ["Progress", "Final"],
+    priorities: ["Routine", "Urgent", "Rush"],
+    personnel: [], desks: []
+  });
   const [dedicatedLinks, setDedicatedLinks] = useState<DedicatedLinkItem[]>(() => {
     try {
       const stored = localStorage.getItem('possd_dedicated_links');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) return parsed;
       }
     } catch {}
-    return [
-      {
-        id: 'link-drive-master',
-        title: 'POSSD Master Google Drive Repository',
-        url: 'https://drive.google.com',
-        category: 'Google Drive',
-        description: 'Central cloud drive repository for division folders, digital copies, and clearance attachments.',
-        targetDivision: 'All Divisions',
-        iconType: 'drive',
-        addedBy: 'System Admin',
-        addedAt: new Date().toISOString(),
-        isPinned: true,
-      },
-      {
-        id: 'link-routing-template',
-        title: 'Standard Internal Routing Slip Template',
-        url: 'https://drive.google.com',
-        category: 'Official Files',
-        description: 'Prescribed routing slip template for tracking multi-desk document transmittals and compliance.',
-        targetDivision: 'All Divisions',
-        iconType: 'file',
-        addedBy: 'System Admin',
-        addedAt: new Date().toISOString(),
-        isPinned: true,
-      },
-      {
-        id: 'link-philpost-portal',
-        title: 'Philippine Postal Corporation Portal',
-        url: 'https://www.phlpost.gov.ph',
-        category: 'Portals & Systems',
-        description: 'Official PHLPost institutional corporate portal and administrative circulars directory.',
-        targetDivision: 'Administrative Section',
-        iconType: 'link',
-        addedBy: 'System Admin',
-        addedAt: new Date().toISOString(),
-        isPinned: false,
-      },
-      {
-        id: 'link-sla-manual',
-        title: 'Document Turnaround & SLA Threshold Handbook',
-        url: 'https://drive.google.com',
-        category: 'Reference Guidelines',
-        description: 'Operating reference guide on time-in-desk limits, urgent transactions, and focal routing.',
-        targetDivision: 'All Divisions',
-        iconType: 'file',
-        addedBy: 'System Admin',
-        addedAt: new Date().toISOString(),
-        isPinned: false,
-      },
-    ];
+    return [];
   });
 
   // Fetch dedicated links from server on mount
@@ -311,6 +266,7 @@ export default function App() {
   const [batchAction, setBatchAction] = useState<string>('');
   const [isExecutingBatch, setIsExecutingBatch] = useState<boolean>(false);
   const [batchDocsToDelete, setBatchDocsToDelete] = useState<DocumentItem[] | null>(null);
+  const [batchReport, setBatchReport] = useState<BatchExecutionReport | null>(null);
 
   // Notifications State (Real-time activity log with isolated persistence)
   const [notifications, setNotifications] = useState<RealtimeNotification[]>(() => getStoredNotifications());
@@ -418,11 +374,9 @@ export default function App() {
         
         if (docs && docs.length > 0) {
           setDocuments(docs);
-          saveStoredDocuments(docs);
         }
         if (staff && staff.length > 0) {
           setStaffList(staff);
-          saveStoredStaffMembers(staff);
         }
         if (linksData) {
           setDedicatedLinks(linksData);
@@ -442,18 +396,15 @@ export default function App() {
   // Sign Out / Logout handler - Turns back to Official Portal Login Page
   const handleLogout = async () => {
     try {
-      await logoutGoogle();
+      await api.logout();
     } catch (e) {
-      console.warn('Google logout warning:', e);
+      console.warn('Logout warning:', e);
     }
     try {
       if (typeof window !== 'undefined' && window.localStorage) {
         localStorage.removeItem('possd_active_user');
       }
     } catch (e) {}
-    setUser(null);
-    setToken(null);
-    setAccessToken(null);
     setCurrentUser(null);
     setIsLoginModalOpen(false);
   };
@@ -468,11 +419,9 @@ export default function App() {
       ]);
       if (docs && docs.length > 0) {
         setDocuments(docs);
-        saveStoredDocuments(docs);
       }
       if (staff && staff.length > 0) {
         setStaffList(staff);
-        saveStoredStaffMembers(staff);
       }
       if (linksData) {
         setDedicatedLinks(linksData);
@@ -505,63 +454,8 @@ export default function App() {
     );
   };
 
-  // Load initial data & Firebase Auth Listener
+  // Load initial data & Auth session
   useEffect(() => {
-    const localDocs = getStoredDocuments();
-    setDocuments(localDocs);
-
-    // Personnel Roster Transfer URL & Hash Detection
-    try {
-      const hash = window.location.hash || '';
-      const params = new URLSearchParams(window.location.search);
-      let syncRaw = '';
-
-      if (hash.startsWith('#sync_staff=')) {
-        syncRaw = hash.replace('#sync_staff=', '');
-      } else if (hash.startsWith('#sync=')) {
-        syncRaw = hash.replace('#sync=', '');
-      } else if (params.has('sync_staff')) {
-        syncRaw = params.get('sync_staff') || '';
-      } else if (params.has('sync_code')) {
-        syncRaw = params.get('sync_code') || '';
-      }
-
-      if (syncRaw) {
-        const payload = decodePersonnelSyncCode(syncRaw);
-        if (payload && Array.isArray(payload.staff) && payload.staff.length > 0) {
-          const currentStaff = getStoredStaffMembers();
-          // Merge staff prioritizing payload
-          const staffMap = new Map<string, AppUserRole>();
-          currentStaff.forEach((s) => staffMap.set(s.id, s));
-          payload.staff.forEach((s) => staffMap.set(s.id, s));
-          const mergedStaff = Array.from(staffMap.values());
-
-          setStaffList(mergedStaff);
-          saveStoredStaffMembers(mergedStaff);
-
-          if (payload.dropdownOptions) {
-            setDropdownOptions(payload.dropdownOptions);
-            saveStoredDropdownOptions(payload.dropdownOptions);
-          }
-
-          // Clean URL so the transfer payload is not exposed in address bar
-          window.history.replaceState(null, '', window.location.pathname);
-
-          setTimeout(() => {
-            addNotification(
-              'Roster Transfer Applied',
-              `Successfully loaded ${payload.staff.length} personnel profiles and credentials from transfer link.`,
-              'System',
-              'sync',
-              'DEVICE-SYNC'
-            );
-          }, 600);
-        }
-      }
-    } catch (e) {
-      console.warn('Could not parse roster transfer params', e);
-    }
-
     // Same-Browser Cross-Tab Broadcast Channel listener
     const cleanupBroadcast = onDataUpdate((type, data) => {
       if (type === 'staff' && Array.isArray(data)) {
@@ -573,13 +467,18 @@ export default function App() {
       }
     });
 
-    const unsubscribe = initAuth(
-      async (authedUser, oauthToken) => {
-        setUser(authedUser);
-        setToken(oauthToken);
-        setAccessToken(oauthToken);
-        
-        try {
+    const initBackendAuth = async () => {
+      try {
+        setAuthLoading(true);
+        const me = await api.fetchCurrentUser();
+        if (me) {
+          const canonicalRole = normalizeRole(me.role);
+          const normalizedStaff: AppUserRole = {
+            ...me,
+            role: canonicalRole,
+          };
+          setCurrentUser(normalizedStaff);
+          
           // Initial backend hydration
           const [docs, staff, links] = await Promise.all([
             api.fetchDocuments(),
@@ -589,80 +488,24 @@ export default function App() {
 
           if (docs && docs.length > 0) {
             setDocuments(docs);
-            saveStoredDocuments(docs);
           }
-          let currentStaffList = staffListRef.current;
           if (staff && staff.length > 0) {
             setStaffList(staff);
-            saveStoredStaffMembers(staff);
-            currentStaffList = staff;
           }
-          
-          // Map Firebase user to personnel directory by institutional email or ID
-          const userEmail = (authedUser.email || '').toLowerCase().trim();
-          let matchedStaff = currentStaffList.find(
-            s => (s.email && s.email.toLowerCase().trim() === userEmail) || s.id === authedUser.uid
-          );
-
-          if (matchedStaff) {
-            const canonicalRole = normalizeRole(matchedStaff.role);
-            const normalizedStaff: AppUserRole = {
-              ...matchedStaff,
-              role: canonicalRole,
-            };
-            setCurrentUser(normalizedStaff);
-            safeStorageSet('possd_active_user', JSON.stringify(normalizedStaff));
-          } else if (authedUser.email) {
-            // Default authenticated staff role with standard permissions
-            const defaultStaff: AppUserRole = {
-              id: authedUser.uid,
-              name: authedUser.displayName || authedUser.email.split('@')[0],
-              role: 'Staff',
-              division: 'General',
-              username: authedUser.email.split('@')[0],
-              email: authedUser.email,
-              status: 'active',
-            };
-            setCurrentUser(defaultStaff);
-            safeStorageSet('possd_active_user', JSON.stringify(defaultStaff));
-          }
-        } catch (e) {
-          console.error("Failed to hydrate from backend:", e);
-        } finally {
-          setAuthLoading(false);
-        }
-      },
-      () => {
-        setUser(null);
-        setToken(null);
-        setAccessToken(null);
-        // If not authenticated with Firebase, inspect locally stored enrolled session
-        try {
-          const stored = safeStorageGet('possd_active_user');
-          if (stored) {
-            const parsed = JSON.parse(stored);
-            if (parsed && typeof parsed.name === 'string' && typeof parsed.role === 'string') {
-              const canonicalRole = normalizeRole(parsed.role);
-              if (canonicalRole) {
-                setCurrentUser({ ...parsed, role: canonicalRole });
-              } else {
-                setCurrentUser(null);
-              }
-            } else {
-              setCurrentUser(null);
-            }
-          } else {
-            setCurrentUser(null);
-          }
-        } catch {
+        } else {
           setCurrentUser(null);
         }
+      } catch (e) {
+        console.error("Failed to hydrate from backend:", e);
+        setCurrentUser(null);
+      } finally {
         setAuthLoading(false);
       }
-    );
+    };
+
+    initBackendAuth();
 
     return () => {
-      unsubscribe();
       cleanupBroadcast();
     };
   }, []);
@@ -815,99 +658,137 @@ export default function App() {
     }
   };
 
-  // Staff list management handlers
-  const handleAddStaffMember = (newStaff: AppUserRole) => {
-    const updated = [...staffList, newStaff];
-    setStaffList(updated);
-    saveStoredStaffMembers(updated);
-    broadcastDataUpdate('staff', updated);
+  // Authoritative staff list management handlers (PostgreSQL Single Source of Truth)
+  const handleAddStaffMember = async (newStaff: AppUserRole & { password?: string }) => {
+    try {
+      const persisted = await api.createStaffMember(newStaff);
+      const updated = [...staffList.filter((s) => String(s.id) !== String(persisted.id)), persisted];
+      setStaffList(updated);
+      broadcastDataUpdate('staff', updated);
 
-    addNotification(
-      'Staff Enrolled',
-      `Registered ${newStaff.name} as ${newStaff.role} (${newStaff.division})`,
-      currentUser?.name || 'System',
-      'sync',
-      'STAFF'
-    );
+      addNotification(
+        'Staff Enrolled',
+        `Registered ${persisted.name} as ${persisted.role} (${persisted.division}) in PostgreSQL.`,
+        currentUser?.name || 'System',
+        'sync',
+        'STAFF'
+      );
+    } catch (err: any) {
+      console.error('Failed to enroll personnel in PostgreSQL:', err);
+      addNotification(
+        'Staff Enrollment Failed',
+        err?.message || 'Database rejected personnel creation.',
+        currentUser?.name || 'System',
+        'urgent',
+        'STAFF'
+      );
+      throw err;
+    }
   };
 
-  const handleUpdateStaffRole = (staffId: string, newRole: UserRoleType, newDivision?: string) => {
-    const updated = staffList.map((s) => {
-      if (s.id === staffId) {
-        return {
-          ...s,
-          role: newRole,
-          ...(newDivision ? { division: newDivision } : {}),
-        };
-      }
-      return s;
-    });
-    setStaffList(updated);
-    saveStoredStaffMembers(updated);
-    broadcastDataUpdate('staff', updated);
-
-    if (currentUser?.id === staffId) {
-      setCurrentUser((prev) => ({
-        ...prev,
+  const handleUpdateStaffRole = async (staffId: string, newRole: UserRoleType, newDivision?: string) => {
+    try {
+      const updatedStaff = await api.updateStaffMember(staffId, {
         role: newRole,
         ...(newDivision ? { division: newDivision } : {}),
-      }));
-    }
+      });
 
-    addNotification(
-      'Role Updated',
-      `Updated role permission for staff ${staffId} to ${newRole}`,
-      currentUser?.name || 'System',
-      'sync',
-      'ROLE'
-    );
-  };
+      const updated = staffList.map((s) => (String(s.id) === String(staffId) ? updatedStaff : s));
+      setStaffList(updated);
+      broadcastDataUpdate('staff', updated);
 
-  const handleUpdateStaffCredentials = (
-    staffId: string,
-    updates: { username?: string; status?: 'active' | 'suspended'; email?: string }
-  ) => {
-    const updated = staffList.map((s) => {
-      if (s.id === staffId) {
-        return {
-          ...s,
-          ...updates,
-        };
+      if (currentUser && String(currentUser.id) === String(staffId)) {
+        setCurrentUser(updatedStaff);
+        safeStorageSet('possd_active_user', JSON.stringify(updatedStaff));
       }
-      return s;
-    });
-    setStaffList(updated);
-    saveStoredStaffMembers(updated);
-    broadcastDataUpdate('staff', updated);
 
-    if (currentUser?.id === staffId) {
-      setCurrentUser((prev) => (prev ? {
-        ...prev,
-        ...updates,
-      } : null));
+      addNotification(
+        'Role Updated',
+        `Persisted role permission for ${updatedStaff.name} as ${newRole}`,
+        currentUser?.name || 'System',
+        'sync',
+        'ROLE'
+      );
+    } catch (err: any) {
+      console.error('Failed to update staff role in PostgreSQL:', err);
+      addNotification(
+        'Role Update Failed',
+        err?.message || 'Database rejected role update.',
+        currentUser?.name || 'System',
+        'urgent',
+        'ROLE'
+      );
+      throw err;
     }
-
-    addNotification(
-      'Account Updated',
-      `Admin updated account profile for personnel ID ${staffId}.`,
-      currentUser?.name || 'System',
-      'sync',
-      staffId
-    );
   };
 
-  const handleDeleteStaffMember = (staffId: string) => {
-    const updated = staffList.filter((s) => s.id !== staffId);
-    setStaffList(updated);
-    saveStoredStaffMembers(updated);
-    broadcastDataUpdate('staff', updated);
+  const handleUpdateStaffCredentials = async (
+    staffId: string,
+    updates: {
+      name?: string;
+      role?: UserRoleType;
+      division?: string;
+      assignedDesk?: string;
+      username?: string;
+      status?: 'active' | 'suspended';
+      email?: string;
+      password?: string;
+    }
+  ) => {
+    try {
+      const updatedStaff = await api.updateStaffMember(staffId, updates);
+      const updated = staffList.map((s) => (String(s.id) === String(staffId) ? updatedStaff : s));
+      setStaffList(updated);
+      broadcastDataUpdate('staff', updated);
 
-    addNotification('Staff Removed', `Removed personnel ID ${staffId}`, currentUser?.name || 'System', 'sync', 'STAFF');
+      if (currentUser && String(currentUser.id) === String(staffId)) {
+        setCurrentUser(updatedStaff);
+        safeStorageSet('possd_active_user', JSON.stringify(updatedStaff));
+      }
+
+      addNotification(
+        'Account Updated',
+        `Admin persisted profile updates for ${updatedStaff.name} in PostgreSQL.`,
+        currentUser?.name || 'System',
+        'sync',
+        staffId
+      );
+    } catch (err: any) {
+      console.error('Failed to persist staff credentials in PostgreSQL:', err);
+      addNotification(
+        'Account Update Failed',
+        err?.message || 'Database rejected personnel update.',
+        currentUser?.name || 'System',
+        'urgent',
+        staffId
+      );
+      throw err;
+    }
+  };
+
+  const handleDeleteStaffMember = async (staffId: string) => {
+    try {
+      await api.deleteStaffMember(staffId);
+      const updated = staffList.filter((s) => String(s.id) !== String(staffId));
+      setStaffList(updated);
+      broadcastDataUpdate('staff', updated);
+
+      addNotification('Staff Removed', `Removed personnel ID ${staffId} from PostgreSQL`, currentUser?.name || 'System', 'sync', 'STAFF');
+    } catch (err: any) {
+      console.error('Failed to delete staff member in PostgreSQL:', err);
+      addNotification(
+        'Staff Deletion Failed',
+        err?.message || 'Database rejected personnel deletion.',
+        currentUser?.name || 'System',
+        'urgent',
+        'STAFF'
+      );
+      throw err;
+    }
   };
 
   const handleUpdateDropdownOptions = (updatedOptions: RegistryDropdownOptions) => {
     setDropdownOptions(updatedOptions);
-    saveStoredDropdownOptions(updatedOptions);
     broadcastDataUpdate('dropdowns', updatedOptions);
     addNotification('Options Updated', 'Custom dropdown values updated', currentUser?.name || 'System', 'sync', 'DROPDOWNS');
   };
@@ -918,10 +799,9 @@ export default function App() {
       // Opt-in central backend flow
       const savedDoc = await api.createDocument(newDoc);
       
-      const updatedList = [savedDoc, ...documents];
-      setDocuments(updatedList);
-      saveStoredDocuments(updatedList);
       setIsIncomingModalOpen(false);
+      await loadDocumentsPage(1);
+      setCurrentPage(1);
 
       addNotification(
         'Document Inflow Registered',
@@ -961,8 +841,8 @@ export default function App() {
       
       const updatedList = documents.map((d) => (d.id === savedDoc.id ? savedDoc : d));
       setDocuments(updatedList);
-      saveStoredDocuments(updatedList);
       setSelectedDoc(savedDoc);
+      await loadDocumentsPage(currentPage);
 
       if (oldDoc && oldDoc.currentLocation !== savedDoc.currentLocation) {
         addNotification(
@@ -1022,7 +902,7 @@ export default function App() {
 
   // HANDLER: Delete document entry (only for System Admins and Department Manager)
   const handleDeleteDocument = async (doc: DocumentItem) => {
-    if (!canUserDeleteDocuments(currentUser?.role)) {
+    if (!canUserDeleteDocuments(currentUser)) {
       addNotification(
         'Action Restricted',
         'Deleting entries from incoming and outgoing logs is strictly restricted to System Admins and Department Managers.',
@@ -1037,14 +917,11 @@ export default function App() {
       setIsDeleting(true);
       await api.deleteDocument(doc.id);
       
-      const updatedList = documents.filter((d) => d.id !== doc.id);
-      setDocuments(updatedList);
-      saveStoredDocuments(updatedList);
-
       if (selectedDoc?.id === doc.id) {
         setSelectedDoc(null);
       }
       setDocToDelete(null);
+      await loadDocumentsPage(currentPage);
 
       const isOutgoing = doc.managerClearance?.isCleared || doc.currentStatus === 'Cleared for Out' || doc.currentStatus === 'Dispatched / Completed';
       const logType = isOutgoing ? 'Outgoing Log' : 'Incoming Log';
@@ -1066,134 +943,67 @@ export default function App() {
     }
   };
 
-  // 1. FILTERED DOCUMENTS (Explicit Filter State Evaluation)
-  const filteredDocuments = useMemo(() => {
-    const query = (searchQuery || '').toLowerCase().trim();
-    return documents.filter((doc) => {
-      if (query) {
-        const matchesSearch =
-          (doc.trackingNumber || '').toLowerCase().includes(query) ||
-          (doc.title || '').toLowerCase().includes(query) ||
-          (doc.originDepartment || '').toLowerCase().includes(query) ||
-          (doc.responsiblePerson || '').toLowerCase().includes(query) ||
-          (doc.targetDivision || '').toLowerCase().includes(query) ||
-          (doc.currentLocation || '').toLowerCase().includes(query);
-        if (!matchesSearch) return false;
-      }
-
-      if (viewMode === 'incoming') {
-        if (doc.currentStatus !== 'Incoming Logged' && doc.currentStatus !== 'Under Review') return false;
-      } else if (viewMode === 'outgoing') {
-        if (doc.currentStatus !== 'Cleared for Out' && doc.currentStatus !== 'Dispatched / Completed') return false;
-      } else if (viewMode === 'compliance_needed') {
-        const needsCompliance =
-          doc.currentStatus === 'Supervisor Comment Needed' ||
-          doc.supervisorRemarks?.some((r) => r.complianceRequired && !r.complied);
-        if (!needsCompliance) return false;
-      } else if (viewMode === 'overdue') {
-        const isOverdue = calculateDocumentTimeInDesk(doc, timeInDeskConfig).isOverdue;
-        if (!isOverdue) return false;
-      }
-
-      if (statusFilter !== 'ALL' && doc.currentStatus !== statusFilter) return false;
-      if (divisionFilter !== 'ALL' && doc.targetDivision !== divisionFilter) return false;
-      if (priorityFilter !== 'ALL' && doc.priority !== priorityFilter) return false;
-
-      return true;
-    });
-  }, [documents, searchQuery, viewMode, statusFilter, divisionFilter, priorityFilter, timeInDeskConfig]);
-
-  // 2. SORTED DOCUMENTS (Deterministic Sorting with Pre-calculated Metrics & Stable Tie-breaker)
-  const sortedDocuments = useMemo(() => {
-    if (filteredDocuments.length <= 1) return filteredDocuments;
-
-    // Pre-calculate timeInDesk elapsed hours once per item if sorting by timeInDesk to avoid O(N log N) re-calculations
-    const timeInDeskMap = new Map<string, number>();
-    if (sortField === 'timeInDesk') {
-      filteredDocuments.forEach((doc) => {
-        timeInDeskMap.set(doc.id, calculateDocumentTimeInDesk(doc, timeInDeskConfig).elapsedHours);
-      });
-    }
-
-    const list = [...filteredDocuments];
-    const statusOrder: Record<string, number> = {
-      'Incoming Logged': 1,
-      'Under Review': 2,
-      'Supervisor Comment Needed': 3,
-      'Complied / Ready for Clearance': 4,
-      'Cleared for Out': 5,
-      'Dispatched / Completed': 6,
-    };
-
-    list.sort((a, b) => {
-      let comparison = 0;
-      switch (sortField) {
-        case 'trackingNumber':
-          comparison = a.trackingNumber.localeCompare(b.trackingNumber, undefined, { numeric: true, sensitivity: 'base' });
-          break;
-        case 'title':
-          comparison = a.title.localeCompare(b.title, undefined, { sensitivity: 'base' });
-          break;
-        case 'dateReceived': {
-          const dateA = new Date(`${a.dateReceived}T${a.timeReceived || '00:00'}:00`).getTime() || 0;
-          const dateB = new Date(`${b.dateReceived}T${b.timeReceived || '00:00'}:00`).getTime() || 0;
-          comparison = dateA - dateB;
-          break;
-        }
-        case 'targetDivision':
-          comparison = (a.targetDivision || '').localeCompare(b.targetDivision || '', undefined, { sensitivity: 'base' });
-          break;
-        case 'currentCustodian':
-          comparison = (a.currentCustodian || '').localeCompare(b.currentCustodian || '', undefined, { sensitivity: 'base' });
-          break;
-        case 'timeInDesk': {
-          const elapsedA = timeInDeskMap.get(a.id) ?? 0;
-          const elapsedB = timeInDeskMap.get(b.id) ?? 0;
-          comparison = elapsedA - elapsedB;
-          break;
-        }
-        case 'lifecycle': {
-          comparison = (statusOrder[a.currentStatus] || 0) - (statusOrder[b.currentStatus] || 0);
-          break;
-        }
-        default:
-          comparison = 0;
-      }
-
-      // Strictly deterministic secondary and tertiary tie-breakers
-      if (comparison === 0) {
-        comparison = (b.updatedAt || '').localeCompare(a.updatedAt || '');
-      }
-      if (comparison === 0) {
-        comparison = (a.id || '').localeCompare(b.id || '');
-      }
-
-      return sortDirection === 'asc' ? comparison : -comparison;
-    });
-
-    return list;
-  }, [filteredDocuments, sortField, sortDirection, timeInDeskConfig]);
-
-  // 3. PAGINATION STATE (Separated from Filter and Sort State, prepared for future server-side pagination)
+  // 3. PAGINATION STATE & SERVER PAGINATION
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(25);
+  const [serverTotalCount, setServerTotalCount] = useState<number>(0);
+  const [serverTotalPages, setServerTotalPages] = useState<number>(1);
+  const [isLoadingDocs, setIsLoadingDocs] = useState<boolean>(false);
+  const [printDocuments, setPrintDocuments] = useState<DocumentItem[]>([]);
+
+  // Function to load the current server page with filters, sorting, and pagination
+  const loadDocumentsPage = useCallback(
+    async (pageToLoad?: number) => {
+      const page = pageToLoad !== undefined ? pageToLoad : currentPage;
+      setIsLoadingDocs(true);
+      try {
+        const response = await api.fetchDocumentsPaginated({
+          page,
+          pageSize,
+          search: searchQuery,
+          status: statusFilter,
+          division: divisionFilter,
+          priority: priorityFilter,
+          viewMode: viewMode,
+          sort: sortField,
+          sortDirection: sortDirection,
+        });
+        setDocuments(response.documents);
+        setServerTotalCount(response.totalCount);
+        setServerTotalPages(response.totalPages);
+      } catch (err) {
+        console.warn('Failed to load server paginated documents:', err);
+      } finally {
+        setIsLoadingDocs(false);
+      }
+    },
+    [currentPage, pageSize, searchQuery, statusFilter, divisionFilter, priorityFilter, viewMode, sortField, sortDirection]
+  );
 
   // Reset pagination to page 1 whenever filters or sorting change
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, viewMode, statusFilter, divisionFilter, priorityFilter, sortField, sortDirection]);
+  }, [searchQuery, viewMode, statusFilter, divisionFilter, priorityFilter, sortField, sortDirection, pageSize]);
 
-  const totalItems = sortedDocuments.length;
-  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  // Load documents whenever pagination, filters, or sorting change
+  useEffect(() => {
+    loadDocumentsPage(currentPage);
+  }, [currentPage, pageSize, searchQuery, viewMode, statusFilter, divisionFilter, priorityFilter, sortField, sortDirection]);
+
+  const totalItems = serverTotalCount;
+  const totalPages = Math.max(1, serverTotalPages);
   const activePage = Math.min(Math.max(1, currentPage), totalPages);
-  const startIndex = (activePage - 1) * pageSize;
-  const endIndex = Math.min(totalItems, startIndex + pageSize);
+  const startIndex = totalItems === 0 ? 0 : (activePage - 1) * pageSize;
+  const endIndex = Math.min(totalItems, startIndex + documents.length);
 
   // Track browser print event to render all filtered records in printed report without truncation
   const [isPrinting, setIsPrinting] = useState(false);
   useEffect(() => {
     const handleBeforePrint = () => setIsPrinting(true);
-    const handleAfterPrint = () => setIsPrinting(false);
+    const handleAfterPrint = () => {
+      setIsPrinting(false);
+      setPrintDocuments([]);
+    };
     window.addEventListener('beforeprint', handleBeforePrint);
     window.addEventListener('afterprint', handleAfterPrint);
     return () => {
@@ -1202,18 +1012,44 @@ export default function App() {
     };
   }, []);
 
-  const handlePrintRegistry = () => {
-    setIsPrinting(true);
-    setTimeout(() => {
+  const handlePrintRegistry = async () => {
+    try {
+      setIsPrinting(true);
+      const allMatchingDocs = await api.fetchDocuments({
+        search: searchQuery,
+        status: statusFilter,
+        division: divisionFilter,
+        priority: priorityFilter,
+        viewMode: viewMode,
+        sort: sortField,
+        sortDirection: sortDirection,
+      });
+      setPrintDocuments(allMatchingDocs);
+      setTimeout(() => {
+        window.print();
+      }, 80);
+    } catch {
       window.print();
-    }, 50);
+    }
   };
 
   // Paginated window for screen view, or complete sorted list for printer-friendly output
   const visibleDocuments = useMemo(() => {
-    if (isPrinting) return sortedDocuments;
-    return sortedDocuments.slice(startIndex, endIndex);
-  }, [sortedDocuments, startIndex, endIndex, isPrinting]);
+    if (isPrinting && printDocuments.length > 0) return printDocuments;
+    return documents;
+  }, [documents, printDocuments, isPrinting]);
+
+  // Active focal person names for distribution and tracking
+  const activeFocalPersonNames = useMemo(() => {
+    if (dropdownOptions.focalPersons && dropdownOptions.focalPersons.length > 0) {
+      return dropdownOptions.focalPersons;
+    }
+    const eligible = staffList.filter((s) => s.status !== 'suspended' && hasSupervisorPermissions(s));
+    if (eligible.length > 0) {
+      return eligible.map((s) => s.name);
+    }
+    return ['Mary Flor Aquino', 'Aubrey Camille Cabreras'];
+  }, [dropdownOptions.focalPersons, staffList]);
 
   // Statistics (Single-pass computation with unified clearance & SLA business rules)
   const stats = useMemo(() => {
@@ -1242,7 +1078,7 @@ export default function App() {
       }
 
       if (
-        ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson) &&
+        activeFocalPersonNames.includes(d.responsiblePerson) &&
         !isCleared
       ) {
         focalPendingCount++;
@@ -1257,7 +1093,7 @@ export default function App() {
       overdueCount,
       focalPendingCount,
     };
-  }, [documents, timeInDeskConfig]);
+  }, [documents, timeInDeskConfig, activeFocalPersonNames]);
 
   const {
     totalCount,
@@ -1269,11 +1105,11 @@ export default function App() {
   } = stats;
 
   const currentRoleConfig = currentUser ? getRoleConfig(currentUser?.role) : getRoleConfig('Viewer');
-  const canDeleteLogs = currentUser ? canUserDeleteDocuments(currentUser?.role) : false;
+  const canDeleteLogs = currentUser ? canUserDeleteDocuments(currentUser) : false;
 
   // Batch Selection & Bulk Operations Logic
-  const isAllSelected = sortedDocuments.length > 0 && sortedDocuments.every((d) => selectedDocIds.has(d.id));
-  const isSomeSelected = sortedDocuments.some((d) => selectedDocIds.has(d.id)) && !isAllSelected;
+  const isAllSelected = visibleDocuments.length > 0 && visibleDocuments.every((d) => selectedDocIds.has(d.id));
+  const isSomeSelected = visibleDocuments.some((d) => selectedDocIds.has(d.id)) && !isAllSelected;
 
   const toggleSelectDoc = (docId: string) => {
     setSelectedDocIds((prev) => {
@@ -1291,13 +1127,13 @@ export default function App() {
     if (isAllSelected) {
       setSelectedDocIds((prev) => {
         const next = new Set(prev);
-        sortedDocuments.forEach((d) => next.delete(d.id));
+        visibleDocuments.forEach((d) => next.delete(d.id));
         return next;
       });
     } else {
       setSelectedDocIds((prev) => {
         const next = new Set(prev);
-        sortedDocuments.forEach((d) => next.add(d.id));
+        visibleDocuments.forEach((d) => next.add(d.id));
         return next;
       });
     }
@@ -1316,7 +1152,7 @@ export default function App() {
           'Action Restricted',
           'Deleting document entries is strictly restricted to System Admins and Department Managers.',
           currentUser?.name || 'System',
-          'sync'
+          'urgent'
         );
         return;
       }
@@ -1338,53 +1174,40 @@ export default function App() {
         assignedDesk: currentUser?.assignedDesk,
       };
 
-      const selectedDocs = documents.filter((d) => selectedDocIds.has(d.id));
       const actionCode = batchAction === 'mark_cleared' ? 'clear_out' : batchAction;
-      const batchResult = executeBatchAction(selectedDocs, actionCode, actor);
 
-      // Build updated list of all documents
-      const updatedMap = new Map(batchResult.updatedDocuments.map((d) => [d.id, d]));
-      const allUpdatedDocs = documents.map((d) => updatedMap.get(d.id) || d);
+      // Authoritative batch execution: validates business rules & updates PostgreSQL
+      const { report, updatedAllDocuments } = await executeBatchDocumentAction(
+        documents,
+        selectedDocIds,
+        actionCode,
+        actor
+      );
 
-      // Persist changes to API/backend
-      for (const updatedDoc of batchResult.updatedDocuments) {
-        if (selectedDocIds.has(updatedDoc.id)) {
-          try {
-            await api.updateDocument(updatedDoc);
-          } catch (e) {
-            console.warn(`Failed to sync bulk update for doc ${updatedDoc.id}:`, e);
-          }
-        }
-      }
+      // Invariant: React state only receives changes verified and persisted by PostgreSQL
+      setDocuments(updatedAllDocuments);
+      broadcastDataUpdate('documents', updatedAllDocuments);
+      await loadDocumentsPage(currentPage);
 
-      setDocuments(allUpdatedDocs);
-      saveStoredDocuments(allUpdatedDocs);
-      broadcastDataUpdate('documents', allUpdatedDocs);
+      // Provide accurate, transparent notification reflecting actual PostgreSQL outcome
+      const notif = formatBatchNotification(report, batchAction, currentUserName);
+      addNotification(notif.title, notif.message, currentUserName, notif.type, 'BATCH');
 
-      if (batchResult.failed > 0) {
-        const errPreview = batchResult.errors.map((e) => `${e.trackingNumber}: ${e.reason}`).join('; ');
-        addNotification(
-          'Batch Action Completed with Warnings',
-          `Processed ${batchResult.succeeded} document(s). ${batchResult.failed} skipped due to business rules (${errPreview}).`,
+      // Audit trail: only log for operations that actually were persisted
+      if (report.succeeded > 0) {
+        api.logAudit(
+          "BATCH ACTION",
+          "",
           currentUserName,
-          'urgent',
-          'BATCH'
-        );
-      } else {
-        addNotification(
-          'Batch Action Executed',
-          `Successfully applied batch action to ${batchResult.succeeded} document(s).`,
-          currentUserName,
-          'sync',
-          'BATCH'
+          "",
+          `Executed ${batchAction}: ${report.summaryMessage}`
         );
       }
 
-      api.logAudit("BATCH ACTION", "", currentUserName, "", `Executed ${batchAction} on ${batchResult.succeeded} docs (${batchResult.failed} rejected)`);
-
+      setBatchReport(report);
       setSelectedDocIds(new Set());
       setBatchAction('');
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to execute batch action:', err);
       addNotification('Error', 'Unable to complete batch action.', currentUser?.name || 'System', 'urgent');
     } finally {
@@ -1396,40 +1219,60 @@ export default function App() {
     if (!batchDocsToDelete || batchDocsToDelete.length === 0) return;
     try {
       setIsDeleting(true);
-      const count = batchDocsToDelete.length;
-      const idsToDelete = new Set(batchDocsToDelete.map((d) => d.id));
+      const currentUserName = currentUser?.name || 'System';
+      const currentUserRole = currentUser?.role || 'Staff';
 
-      for (const doc of batchDocsToDelete) {
-        try {
-          await api.deleteDocument(doc.id);
-        } catch (e) {
-          console.warn(`Failed to delete doc ${doc.id}:`, e);
-        }
-      }
+      const actor: WorkflowActor = {
+        id: currentUser?.id,
+        name: currentUserName,
+        role: currentUserRole,
+        division: currentUser?.division,
+        assignedDesk: currentUser?.assignedDesk,
+      };
 
-      const updatedList = documents.filter((d) => !idsToDelete.has(d.id));
-      setDocuments(updatedList);
-      saveStoredDocuments(updatedList);
-      broadcastDataUpdate('documents', updatedList);
+      const { report, updatedAllDocuments } = await executeBatchDocumentDelete(
+        documents,
+        batchDocsToDelete,
+        actor
+      );
 
-      if (selectedDoc && idsToDelete.has(selectedDoc.id)) {
+      // Authoritative update: only confirmed deletions are removed from local state
+      setDocuments(updatedAllDocuments);
+      broadcastDataUpdate('documents', updatedAllDocuments);
+      await loadDocumentsPage(currentPage);
+
+      if (selectedDoc && report.items.some((i) => i.status === 'successful' && i.documentId === selectedDoc.id)) {
         setSelectedDoc(null);
       }
 
-      addNotification(
-        'Batch Records Deleted',
-        `Permanently deleted ${count} document entries by ${currentUser?.name} (${currentUser?.role}).`,
-        currentUser?.name || 'System',
-        'sync',
-        'BATCH-DEL'
-      );
+      if (report.failed === 0 && report.queuedOffline === 0) {
+        addNotification(
+          'Batch Records Deleted',
+          `Permanently deleted ${report.succeeded} document entries by ${currentUserName} (${currentUserRole}).`,
+          currentUserName,
+          'sync',
+          'BATCH-DEL'
+        );
+      } else {
+        const notif = formatBatchNotification(report, 'deletion', currentUserName);
+        addNotification(notif.title, notif.message, currentUserName, notif.type, 'BATCH-DEL');
+      }
 
-      api.logAudit("DELETE DOCUMENTS (BATCH)", "", currentUser?.name || 'System', "", `Deleted ${count} documents`);
+      if (report.succeeded > 0) {
+        api.logAudit(
+          "DELETE DOCUMENTS (BATCH)",
+          "",
+          currentUserName,
+          "",
+          `Batch delete: ${report.summaryMessage}`
+        );
+      }
 
+      setBatchReport(report);
       setSelectedDocIds(new Set());
       setBatchAction('');
       setBatchDocsToDelete(null);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Batch deletion error:', err);
       addNotification('Error', 'Unable to complete batch deletion.', currentUser?.name || 'System', 'urgent');
     } finally {
@@ -1746,7 +1589,7 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {documents.filter(d => ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson)).map((doc, _idx_doc) => (
+                  {documents.filter(d => activeFocalPersonNames.includes(d.responsiblePerson)).map((doc, _idx_doc) => (
                     <tr
                       key={`${doc.id}-${_idx_doc}`}
                       onClick={() => setSelectedDoc(doc)}
@@ -1775,7 +1618,7 @@ export default function App() {
                       </td>
                     </tr>
                   ))}
-                  {documents.filter(d => ['Mary Flor Aquino', 'Aubrey Camille Cabreras'].includes(d.responsiblePerson)).length === 0 && (
+                  {documents.filter(d => activeFocalPersonNames.includes(d.responsiblePerson)).length === 0 && (
                      <tr>
                         <td colSpan={6} className="text-center py-12 text-slate-500">No documents pending distribution for focal persons.</td>
                      </tr>
@@ -1810,6 +1653,9 @@ export default function App() {
             staffList={staffList}
             onOpenRolesModal={() => setIsRolesModalOpen(true)}
             availableDivisions={dropdownOptions.departments}
+            currentUser={currentUser}
+            dropdownOptions={dropdownOptions}
+            onUpdateDropdownOptions={handleUpdateDropdownOptions}
           />
         ) : (
           <>
@@ -2041,7 +1887,7 @@ export default function App() {
               )}
               <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400 text-xs font-medium">
                 <span>
-                  Showing <strong className="text-slate-900 dark:text-white">{sortedDocuments.length}</strong> of {totalCount} records
+                  Showing <strong className="text-slate-900 dark:text-white">{totalItems > 0 ? startIndex + 1 : 0}-{endIndex}</strong> of {totalItems} records
                 </span>
                 <span className="text-slate-300 dark:text-slate-700">|</span>
                 <button
@@ -2106,10 +1952,10 @@ export default function App() {
                       <span className="inline-flex items-center justify-center px-2 py-0.5 text-[11px] rounded-full bg-blue-600 text-white font-mono">
                         {selectedDocIds.size}
                       </span>
-                      <span>of {sortedDocuments.length} selected</span>
+                      <span>of {visibleDocuments.length} selected</span>
                     </span>
                   ) : (
-                    <span>Select all visible ({sortedDocuments.length})</span>
+                    <span>Select all visible ({visibleDocuments.length})</span>
                   )}
                 </label>
               </div>
@@ -2146,7 +1992,7 @@ export default function App() {
                   <option value="mark_cleared">&#10003; Mark as Cleared (Dispatch)</option>
                   
                   <optgroup label="Forward to Division...">
-                    {(dropdownOptions.departments.length > 0 ? dropdownOptions.departments : ['Administrative Section', 'Port Operations Section', 'Billing & Collections Section', 'Harbor Master Office', 'Safety & Environmental Division']).map((dept) => (
+                    {(dropdownOptions.departments.length > 0 ? dropdownOptions.departments : ['Administrative Section', 'Billing & Collections Section', 'Finance & Budget Division', 'Legal & Regulatory Affairs', 'Safety & Environmental Division']).map((dept) => (
                       <option key={`fwd-${dept}`} value={`forward:${dept}`}>
                         &rarr; Forward to: {dept}
                       </option>
@@ -2246,7 +2092,7 @@ export default function App() {
               <div className="text-right text-xs">
                 <div className="border border-black px-3 py-1 bg-slate-100 rounded text-center mb-1">
                   <span className="text-[9px] font-bold text-slate-600 uppercase block">Total Records</span>
-                  <span className="font-mono text-base font-black text-black">{sortedDocuments.length}</span>
+                  <span className="font-mono text-base font-black text-black">{visibleDocuments.length}</span>
                 </div>
                 <p className="text-[9px] text-slate-600">
                   Generated: {new Date().toLocaleDateString('en-US', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', year: 'numeric' })}{' '}
@@ -2466,7 +2312,7 @@ export default function App() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {sortedDocuments.length === 0 ? (
+                {visibleDocuments.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="text-center py-12 text-slate-500 dark:text-slate-400">
                       <Inbox className="w-8 h-8 text-slate-300 dark:text-slate-600 mx-auto mb-2" />
@@ -2546,7 +2392,7 @@ export default function App() {
                                 rel="noreferrer"
                                 onClick={(e) => e.stopPropagation()}
                                 className="inline-flex items-center gap-0.5 p-1 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 bg-blue-50 dark:bg-blue-950/80 hover:bg-blue-100 dark:hover:bg-blue-900 rounded-md shrink-0 transition-all hover:scale-115 active:scale-95 shadow-2xs hover:shadow-xs"
-                                title="Open attached cloud file / drive link"
+                                title="Open attached cloud file / link"
                               >
                                 <Link2 className="w-3.5 h-3.5" />
                               </a>
@@ -2828,14 +2674,36 @@ export default function App() {
         documents={documents}
         dropdownOptions={dropdownOptions}
         onUpdateDropdownOptions={handleUpdateDropdownOptions}
-        onImportStaff={(importedStaff, newOptions) => {
-          setStaffList(importedStaff);
-          saveStoredStaffMembers(importedStaff);
-          broadcastDataUpdate('staff', importedStaff);
-          if (newOptions) {
-            setDropdownOptions(newOptions);
-            saveStoredDropdownOptions(newOptions);
-            broadcastDataUpdate('dropdowns', newOptions);
+        onImportStaff={async (importedStaff, newOptions) => {
+          try {
+            await api.apiRequest('/api/personnel', {
+              method: 'POST',
+              body: JSON.stringify({ staff: importedStaff }),
+            });
+            const refreshedStaff = await api.fetchStaff();
+            setStaffList(refreshedStaff);
+            broadcastDataUpdate('staff', refreshedStaff);
+            if (newOptions) {
+              setDropdownOptions(newOptions);
+              broadcastDataUpdate('dropdowns', newOptions);
+            }
+            addNotification(
+              'Roster Imported',
+              `Imported ${refreshedStaff.length} personnel profiles into PostgreSQL.`,
+              currentUser?.name || 'System',
+              'sync',
+              'STAFF'
+            );
+          } catch (err: any) {
+            console.error('Failed to persist imported roster:', err);
+            addNotification(
+              'Import Failed',
+              err?.message || 'Database rejected roster import.',
+              currentUser?.name || 'System',
+              'urgent',
+              'STAFF'
+            );
+            throw err;
           }
         }}
       />
@@ -2848,6 +2716,7 @@ export default function App() {
         currentUser={currentUser}
         availableDivisions={dropdownOptions.departments}
         dropdownOptions={dropdownOptions}
+        staffList={staffList}
         timeInDeskConfig={timeInDeskConfig}
       />
 
@@ -2976,6 +2845,94 @@ export default function App() {
                     <span>Delete {batchDocsToDelete.length} Record{batchDocsToDelete.length === 1 ? '' : 's'}</span>
                   </>
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Batch Execution Failure & Status Breakdown */}
+      {batchReport && (batchReport.failed > 0 || batchReport.queuedOffline > 0) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 max-w-xl w-full overflow-hidden transition-colors">
+            {/* Modal Header */}
+            <div className="p-5 bg-amber-50 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-900 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                    Batch Operation Summary
+                  </h3>
+                  <div className="flex items-center gap-2 mt-1 text-xs font-semibold">
+                    <span className="text-emerald-700 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-950/60 px-2 py-0.5 rounded-md">
+                      {batchReport.succeeded} Succeeded
+                    </span>
+                    <span className="text-rose-700 dark:text-rose-400 bg-rose-100 dark:bg-rose-950/60 px-2 py-0.5 rounded-md">
+                      {batchReport.failed} Failed
+                    </span>
+                    {batchReport.queuedOffline > 0 && (
+                      <span className="text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-950/60 px-2 py-0.5 rounded-md">
+                        {batchReport.queuedOffline} Queued Offline
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBatchReport(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body: Per-Document Breakdown */}
+            <div className="p-5 space-y-3">
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                PostgreSQL is the authoritative source of truth. The table below lists documents that could not be modified or were queued offline:
+              </p>
+
+              <div className="max-h-60 overflow-y-auto space-y-2 pr-1 divide-y divide-slate-100 dark:divide-slate-800">
+                {batchReport.items
+                  .filter((item) => item.status !== 'successful')
+                  .map((item) => (
+                    <div key={item.documentId} className="pt-2 first:pt-0 space-y-1">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-mono font-bold text-slate-900 dark:text-white">
+                          {item.trackingNumber}
+                        </span>
+                        <span
+                          className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
+                            item.status === 'queued_offline'
+                              ? 'bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-300'
+                              : 'bg-rose-100 dark:bg-rose-950/80 text-rose-800 dark:text-rose-300'
+                          }`}
+                        >
+                          {item.status === 'queued_offline' ? 'Queued Offline' : 'Rejected'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        {item.error?.message ||
+                          (item.status === 'queued_offline'
+                            ? 'Saved to local IndexedDB queue with concurrency version check. Will sync automatically when connection restores.'
+                            : 'Operation aborted by backend.')}
+                      </p>
+                    </div>
+                  ))}
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 bg-slate-50 dark:bg-slate-850 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setBatchReport(null)}
+                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors cursor-pointer shadow-sm"
+              >
+                Acknowledge & Close
               </button>
             </div>
           </div>

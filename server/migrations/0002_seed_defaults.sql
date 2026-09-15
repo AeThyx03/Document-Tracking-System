@@ -62,24 +62,7 @@ SELECT 6, FALSE, '08:00', '17:00' WHERE NOT EXISTS (SELECT 1 FROM business_hours
 INSERT INTO business_hours (day_of_week, is_open, open_time, close_time)
 SELECT 0, FALSE, '08:00', '17:00' WHERE NOT EXISTS (SELECT 1 FROM business_hours WHERE day_of_week = 0);
 
--- Seed Core Departments
-INSERT INTO departments (name, code, description)
-SELECT 'Office of the Port Manager', 'OPM', 'Executive leadership and oversight'
-WHERE NOT EXISTS (SELECT 1 FROM departments WHERE name = 'Office of the Port Manager');
-
-INSERT INTO departments (name, code, description)
-SELECT 'Port Operations & Services Division', 'POSSD', 'Port operations, security, and safety management'
-WHERE NOT EXISTS (SELECT 1 FROM departments WHERE name = 'Port Operations & Services Division');
-
-INSERT INTO departments (name, code, description)
-SELECT 'Administrative & Finance Division', 'AFD', 'Administrative, human resources, budget and finance'
-WHERE NOT EXISTS (SELECT 1 FROM departments WHERE name = 'Administrative & Finance Division');
-
-INSERT INTO departments (name, code, description)
-SELECT 'Engineering & Maintenance Division', 'EMD', 'Port infrastructure, equipment, and maintenance'
-WHERE NOT EXISTS (SELECT 1 FROM departments WHERE name = 'Engineering & Maintenance Division');
-
--- Seed System Settings
+-- Seed System Settings (identifying PostgreSQL as authoritative store)
 INSERT INTO system_settings (key, value, description)
 VALUES ('app_config', '{"system_name": "POSSD Document Tracking System", "version": "1.0.0", "authoritative_db": "postgresql"}'::jsonb, 'Core POSSD platform configuration')
 ON CONFLICT (key) DO NOTHING;

@@ -1,11 +1,4 @@
 import { DocumentItem, AppUserRole } from '../types';
-import { auth } from './firebase';
-import {
-  getStoredDocuments,
-  saveStoredDocuments,
-  getStoredStaffMembers,
-  saveStoredStaffMembers,
-} from '../mockData';
 import { processQueueSequentially } from './offlineQueue';
 
 export interface HealthStatus {
@@ -42,19 +35,34 @@ export class ApiError extends Error {
   }
 }
 
-async function getToken(): Promise<string> {
-  try {
-    if (auth.currentUser) {
-      return await auth.currentUser.getIdToken();
-    }
-  } catch (err) {
-    console.warn('Failed to retrieve Firebase ID token:', err);
+// Token is managed here to abstract storage from React components
+let cachedToken: string | null = null;
+
+export function setAccessToken(token: string | null) {
+  cachedToken = token;
+  if (token) {
+    localStorage.setItem('possd_access_token', token);
+  } else {
+    localStorage.removeItem('possd_access_token');
   }
-  return '';
+}
+
+export function getAccessToken(): string | null {
+  if (cachedToken) return cachedToken;
+  try {
+    const stored = localStorage.getItem('possd_access_token');
+    if (stored) {
+      cachedToken = stored;
+      return stored;
+    }
+  } catch (e) {
+    console.warn('Failed to read access token from local storage', e);
+  }
+  return null;
 }
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
-  const token = await getToken();
+  const token = getAccessToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -196,8 +204,9 @@ export async function checkBackendHealth(): Promise<HealthStatus> {
 }
 
 // -------------------------------------------------------------
-// DOCUMENTS API (Clean persistence abstraction with local fallback)
+// DOCUMENTS API
 // -------------------------------------------------------------
+
 export interface FetchDocumentsParams {
   page?: number;
   pageSize?: number;
@@ -205,212 +214,312 @@ export interface FetchDocumentsParams {
   status?: string;
   division?: string;
   priority?: string;
+  viewMode?: string;
   sort?: string;
   sortDirection?: 'asc' | 'desc';
 }
 
-export async function fetchDocuments(params?: FetchDocumentsParams): Promise<DocumentItem[]> {
-  try {
-    let url = '/api/documents';
-    if (params) {
-      const sp = new URLSearchParams();
-      if (params.page) sp.set('page', String(params.page));
-      if (params.pageSize) sp.set('pageSize', String(params.pageSize));
-      if (params.search) sp.set('search', params.search);
-      if (params.status && params.status !== 'All') sp.set('status', params.status);
-      if (params.division && params.division !== 'All') sp.set('division', params.division);
-      if (params.priority && params.priority !== 'All') sp.set('priority', params.priority);
-      if (params.sort) sp.set('sort', params.sort);
-      if (params.sortDirection) sp.set('sortDirection', params.sortDirection);
-      const query = sp.toString();
-      if (query) url += `?${query}`;
-    }
+export interface PaginatedDocumentsResponse {
+  documents: DocumentItem[];
+  totalCount: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
 
-    const data = await apiRequest<{ success: boolean; documents: DocumentItem[] }>(url);
-    if (data && data.success && Array.isArray(data.documents)) {
-      return data.documents;
-    }
-  } catch {
-    return getStoredDocuments();
+export async function fetchDocuments(params?: FetchDocumentsParams): Promise<DocumentItem[]> {
+  let url = '/api/documents';
+  if (params) {
+    const sp = new URLSearchParams();
+    if (params.page) sp.set('page', String(params.page));
+    if (params.pageSize) sp.set('pageSize', String(params.pageSize));
+    if (params.search) sp.set('search', params.search);
+    if (params.status && params.status !== 'ALL' && params.status !== 'All') sp.set('status', params.status);
+    if (params.division && params.division !== 'ALL' && params.division !== 'All') sp.set('division', params.division);
+    if (params.priority && params.priority !== 'ALL' && params.priority !== 'All') sp.set('priority', params.priority);
+    if (params.viewMode && params.viewMode !== 'all') sp.set('viewMode', params.viewMode);
+    if (params.sort) sp.set('sort', params.sort);
+    if (params.sortDirection) sp.set('sortDirection', params.sortDirection);
+    const query = sp.toString();
+    if (query) url += `?${query}`;
   }
-  return getStoredDocuments();
+
+  const data = await apiRequest<{ success: boolean; documents: DocumentItem[] }>(url);
+  return data.documents;
+}
+
+export async function fetchDocumentsPaginated(params: FetchDocumentsParams): Promise<PaginatedDocumentsResponse> {
+  let url = '/api/documents';
+  const sp = new URLSearchParams();
+  if (params.page) sp.set('page', String(params.page));
+  if (params.pageSize) sp.set('pageSize', String(params.pageSize));
+  if (params.search) sp.set('search', params.search);
+  if (params.status && params.status !== 'ALL' && params.status !== 'All') sp.set('status', params.status);
+  if (params.division && params.division !== 'ALL' && params.division !== 'All') sp.set('division', params.division);
+  if (params.priority && params.priority !== 'ALL' && params.priority !== 'All') sp.set('priority', params.priority);
+  if (params.viewMode && params.viewMode !== 'all') sp.set('viewMode', params.viewMode);
+  if (params.sort) sp.set('sort', params.sort);
+  if (params.sortDirection) sp.set('sortDirection', params.sortDirection);
+  const query = sp.toString();
+  if (query) url += `?${query}`;
+
+  const data = await apiRequest<{
+    success: boolean;
+    documents: DocumentItem[];
+    totalCount: number;
+    page?: number;
+    pageSize?: number;
+    totalPages?: number;
+    pagination?: {
+      page: number;
+      pageSize: number;
+      totalCount: number;
+      totalPages: number;
+    };
+  }>(url);
+
+  const totalCount = data.totalCount ?? data.pagination?.totalCount ?? data.documents.length;
+  const page = data.page ?? data.pagination?.page ?? params.page ?? 1;
+  const pageSize = data.pageSize ?? data.pagination?.pageSize ?? params.pageSize ?? 25;
+  const totalPages = data.totalPages ?? data.pagination?.totalPages ?? Math.max(1, Math.ceil(totalCount / pageSize));
+
+  return {
+    documents: data.documents || [],
+    totalCount,
+    page,
+    pageSize,
+    totalPages,
+  };
 }
 
 export async function fetchDocumentById(id: string): Promise<DocumentItem | null> {
-  try {
-    const data = await apiRequest<{ success: boolean; document: DocumentItem }>(
-      `/api/documents/${encodeURIComponent(id)}`
-    );
-    if (data && data.success && data.document) {
-      return data.document;
-    }
-  } catch {
-    const local = getStoredDocuments();
-    return local.find((d) => d.id === id || d.trackingNumber === id) || null;
-  }
-  return null;
+  const data = await apiRequest<{ success: boolean; document: DocumentItem }>(
+    `/api/documents/${encodeURIComponent(id)}`
+  );
+  return data.document;
 }
 
 export async function createDocument(doc: DocumentItem): Promise<DocumentItem> {
-  try {
-    const data = await apiRequest<{ success: boolean; document: DocumentItem }>(
-      '/api/documents',
-      {
-        method: 'POST',
-        body: JSON.stringify(doc),
-      }
-    );
-    if (data && data.success && data.document) {
-      return data.document;
+  const data = await apiRequest<{ success: boolean; document: DocumentItem }>(
+    '/api/documents',
+    {
+      method: 'POST',
+      body: JSON.stringify(doc),
     }
-  } catch (err) {
-    console.warn('[Persistence] Server write deferred, persisting locally:', err);
-  }
-  return doc;
+  );
+  return data.document;
 }
 
-export async function updateDocument(doc: DocumentItem): Promise<DocumentItem> {
-  try {
-    const data = await apiRequest<{ success: boolean; document: DocumentItem }>(
-      `/api/documents/${encodeURIComponent(doc.id)}`,
-      {
-        method: 'PUT',
-        body: JSON.stringify(doc),
-      }
-    );
-    if (data && data.success && data.document) {
-      return data.document;
+export async function updateDocument(
+  doc: DocumentItem,
+  options?: { expectedVersion?: number }
+): Promise<DocumentItem> {
+  const payload = {
+    ...doc,
+    expectedVersion:
+      options?.expectedVersion !== undefined
+        ? options.expectedVersion
+        : (doc as any).expectedVersion !== undefined
+        ? (doc as any).expectedVersion
+        : doc.version,
+  };
+  const data = await apiRequest<{ success: boolean; document: DocumentItem }>(
+    `/api/documents/${encodeURIComponent(doc.id)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(payload),
     }
-  } catch (err) {
-    console.warn('[Persistence] Server update deferred, persisting locally:', err);
-  }
-  return doc;
+  );
+  return data.document;
+}
+
+export interface BatchApiItemResult {
+  id: string;
+  trackingNumber?: string;
+  status: 'successful' | 'failed';
+  document?: DocumentItem;
+  error?: { code: string; message: string; isConflict?: boolean };
+}
+
+export interface BatchApiResponse {
+  total: number;
+  succeeded: number;
+  failed: number;
+  results: BatchApiItemResult[];
+}
+
+export async function batchUpdateDocuments(
+  updates: Array<{ id: string; data: Partial<DocumentItem>; expectedVersion?: number }>
+): Promise<BatchApiResponse> {
+  return await apiRequest<BatchApiResponse>('/api/documents/batch-update', {
+    method: 'POST',
+    body: JSON.stringify({ updates }),
+  });
+}
+
+export async function batchDeleteDocuments(
+  ids: string[]
+): Promise<{ total: number; succeeded: number; failed: number; results: Array<{ id: string; status: 'successful' | 'failed'; error?: any }> }> {
+  return await apiRequest('/api/documents/batch-delete', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  });
 }
 
 export async function deleteDocument(docId: string): Promise<void> {
-  try {
-    await apiRequest(`/api/documents/${encodeURIComponent(docId)}`, {
-      method: 'DELETE',
-    });
-  } catch (err) {
-    console.warn('[Persistence] Server delete deferred, handled locally:', err);
-  }
+  await apiRequest(`/api/documents/${encodeURIComponent(docId)}`, {
+    method: 'DELETE',
+  });
 }
 
 // -------------------------------------------------------------
 // DOCUMENT MOVEMENTS & ROUTING
 // -------------------------------------------------------------
+
 export async function fetchMovements(docId: string): Promise<any[]> {
-  try {
-    const data = await apiRequest<{ success: boolean; movements: any[] }>(
-      `/api/documents/${encodeURIComponent(docId)}/movements`
-    );
-    if (data && data.success && Array.isArray(data.movements)) {
-      return data.movements;
-    }
-  } catch {
-    const localDoc = getStoredDocuments().find((d) => d.id === docId);
-    return localDoc?.movements || [];
-  }
-  return [];
+  const data = await apiRequest<{ success: boolean; movements: any[] }>(
+    `/api/documents/${encodeURIComponent(docId)}/movements`
+  );
+  return data.movements;
 }
 
 export async function addMovement(docId: string, movement: any): Promise<any> {
-  try {
-    return await apiRequest(`/api/documents/${encodeURIComponent(docId)}/movements`, {
-      method: 'POST',
-      body: JSON.stringify(movement),
-    });
-  } catch {
-    return movement;
-  }
+  return await apiRequest(`/api/documents/${encodeURIComponent(docId)}/movements`, {
+    method: 'POST',
+    body: JSON.stringify(movement),
+  });
 }
 
 // -------------------------------------------------------------
 // DOCUMENT REMARKS
 // -------------------------------------------------------------
+
 export async function fetchRemarks(docId: string): Promise<any[]> {
-  try {
-    const data = await apiRequest<{ success: boolean; remarks: any[] }>(
-      `/api/documents/${encodeURIComponent(docId)}/remarks`
-    );
-    if (data && data.success && Array.isArray(data.remarks)) {
-      return data.remarks;
-    }
-  } catch {
-    const localDoc = getStoredDocuments().find((d) => d.id === docId);
-    return localDoc?.supervisorRemarks || [];
-  }
-  return [];
+  const data = await apiRequest<{ success: boolean; remarks: any[] }>(
+    `/api/documents/${encodeURIComponent(docId)}/remarks`
+  );
+  return data.remarks;
 }
 
 export async function addRemark(docId: string, remark: any): Promise<any> {
-  try {
-    return await apiRequest(`/api/documents/${encodeURIComponent(docId)}/remarks`, {
-      method: 'POST',
-      body: JSON.stringify(remark),
-    });
-  } catch {
-    return remark;
+  return await apiRequest(`/api/documents/${encodeURIComponent(docId)}/remarks`, {
+    method: 'POST',
+    body: JSON.stringify(remark),
+  });
+}
+
+// -------------------------------------------------------------
+// DOCUMENT CLEARANCE & EXECUTIVE DISPATCH (AUTHORITATIVE)
+// -------------------------------------------------------------
+
+export async function recordClearance(
+  docId: string,
+  clearanceData: {
+    clearanceType?: string;
+    exitTrackingNumber?: string;
+    forwardedToExternal?: string;
+    clearanceRemarks?: string;
+    isCleared?: boolean;
   }
+): Promise<{ document: DocumentItem; clearance: any }> {
+  return await apiRequest(`/api/documents/${encodeURIComponent(docId)}/clearance`, {
+    method: 'POST',
+    body: JSON.stringify(clearanceData),
+  });
+}
+
+export async function revokeClearance(
+  docId: string,
+  revokeData: { reason?: string } = {}
+): Promise<{ document: DocumentItem; clearance: any }> {
+  return await apiRequest(`/api/documents/${encodeURIComponent(docId)}/clearance`, {
+    method: 'DELETE',
+    body: JSON.stringify(revokeData),
+  });
 }
 
 // -------------------------------------------------------------
 // PERSONNEL & STAFF API
 // -------------------------------------------------------------
+
 export async function fetchStaff(): Promise<AppUserRole[]> {
-  try {
-    const data = await apiRequest<{ success: boolean; personnel?: AppUserRole[]; staff?: AppUserRole[] }>(
-      '/api/personnel'
-    );
-    if (data && data.success && (data.personnel || data.staff)) {
-      return data.personnel || data.staff || [];
-    }
-  } catch {
-    return getStoredStaffMembers();
-  }
-  return getStoredStaffMembers();
+  const data = await apiRequest<{ success: boolean; personnel?: AppUserRole[]; staff?: AppUserRole[] }>(
+    '/api/personnel'
+  );
+  return (data.personnel || data.staff || []).map((s: any) => ({
+    ...s,
+    id: String(s.id),
+  }));
 }
 
 export async function saveStaffMember(staff: AppUserRole): Promise<void> {
-  try {
-    await apiRequest('/api/personnel', {
-      method: 'POST',
-      body: JSON.stringify(staff),
-    });
-  } catch (err) {
-    console.warn('[Persistence] Staff member saved locally:', err);
-  }
+  await apiRequest('/api/personnel', {
+    method: 'POST',
+    body: JSON.stringify(staff),
+  });
+}
+
+export async function createStaffMember(staff: Partial<AppUserRole> & { password?: string }): Promise<AppUserRole> {
+  const data = await apiRequest<{ success: boolean; personnel: AppUserRole; staffMember: AppUserRole }>('/api/personnel', {
+    method: 'POST',
+    body: JSON.stringify(staff),
+  });
+  const res = data.personnel || data.staffMember;
+  return { ...res, id: String(res.id) };
+}
+
+export async function updateStaffMember(id: string | number, updates: Partial<AppUserRole> & { password?: string }): Promise<AppUserRole> {
+  const data = await apiRequest<{ success: boolean; personnel: AppUserRole; staffMember: AppUserRole }>(`/api/personnel/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(updates),
+  });
+  const res = data.personnel || data.staffMember;
+  return { ...res, id: String(res.id) };
+}
+
+export async function updateStaffCredentials(
+  id: string | number,
+  credentials: { username?: string; email?: string; status?: 'active' | 'suspended'; password?: string }
+): Promise<AppUserRole> {
+  const data = await apiRequest<{ success: boolean; personnel: AppUserRole; staffMember: AppUserRole }>(`/api/personnel/${encodeURIComponent(id)}/credentials`, {
+    method: 'PATCH',
+    body: JSON.stringify(credentials),
+  });
+  const res = data.personnel || data.staffMember;
+  return { ...res, id: String(res.id) };
+}
+
+export async function updateStaffStatus(id: string | number, status: 'active' | 'suspended'): Promise<AppUserRole> {
+  const data = await apiRequest<{ success: boolean; personnel: AppUserRole; staffMember: AppUserRole }>(`/api/personnel/${encodeURIComponent(id)}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  });
+  const res = data.personnel || data.staffMember;
+  return { ...res, id: String(res.id) };
+}
+
+export async function deleteStaffMember(id: string | number): Promise<void> {
+  await apiRequest(`/api/personnel/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
 }
 
 // -------------------------------------------------------------
 // DEPARTMENTS API
 // -------------------------------------------------------------
+
 export async function fetchDepartments(): Promise<any[]> {
-  try {
-    const data = await apiRequest<{ success: boolean; departments: any[] }>('/api/departments');
-    if (data && data.success && Array.isArray(data.departments)) {
-      return data.departments;
-    }
-  } catch {
-    return [];
-  }
-  return [];
+  const data = await apiRequest<{ success: boolean; departments: any[] }>('/api/departments');
+  return data.departments;
 }
 
 // -------------------------------------------------------------
 // DESKS API
 // -------------------------------------------------------------
+
 export async function fetchDesks(): Promise<any[]> {
-  try {
-    const data = await apiRequest<{ success: boolean; desks: any[] }>('/api/desks');
-    if (data && data.success && Array.isArray(data.desks)) {
-      return data.desks;
-    }
-  } catch {
-    return [];
-  }
-  return [];
+  const data = await apiRequest<{ success: boolean; desks: any[] }>('/api/desks');
+  return data.desks;
 }
 
 export async function createDesk(desk: {
@@ -419,110 +528,70 @@ export async function createDesk(desk: {
   code?: string;
   description?: string;
 }): Promise<any> {
-  try {
-    return await apiRequest('/api/desks', {
-      method: 'POST',
-      body: JSON.stringify(desk),
-    });
-  } catch {
-    return desk;
-  }
+  return await apiRequest('/api/desks', {
+    method: 'POST',
+    body: JSON.stringify(desk),
+  });
 }
 
 // -------------------------------------------------------------
 // DEDICATED LINKS API
 // -------------------------------------------------------------
+
 export async function fetchLinks(): Promise<any[]> {
-  try {
-    const data = await apiRequest<{ success: boolean; links: any[] }>('/api/links');
-    if (data && data.success && Array.isArray(data.links)) {
-      return data.links;
-    }
-  } catch {
-    try {
-      const stored = localStorage.getItem('possd_dedicated_links');
-      if (stored) return JSON.parse(stored);
-    } catch {}
-  }
-  return [];
+  const data = await apiRequest<{ success: boolean; links: any[] }>('/api/links');
+  return data.links;
 }
 
 export async function saveLinks(links: any[]): Promise<void> {
-  try {
-    await apiRequest('/api/links', {
-      method: 'POST',
-      body: JSON.stringify(links),
-    });
-  } catch (err) {
-    console.warn('[Persistence] Links saved to local storage:', err);
-  }
+  await apiRequest('/api/links', {
+    method: 'POST',
+    body: JSON.stringify(links),
+  });
 }
 
 export async function updateLink(id: string, link: any): Promise<any> {
-  try {
-    return await apiRequest(`/api/links/${encodeURIComponent(id)}`, {
-      method: 'PUT',
-      body: JSON.stringify(link),
-    });
-  } catch {
-    return link;
-  }
+  return await apiRequest(`/api/links/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(link),
+  });
 }
 
 export async function deleteLink(id: string): Promise<void> {
-  try {
-    await apiRequest(`/api/links/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    });
-  } catch (err) {
-    console.warn('[Persistence] Link deletion handled locally:', err);
-  }
+  await apiRequest(`/api/links/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
 }
 
 // -------------------------------------------------------------
 // SLA RULES & CONFIG API
 // -------------------------------------------------------------
+
 export async function fetchSlaConfig(): Promise<any> {
-  try {
-    const data = await apiRequest<{ success: boolean; config: any }>('/api/sla/config');
-    if (data && data.success && data.config) {
-      return data.config;
-    }
-  } catch {
-    return null;
-  }
-  return null;
+  const data = await apiRequest<{ success: boolean; config: any }>('/api/sla/config');
+  return data.config;
 }
 
 export async function saveSlaConfig(config: any): Promise<void> {
-  try {
-    await apiRequest('/api/sla/config', {
-      method: 'POST',
-      body: JSON.stringify(config),
-    });
-  } catch (err) {
-    console.warn('[Persistence] SLA config saved locally:', err);
-  }
+  await apiRequest('/api/sla/config', {
+    method: 'POST',
+    body: JSON.stringify(config),
+  });
 }
 
 // -------------------------------------------------------------
 // DASHBOARD SUMMARY API
 // -------------------------------------------------------------
+
 export async function fetchDashboardSummary(): Promise<any> {
-  try {
-    const data = await apiRequest<{ success: boolean; summary: any }>('/api/dashboard/summary');
-    if (data && data.success && data.summary) {
-      return data.summary;
-    }
-  } catch {
-    return null;
-  }
-  return null;
+  const data = await apiRequest<{ success: boolean; summary: any }>('/api/dashboard/summary');
+  return data.summary;
 }
 
 // -------------------------------------------------------------
 // AUDIT LOGS
 // -------------------------------------------------------------
+
 import { createAuditEvent, recordGlobalAudit, getGlobalAuditLogs } from './audit';
 import { AuditActionType, AuditEventRecord } from '../types';
 
@@ -576,9 +645,86 @@ export async function logAudit(
       method: 'POST',
       body: JSON.stringify(event),
     });
-  } catch {
-    // Non-blocking audit log for backend synchronization
+  } catch (err) {
+    console.error('Failed to sync audit log to backend:', err);
   }
+}
+
+// -------------------------------------------------------------
+// AUTHENTICATION API
+// -------------------------------------------------------------
+
+export async function loginWithCredentials(email: string, password: string):Promise<{token: string, user: AppUserRole}> {
+  const res = await apiRequest<{success: boolean, token: string, user: AppUserRole}>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password })
+  });
+  if (res.success && res.token && res.user) {
+    setAccessToken(res.token);
+    return { token: res.token, user: res.user };
+  }
+  throw new Error('Invalid login response');
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await apiRequest('/api/auth/logout', { method: 'POST' });
+  } catch (e) {
+    console.warn('Backend logout failed or unavailable', e);
+  } finally {
+    setAccessToken(null);
+  }
+}
+
+export async function fetchCurrentUser(): Promise<AppUserRole | null> {
+  if (!getAccessToken()) return null;
+  
+  try {
+    const res = await apiRequest<{success: boolean, user: AppUserRole}>('/api/auth/me', {
+      method: 'GET'
+    });
+    if (res.success && res.user) {
+      return res.user;
+    }
+  } catch (e) {
+    console.warn('Failed to fetch current user, token may be invalid', e);
+    setAccessToken(null);
+  }
+  return null;
+}
+
+// -------------------------------------------------------------
+// CODEBASE EXPORT & VERIFICATION API
+// -------------------------------------------------------------
+
+export interface CodebaseBundleResponse {
+  fileCount: number;
+  totalSize: number;
+  timestamp: string;
+  rawCodebase: string;
+  fullPrompt: string;
+  filesSummary: { path: string; size: number }[];
+}
+
+export async function fetchCodebaseBundle(): Promise<CodebaseBundleResponse> {
+  const data = await apiRequest<{
+    success: boolean;
+    fileCount: number;
+    totalSize: number;
+    timestamp: string;
+    rawCodebase: string;
+    fullPrompt: string;
+    filesSummary: { path: string; size: number }[];
+  }>('/api/codebase');
+
+  return {
+    fileCount: data.fileCount,
+    totalSize: data.totalSize,
+    timestamp: data.timestamp,
+    rawCodebase: data.rawCodebase,
+    fullPrompt: data.fullPrompt,
+    filesSummary: data.filesSummary || [],
+  };
 }
 
 export { recordGlobalAudit, getGlobalAuditLogs };

@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { DocumentItem, TimeInDeskConfig, RegistryDropdownOptions, generatePOSSDTrackingNumber } from '../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { DocumentItem, TimeInDeskConfig, RegistryDropdownOptions, generatePOSSDTrackingNumber, AppUserRole, DEFAULT_REGISTRY_DROPDOWN_OPTIONS } from '../types';
 import { generateEntityId, reconcileDocumentIntegrity } from '../lib/workflow';
 import { PossdLogo } from './PossdLogo';
-import { PlusCircle, Clock, Hash, Building2, User, Send, Inbox, FileText, AlertTriangle, Timer, Link2, ExternalLink, CheckCircle2, Tag, RefreshCw, AlertCircle } from 'lucide-react';
+import { PlusCircle, Clock, Hash, Building2, User, Send, Inbox, FileText, AlertTriangle, Timer, Link2, ExternalLink, CheckCircle2, Tag, RefreshCw, AlertCircle, ShieldCheck, UserCheck, Edit3 } from 'lucide-react';
 import { getDivisionThreshold, DEFAULT_TIME_IN_DESK_CONFIG } from '../lib/timeInDesk';
+import { hasSupervisorPermissions } from '../mockData';
 
 interface IncomingDocumentModalProps {
   isOpen: boolean;
@@ -12,7 +13,7 @@ interface IncomingDocumentModalProps {
   currentUser?: { name?: string; role?: string; division?: string } | null;
   availableDivisions?: string[];
   dropdownOptions?: RegistryDropdownOptions;
-  staffList?: { name: string }[];
+  staffList?: AppUserRole[];
   timeInDeskConfig?: TimeInDeskConfig;
   existingDocuments?: DocumentItem[];
 }
@@ -38,14 +39,71 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
   availableDivisions,
   dropdownOptions,
   timeInDeskConfig,
-  staffList,
+  staffList = [],
   existingDocuments = [],
 }) => {
-  const divisionList = availableDivisions && availableDivisions.length > 0 ? availableDivisions : DIVISIONS;
-  
-  const documentTypeList = dropdownOptions?.documentTypes || [];
-  const communicationTypeList = dropdownOptions?.communicationTypes || [];
-  const reportTypeList = dropdownOptions?.reportTypes || [];
+  const documentTypeList = (dropdownOptions?.documentTypes && dropdownOptions.documentTypes.length > 0)
+    ? dropdownOptions.documentTypes
+    : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.documentTypes;
+
+  const communicationTypeList = (dropdownOptions?.communicationTypes && dropdownOptions.communicationTypes.length > 0)
+    ? dropdownOptions.communicationTypes
+    : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.communicationTypes;
+
+  const reportTypeList = (dropdownOptions?.reportTypes && dropdownOptions.reportTypes.length > 0)
+    ? dropdownOptions.reportTypes
+    : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.reportTypes;
+
+  const originatingAgencyList = (dropdownOptions?.originatingAgencies && dropdownOptions.originatingAgencies.length > 0)
+    ? dropdownOptions.originatingAgencies
+    : (DEFAULT_REGISTRY_DROPDOWN_OPTIONS.originatingAgencies || [
+        'Central Records & Receiving Desk',
+        'Executive Office of the Manager',
+        'Administrative & General Services',
+        'Finance & Budget Division',
+        'Planning & Quality Assurance',
+        'Legal & Regulatory Affairs',
+        'Office of the Regional Director',
+        'Department of Transportation',
+        'Civil Service Commission',
+        'Department of Budget and Management',
+        'External Contractor / Supplier',
+      ]);
+
+  const divisionList = (dropdownOptions?.targetDivisions && dropdownOptions.targetDivisions.length > 0)
+    ? dropdownOptions.targetDivisions
+    : (availableDivisions && availableDivisions.length > 0 ? availableDivisions : DIVISIONS);
+
+  // Filter enrolled personnel with supervisor permissions
+  const enrolledSupervisors = useMemo(() => {
+    return (staffList || []).filter(
+      (s) => s.status !== 'suspended' && hasSupervisorPermissions(s)
+    );
+  }, [staffList]);
+
+  // Active focal persons: If system admin designated specific supervisor focal persons in dropdownOptions.focalPersons,
+  // use those (validated against supervisor permissions); otherwise include all enrolled supervisors.
+  const activeFocalSupervisors = useMemo(() => {
+    if (dropdownOptions?.focalPersons && dropdownOptions.focalPersons.length > 0) {
+      // Pick enrolled supervisors matching the configured focalPersons
+      const matched = enrolledSupervisors.filter((s) => dropdownOptions.focalPersons!.includes(s.name));
+      if (matched.length > 0) return matched;
+      // If configured focal persons were saved by name and supervisors exist
+      const namedMatches = dropdownOptions.focalPersons.map((name) => {
+        const found = enrolledSupervisors.find((s) => s.name === name);
+        return found || { id: name, name, role: 'Supervisor' as const, division: 'Operations & Emergency', username: name.toLowerCase().replace(/\s+/g, '.') };
+      });
+      return namedMatches;
+    }
+    if (enrolledSupervisors.length > 0) {
+      return enrolledSupervisors;
+    }
+    // Baseline fallback with supervisor role if no staff enrolled yet
+    return [
+      { id: 'focal-1', name: 'Mary Flor Aquino', role: 'Supervisor' as const, division: 'Operations & Emergency', username: 'mfaquino' },
+      { id: 'focal-2', name: 'Aubrey Camille Cabreras', role: 'Supervisor' as const, division: 'Planning & QA', username: 'acabreras' },
+    ];
+  }, [enrolledSupervisors, dropdownOptions?.focalPersons]);
 
   // Direction: Incoming vs Outgoing
   const [direction, setDirection] = useState<'Incoming' | 'Outgoing'>('Incoming');
@@ -53,20 +111,50 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
   const [trackingNumber, setTrackingNumber] = useState('');
   const [title, setTitle] = useState('');
   const [documentType, setDocumentType] = useState<string>(documentTypeList[0] || 'Simple Transaction');
-  const [communicationType, setCommunicationType] = useState<string>(dropdownOptions?.communicationTypes?.[0] || 'Memorandum');
-  const [reportType, setReportType] = useState<string>(dropdownOptions?.reportTypes?.[0] || 'Inspection Report');
-  const [originDepartment, setOriginDepartment] = useState('');
+  const [communicationType, setCommunicationType] = useState<string>(communicationTypeList[0] || 'Memorandum');
+  const [reportType, setReportType] = useState<string>(reportTypeList[0] || 'Inspection Report');
+  
+  // Originating Dept / Agency state with option for custom typing
+  const [originDepartment, setOriginDepartment] = useState(originatingAgencyList[0] || '');
+  const [isCustomOriginAgency, setIsCustomOriginAgency] = useState(false);
+  const [customOriginInput, setCustomOriginInput] = useState('');
+
   const [dateReceived, setDateReceived] = useState('');
   const [timeReceived, setTimeReceived] = useState('');
   const [targetDivision, setTargetDivision] = useState(divisionList[0] || 'Administration');
-  const focalPersons = ['Mary Flor Aquino', 'Aubrey Camille Cabreras'];
-  const [responsiblePerson, setResponsiblePerson] = useState(focalPersons[0]);
+  
+  // Focal Person state (Selected among enrolled personnel with supervisor permissions)
+  const [responsiblePerson, setResponsiblePerson] = useState(activeFocalSupervisors[0]?.name || 'Mary Flor Aquino');
   const [priority, setPriority] = useState<DocumentItem['priority']>('Routine');
   
   const [fileLink, setFileLink] = useState('');
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+
+  // Update default selections when options change or modal opens
+  useEffect(() => {
+    if (isOpen) {
+      if (documentTypeList.length > 0 && !documentTypeList.includes(documentType)) {
+        setDocumentType(documentTypeList[0]);
+      }
+      if (communicationTypeList.length > 0 && !communicationTypeList.includes(communicationType)) {
+        setCommunicationType(communicationTypeList[0]);
+      }
+      if (reportTypeList.length > 0 && !reportTypeList.includes(reportType)) {
+        setReportType(reportTypeList[0]);
+      }
+      if (!isCustomOriginAgency && originatingAgencyList.length > 0 && !originatingAgencyList.includes(originDepartment)) {
+        setOriginDepartment(originatingAgencyList[0]);
+      }
+      if (divisionList.length > 0 && !divisionList.includes(targetDivision)) {
+        setTargetDivision(divisionList[0]);
+      }
+      if (activeFocalSupervisors.length > 0 && !activeFocalSupervisors.some(s => s.name === responsiblePerson)) {
+        setResponsiblePerson(activeFocalSupervisors[0].name);
+      }
+    }
+  }, [isOpen, documentTypeList, communicationTypeList, reportTypeList, originatingAgencyList, divisionList, activeFocalSupervisors]);
 
   // Clock tick to automatically show current date and time upon opening
   useEffect(() => {
@@ -122,7 +210,8 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       setValidationError('Document title is required.');
       return;
     }
-    if (!originDepartment.trim()) {
+    const effectiveOrigin = isCustomOriginAgency ? customOriginInput.trim() : originDepartment.trim();
+    if (!effectiveOrigin) {
       setValidationError(direction === 'Outgoing' ? 'Destination / recipient entity is required.' : 'Originating department / agency is required.');
       return;
     }
@@ -144,7 +233,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
         documentType,
         communicationType,
         reportType,
-        originDepartment: originDepartment.trim(),
+        originDepartment: effectiveOrigin,
         dateReceived,
         timeReceived,
         targetDivision,
@@ -376,18 +465,55 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1 flex items-center gap-1.5">
-                <Building2 className="w-3.5 h-3.5 text-slate-500" />
-                Originating Dept / Agency <span className="text-rose-500">*</span>
-              </label>
-              <input
-                type="text"
-                required
-                value={originDepartment}
-                onChange={(e) => setOriginDepartment(e.target.value)}
-                placeholder="e.g. Finance Division"
-                className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-              />
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <Building2 className="w-3.5 h-3.5 text-slate-500" />
+                  Originating Dept / Agency <span className="text-rose-500">*</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCustomOriginAgency(!isCustomOriginAgency);
+                    if (!isCustomOriginAgency) {
+                      setCustomOriginInput(originDepartment || '');
+                    }
+                  }}
+                  className="text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  {isCustomOriginAgency ? 'Select Preset Agency' : '+ Type Custom'}
+                </button>
+              </div>
+              {isCustomOriginAgency ? (
+                <input
+                  type="text"
+                  required
+                  value={customOriginInput}
+                  onChange={(e) => setCustomOriginInput(e.target.value)}
+                  placeholder="Type specific originating entity or agency..."
+                  className="w-full text-sm rounded-xl border border-blue-400 dark:border-blue-600 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                />
+              ) : (
+                <select
+                  value={originDepartment}
+                  onChange={(e) => {
+                    if (e.target.value === '__custom__') {
+                      setIsCustomOriginAgency(true);
+                      setCustomOriginInput('');
+                    } else {
+                      setOriginDepartment(e.target.value);
+                    }
+                  }}
+                  className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 cursor-pointer"
+                >
+                  {originatingAgencyList.map((agency) => (
+                    <option key={agency} value={agency}>
+                      {agency}
+                    </option>
+                  ))}
+                  <option value="__custom__">+ Other / Enter Custom Agency...</option>
+                </select>
+              )}
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -406,19 +532,31 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
           </div>
 
           <div>
-             <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-               Focal Person <span className="text-rose-500">*</span>
-             </label>
-             <select
+            <div className="flex items-center justify-between mb-1">
+              <label htmlFor="responsible-person-input" className="block text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                <UserCheck className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                Focal Person <span className="text-rose-500">*</span>
+              </label>
+              <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 px-1.5 py-0.5 rounded-md flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3" />
+                Supervisor Personnel Only
+              </span>
+            </div>
+            <select
               id="responsible-person-input"
               value={responsiblePerson}
               onChange={(e) => setResponsiblePerson(e.target.value)}
               className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 cursor-pointer"
             >
-              {focalPersons.map((person) => (
-                <option key={person} value={person}>{person}</option>
+              {activeFocalSupervisors.map((person) => (
+                <option key={person.id || person.name} value={person.name}>
+                  {person.name} — {person.role} ({person.division})
+                </option>
               ))}
             </select>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+              Selected among enrolled personnel with supervisor permissions.
+            </p>
           </div>
 {/* Priority & Current Desk */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -458,7 +596,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
                 <Link2 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
                 Attached File / Cloud Document Link <span className="text-slate-400 font-normal">(Optional)</span>
               </label>
-              <span className="text-[11px] text-slate-500 dark:text-slate-400">Google Drive, OneDrive, PDF or intranet link</span>
+              <span className="text-[11px] text-slate-500 dark:text-slate-400">Cloud Storage, PDF or intranet link</span>
             </div>
             <div className="relative">
               <input
@@ -466,7 +604,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
                 id="file-link-input"
                 value={fileLink}
                 onChange={(e) => setFileLink(e.target.value)}
-                placeholder="Paste link here (e.g., https://drive.google.com/file/d/... or https://...)"
+                placeholder="Paste link here (e.g., https://storage.agency.gov/file/... or https://...)"
                 className="w-full text-sm rounded-lg border border-slate-300 dark:border-slate-700 pl-9 pr-24 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
               />
               <Link2 className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />

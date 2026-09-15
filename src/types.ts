@@ -48,7 +48,7 @@ export interface DocumentItem {
   currentStatus: 'Incoming Logged' | 'Under Review' | 'Supervisor Comment Needed' | 'Complied / Ready for Clearance' | 'Cleared for Out' | 'Dispatched / Completed';
   currentLocation: string; // e.g. "Records Receiving Desk", "Admin Office Room 2", "Accounting Section"
   currentCustodian: string; // who holds it physically right now
-  fileLink?: string; // Optional external URL or cloud file link (Google Drive, OneDrive, PDF, etc.)
+  fileLink?: string; // Optional external URL or cloud file link (Cloud Storage, OneDrive, PDF, etc.)
   movements: InternalMovement[];
   supervisorRemarks: SupervisorRemark[];
   managerClearance: ManagerClearance;
@@ -158,18 +158,92 @@ export type UserRoleType =
   | 'Supervisor'
   | 'Division Manager'
   | 'Department Manager'
-  | 'System Admin'
-  | string;
+  | 'System Admin';
 
 export interface RegistryDropdownOptions {
   roles: string[];
   departments: string[];
   desks: string[];
-  documentTypes: string[];
-  communicationTypes: string[];
-  reportTypes: string[];
+  documentTypes: string[]; // Transaction Types (e.g. Simple Transaction, Complex Transaction)
+  transactionTypes?: string[]; // Alias for Transaction Types
+  communicationTypes: string[]; // Communication Types (e.g. Memorandum, Letter, Endorsement)
+  reportTypes: string[]; // Report / Document Types (e.g. Inspection Report, Audit Report)
+  originatingAgencies?: string[]; // Originating Dept / Agency options
+  targetDivisions?: string[]; // Forward To / Target Division options
+  focalPersons?: string[]; // Designated focal persons selected among enrolled supervisors
+  priorities: string[];
   personnel: string[];
 }
+
+export const DEFAULT_REGISTRY_DROPDOWN_OPTIONS: RegistryDropdownOptions = {
+  roles: ['Receiving', 'Staff', 'Supervisor', 'Division Manager', 'Department Manager', 'System Admin'],
+  departments: [
+    'Administrative Section',
+    'Billing & Collections Section',
+    'Finance & Budget Division',
+    'Legal & Regulatory Affairs',
+    'Safety & Environmental Division',
+    'Central Records & Receiving Desk',
+  ],
+  desks: [
+    'Records Receiving Counter A',
+    'Finance Evaluation Bay 1',
+    'Planning Drafting Bay 2',
+    'Central Manager Suite 101',
+    'Executive Review Table',
+    'Central Registry Systems Hub',
+  ],
+  documentTypes: [
+    'Simple Transaction',
+    'Complex Transaction',
+    'Highly Technical Transaction',
+    'Memorandum',
+    'Letter',
+    'Indorsement',
+    'Report',
+  ],
+  communicationTypes: [
+    'Memorandum',
+    'Letter',
+    'Endorsement',
+    'Office Order',
+    'Special Order',
+    'Advisory',
+    'Circular',
+    'Notice',
+  ],
+  reportTypes: [
+    'Inspection Report',
+    'Audit Report',
+    'Incident Report',
+    'Progress Report',
+    'Clearance Slip',
+    'Financial Statement',
+    'Accomplishment Report',
+  ],
+  originatingAgencies: [
+    'Office of the Regional Director',
+    'Regional Trial Court',
+    'Department of Transportation',
+    'Civil Service Commission',
+    'Department of Budget and Management',
+    'Commission on Audit',
+    'Internal POSSD Division',
+    'External Contractor / Supplier',
+  ],
+  targetDivisions: [
+    'Administrative Section',
+    'Billing & Collections Section',
+    'Finance & Budget Division',
+    'Legal & Regulatory Affairs',
+    'Safety & Environmental Division',
+    'Central Records & Receiving Desk',
+    'Executive Office of the Manager',
+  ],
+  focalPersons: ['Mary Flor Aquino', 'Aubrey Camille Cabreras'],
+  priorities: ['Routine', 'Urgent', 'Rush'],
+  personnel: [],
+};
 
 /**
  * User Identity: Core identifiers
@@ -261,10 +335,10 @@ export interface DedicatedLinkItem {
   id: string;
   title: string;
   url: string;
-  category: 'Google Drive' | 'Official Files' | 'Portals & Systems' | 'Reference Guidelines';
+  category: 'Cloud Storage' | 'Official Files' | 'Portals & Systems' | 'Reference Guidelines';
   description?: string;
   targetDivision?: string;
-  iconType?: 'drive' | 'file' | 'link' | 'folder';
+  iconType?: 'storage' | 'file' | 'link' | 'folder';
   addedBy: string;
   addedAt: string;
   isPinned?: boolean;

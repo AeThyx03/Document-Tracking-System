@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
-import { Shield, Sparkles, LogIn, UserCheck, ChevronRight } from 'lucide-react';
+import { Shield, Sparkles, LogIn } from 'lucide-react';
 import { AppUserRole } from '../types';
 import { PossdLogo } from './PossdLogo';
-import { googleSignIn } from '../lib/firebase';
+import * as api from '../lib/api';
 
 interface LoginModalProps {
   isOpen: boolean;
   onClose?: () => void;
-  staffList?: AppUserRole[];
+  staffList?: AppUserRole[]; // Note: retained for API signature compatibility, but bypassed in real login
   currentUser: AppUserRole | null;
   onLoginSuccess: (user: AppUserRole) => void;
 }
@@ -15,36 +15,40 @@ interface LoginModalProps {
 export const LoginModal: React.FC<LoginModalProps> = ({
   isOpen,
   onClose,
-  staffList = [],
   currentUser,
   onLoginSuccess,
 }) => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleGoogleLogin = async () => {
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) {
+      setErrorMessage('Please enter both email and password.');
+      return;
+    }
+
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const result = await googleSignIn({ staySignedIn: true });
-      if (result) {
-        setIsLoading(false);
+      const result = await api.loginWithCredentials(email, password);
+      if (result && result.user) {
+        onLoginSuccess(result.user);
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to sign in with Google');
+      setErrorMessage(err.message || 'Invalid email or password.');
+    } finally {
       setIsLoading(false);
     }
   };
 
-  const handleStaffSelect = (staff: AppUserRole) => {
-    onLoginSuccess(staff);
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 dark:bg-black/80 backdrop-blur-xs animate-in fade-in">
-      <div className="bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-[460px] overflow-hidden flex flex-col relative max-h-[90vh]">
+      <div className="bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-[400px] overflow-hidden flex flex-col relative max-h-[90vh]">
         <div className="absolute top-0 inset-x-0 h-1.5 bg-gradient-to-r from-blue-600 to-indigo-500 z-10" />
 
         <div className="p-6 sm:p-8 flex flex-col items-center text-center space-y-4 overflow-y-auto">
@@ -81,11 +85,34 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               )}
             </div>
           ) : (
-            <div className="w-full space-y-4 pt-1">
+            <form onSubmit={handleLogin} className="w-full space-y-4 pt-1">
+              <div className="space-y-3">
+                <div>
+                  <input
+                    type="text"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="Official Email or Username"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm text-slate-900 dark:text-white"
+                    disabled={isLoading}
+                    required
+                  />
+                </div>
+                <div>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Password"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm text-slate-900 dark:text-white"
+                    disabled={isLoading}
+                    required
+                  />
+                </div>
+              </div>
+
               <button
-                type="button"
-                id="btn-google-sign-in"
-                onClick={handleGoogleLogin}
+                type="submit"
                 disabled={isLoading}
                 className="w-full relative group overflow-hidden bg-slate-900 dark:bg-white text-white dark:text-slate-900 px-6 py-3.5 rounded-2xl font-semibold text-sm sm:text-[15px] flex items-center justify-center gap-2.5 transition-all shadow-md hover:shadow-lg disabled:opacity-70 disabled:cursor-not-allowed cursor-pointer"
               >
@@ -95,55 +122,20 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 ) : (
                   <>
                     <LogIn className="w-5 h-5" />
-                    <span>Sign in with Google</span>
+                    <span>Sign In</span>
                   </>
                 )}
               </button>
 
-              {staffList && staffList.length > 0 && (
-                <div className="w-full pt-2 border-t border-slate-200 dark:border-slate-800 text-left">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                      Enrolled Personnel Roster ({staffList.length})
-                    </span>
-                    <span className="text-[10px] text-slate-400 dark:text-slate-500">Quick Select</span>
-                  </div>
-                  <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
-                    {staffList.map((staff) => (
-                      <button
-                        key={staff.id}
-                        type="button"
-                        onClick={() => handleStaffSelect(staff)}
-                        className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 hover:bg-blue-50 dark:hover:bg-slate-800 hover:border-blue-300 dark:hover:border-blue-700 transition-all flex items-center justify-between text-left group cursor-pointer"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="w-7 h-7 rounded-lg bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 flex items-center justify-center text-xs font-bold shrink-0">
-                            {staff.avatarInitials || (staff.name ? staff.name.slice(0, 2).toUpperCase() : 'ST')}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                              {staff.name}
-                            </div>
-                            <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
-                              {staff.role} &bull; {staff.division}
-                            </div>
-                          </div>
-                        </div>
-                        <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors shrink-0" />
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="flex items-center gap-2 text-xs font-medium text-slate-400 dark:text-slate-500 justify-center pt-1">
+              <div className="flex items-center gap-2 text-xs font-medium text-slate-400 dark:text-slate-500 justify-center pt-2">
                 <Sparkles className="w-3.5 h-3.5 text-blue-500" />
-                <span>Secure Multi-User Role Based Access Control</span>
+                <span>Secure Role Based Access Control</span>
               </div>
-            </div>
+            </form>
           )}
         </div>
       </div>
     </div>
   );
 };
+

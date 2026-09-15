@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+FULL_CODEBASE_CONSOLIDATED.md
+codebase-export.txt

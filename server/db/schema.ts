@@ -6,7 +6,6 @@ import { boolean, integer, pgTable, serial, text, timestamp, jsonb, index } from
 // -------------------------------------------------------------
 export const users = pgTable('users', {
   id: serial('id').primaryKey(),
-  uid: text('uid').unique(), // Firebase Auth UID or external identity
   email: text('email').notNull().unique(),
   username: text('username').unique(),
   passwordHash: text('password_hash'), // Never stored plaintext
@@ -31,7 +30,6 @@ export const personnel = pgTable('personnel', {
   username: text('username').notNull().unique(),
   status: text('status').default('active'), // 'active' | 'suspended'
   lastLogin: timestamp('last_login'),
-  firebaseUid: text('firebase_uid'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
 });
@@ -168,21 +166,27 @@ export const documentRemarks = pgTable('document_remarks', {
 });
 
 // -------------------------------------------------------------
-// 7. MANAGER CLEARANCES (1-to-1 Normalized Clearance Records)
+// 7. MANAGER CLEARANCES (Authoritative Normalized Clearance Records)
 // -------------------------------------------------------------
 export const managerClearances = pgTable('manager_clearances', {
   id: serial('id').primaryKey(),
   documentId: text('document_id').references(() => documents.id, { onDelete: 'cascade' }).notNull().unique(),
-  isCleared: boolean('is_cleared').notNull().default(true),
-  clearedBy: text('cleared_by').notNull(),
+  isCleared: boolean('is_cleared').notNull().default(false),
+  clearedBy: text('cleared_by'),
   clearedByUserId: integer('cleared_by_user_id').references(() => users.id, { onDelete: 'set null' }),
   clearedByPersonnelId: integer('cleared_by_personnel_id').references(() => personnel.id, { onDelete: 'set null' }),
-  clearedAt: timestamp('cleared_at').notNull().defaultNow(),
+  clearedAt: timestamp('cleared_at'),
   clearanceType: text('clearance_type'),
   exitTrackingNumber: text('exit_tracking_number'),
   forwardedToExternal: text('forwarded_to_external'),
   clearanceRemarks: text('clearance_remarks'),
   createdAt: timestamp('created_at').defaultNow(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+}, (table) => {
+  return {
+    docIdIdx: index('idx_mc_document_id').on(table.documentId),
+    docClearedIdx: index('idx_mc_doc_cleared').on(table.documentId, table.isCleared),
+  };
 });
 
 // -------------------------------------------------------------
@@ -317,5 +321,20 @@ export const desksRelations = relations(desks, ({ one }) => ({
   department: one(departments, {
     fields: [desks.departmentId],
     references: [departments.id],
+  }),
+}));
+
+export const managerClearancesRelations = relations(managerClearances, ({ one }) => ({
+  document: one(documents, {
+    fields: [managerClearances.documentId],
+    references: [documents.id],
+  }),
+  clearedByUser: one(users, {
+    fields: [managerClearances.clearedByUserId],
+    references: [users.id],
+  }),
+  clearedByPersonnel: one(personnel, {
+    fields: [managerClearances.clearedByPersonnelId],
+    references: [personnel.id],
   }),
 }));

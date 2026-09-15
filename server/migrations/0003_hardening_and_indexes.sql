@@ -18,11 +18,11 @@ INSERT INTO desks (name, code, description)
 VALUES 
   ('Central Records & Receiving Desk', 'RECV', 'Central entry point for all incoming and outgoing mail/documents'),
   ('Legal Review Desk', 'LEGAL', 'Legal & Regulatory Affairs document evaluation station'),
-  ('Executive Office of the Manager', 'EXEC', 'Port Manager and Executive Director action desk'),
+  ('Executive Office of the Manager', 'EXEC', 'Executive Director and Manager action desk'),
   ('Finance & Budget Desk', 'FIN', 'Accounting, budget evaluation and disbursement station'),
   ('Administrative & General Services Desk', 'ADMIN', 'HR and records maintenance desk'),
   ('Planning & Quality Assurance Desk', 'PLAN', 'Planning, compliance and quality standards station'),
-  ('Operations & Emergency Management Desk', 'OPS', 'Port operations and marine traffic desk'),
+  ('Operations Desk', 'OPS', 'Operations workflow and monitoring desk'),
   ('Information Technology Desk', 'IT', 'Systems and communications desk')
 ON CONFLICT (name) DO NOTHING;
 

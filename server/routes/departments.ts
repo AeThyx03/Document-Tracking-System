@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../db/index.ts';
 import { departments } from '../db/schema.ts';
 import { sendApiSuccess, sendApiError } from '../middleware/errorHandler.ts';
+import { authorizeSettingsManagement } from '../middleware/authorize.ts';
 
 export const departmentsRouter = Router();
 
@@ -14,7 +15,7 @@ departmentsRouter.get('/departments', async (req, res) => {
   }
 });
 
-departmentsRouter.post('/departments', async (req, res) => {
+departmentsRouter.post('/departments', authorizeSettingsManagement, async (req, res) => {
   try {
     const { name, code, description } = req.body;
     if (!name || typeof name !== 'string') {

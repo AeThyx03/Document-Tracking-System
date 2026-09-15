@@ -1,9 +1,10 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { optionalAuth, requireAuth } from "./server/middleware/auth.ts";
+import { requireAuth } from "./server/middleware/auth.ts";
 import { errorHandler } from "./server/middleware/errorHandler.ts";
 import { healthRouter } from "./server/routes/health.ts";
+import { authRouter } from "./server/routes/auth.ts";
 import { documentsRouter } from "./server/routes/documents.ts";
 import { personnelRouter } from "./server/routes/personnel.ts";
 import { departmentsRouter } from "./server/routes/departments.ts";
@@ -12,7 +13,9 @@ import { slaRouter } from "./server/routes/sla.ts";
 import { desksRouter } from "./server/routes/desks.ts";
 import { dashboardRouter } from "./server/routes/dashboard.ts";
 import { auditRouter } from "./server/routes/audit.ts";
+import { codebaseRouter } from "./server/routes/codebase.ts";
 import { createAuditLog } from "./server/services/auditService.ts";
+import { validateJwtConfiguration } from "./server/config/jwt.ts";
 
 const app = express();
 const PORT = 3000;
@@ -28,8 +31,12 @@ app.use("/api", healthRouter);
 // -------------------------------------------------------------
 // 2. POSSD AUTHORITATIVE POSTGRESQL API ROUTES
 // -------------------------------------------------------------
-// Apply auth (optionalAuth decodes user if token present, allowing seamless frontend interaction)
-app.use("/api", optionalAuth);
+
+// Authentication endpoints
+app.use("/api", authRouter);
+
+// Apply strict auth
+app.use("/api", requireAuth);
 
 app.use("/api", documentsRouter);
 app.use("/api", personnelRouter);
@@ -38,23 +45,27 @@ app.use("/api", linksRouter);
 app.use("/api", desksRouter);
 app.use("/api", dashboardRouter);
 app.use("/api", auditRouter);
+app.use("/api", codebaseRouter);
 app.use("/api", slaRouter);
-app.use("/api/sla", slaRouter);
 
 // POST /api/audit - Saves directly to PostgreSQL audit_logs table
 app.post("/api/audit", async (req: any, res) => {
   try {
-    const { action, docId, user, previousValue, newValue } = req.body;
+    const { action, docId, previousValue, newValue } = req.body;
     await createAuditLog({
-      userId: user || req.user?.uid || null,
+      userId: req.user?.id ? String(req.user.id) : null,
       action: action || 'AUDIT_EVENT',
       entityType: 'document',
       entityId: docId || null,
       oldValue: previousValue ? { value: previousValue } : null,
       newValue: newValue ? { value: newValue } : null,
-      metadata: { source: 'client_api' }
+      metadata: {
+        source: 'client_api',
+        actorEmail: req.user?.email,
+        actorRole: req.user?.role,
+        actorName: req.user?.name,
+      }
     });
-
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ success: false, error: 'AUDIT_ERROR', message: err.message });
@@ -68,6 +79,9 @@ app.use(errorHandler);
 // 3. VITE SPA / STATIC ASSET SERVING
 // -------------------------------------------------------------
 async function startServer() {
+  // Fail fast immediately if authentication configuration is invalid
+  validateJwtConfiguration();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

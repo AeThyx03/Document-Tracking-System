@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import { dedicatedLinks } from '../db/schema.ts';
 import { sendApiSuccess, sendApiError } from '../middleware/errorHandler.ts';
+import { authorizeSettingsManagement } from '../middleware/authorize.ts';
 
 export const linksRouter = Router();
 
@@ -15,7 +16,7 @@ linksRouter.get('/links', async (req, res) => {
   }
 });
 
-linksRouter.post('/links', async (req, res) => {
+linksRouter.post('/links', authorizeSettingsManagement, async (req, res) => {
   try {
     // Array of links
     if (Array.isArray(req.body)) {
@@ -87,7 +88,7 @@ linksRouter.post('/links', async (req, res) => {
 });
 
 // PUT /api/links/:id - Update link
-linksRouter.put('/links/:id', async (req, res) => {
+linksRouter.put('/links/:id', authorizeSettingsManagement, async (req, res) => {
   try {
     const { id } = req.params;
     const { title, url, category, icon, description, orderIndex, isActive } = req.body;
@@ -117,7 +118,7 @@ linksRouter.put('/links/:id', async (req, res) => {
 });
 
 // DELETE /api/links/:id - Delete link
-linksRouter.delete('/links/:id', async (req, res) => {
+linksRouter.delete('/links/:id', authorizeSettingsManagement, async (req, res) => {
   try {
     const { id } = req.params;
     await db.delete(dedicatedLinks).where(eq(dedicatedLinks.id, id));

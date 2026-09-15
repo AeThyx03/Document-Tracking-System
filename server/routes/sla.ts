@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import { slaRules, businessHours, holidays } from '../db/schema.ts';
 import { sendApiSuccess, sendApiError } from '../middleware/errorHandler.ts';
+import { getAuthenticatedUser, authorizeSettingsManagement } from '../middleware/authorize.ts';
 
 export const slaRouter = Router();
 
@@ -72,6 +73,34 @@ slaRouter.get('/sla/config', getSlaHandler);
 // PUT /api/sla and POST /api/sla/config
 const putSlaHandler = async (req: any, res: any) => {
   try {
+    const user = getAuthenticatedUser(req);
+    if (!user) {
+      return sendApiError(res, 401, 'UNAUTHORIZED', 'Authentication credentials missing or invalid.');
+    }
+
+    if (!user.permissions.canManageSettings) {
+      return sendApiError(res, 403, 'FORBIDDEN', 'Access denied: Modifying SLA configurations requires Department Manager or System Admin privileges.');
+    }
+
+    // Check if division threshold overrides are being deleted (only System Admin can delete them)
+    const existingRules = await db.select().from(slaRules);
+    const existingDivisionTargets = existingRules
+      .filter((r) => r.targetType === 'division' && r.targetName)
+      .map((r) => r.targetName as string);
+
+    if (existingDivisionTargets.length > 0 && req.body.divisionThresholds !== undefined) {
+      const newDivisionKeys = new Set(Object.keys(req.body.divisionThresholds || {}));
+      const hasDeletedDivision = existingDivisionTargets.some((div) => !newDivisionKeys.has(div));
+      if (hasDeletedDivision && !user.permissions.canDeleteDivisionThresholdOverrides) {
+        return sendApiError(
+          res,
+          403,
+          'FORBIDDEN',
+          'Access denied: Only System Admin can delete division threshold overrides.'
+        );
+      }
+    }
+
     await updateSlaConfig(req.body);
     const { config } = await getSlaConfig();
     return sendApiSuccess(res, { message: 'SLA configuration updated successfully.', config });
@@ -97,7 +126,7 @@ slaRouter.get('/business-hours', async (req: any, res: any) => {
 });
 
 // PUT /api/business-hours
-slaRouter.put('/business-hours', async (req: any, res: any) => {
+slaRouter.put('/business-hours', authorizeSettingsManagement, async (req: any, res: any) => {
   try {
     const { hours } = req.body;
     if (Array.isArray(hours)) {
@@ -134,7 +163,7 @@ slaRouter.get('/holidays', async (req: any, res: any) => {
 });
 
 // POST /api/holidays
-slaRouter.post('/holidays', async (req: any, res: any) => {
+slaRouter.post('/holidays', authorizeSettingsManagement, async (req: any, res: any) => {
   try {
     const { date, name, isWorkingDayOverride, isHalfDay } = req.body;
     if (!date || !name) {
@@ -166,7 +195,7 @@ slaRouter.post('/holidays', async (req: any, res: any) => {
 });
 
 // DELETE /api/holidays/:id
-slaRouter.delete('/holidays/:id', async (req: any, res: any) => {
+slaRouter.delete('/holidays/:id', authorizeSettingsManagement, async (req: any, res: any) => {
   try {
     const id = Number(req.params.id);
     if (isNaN(id)) {

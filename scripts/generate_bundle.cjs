@@ -56,7 +56,5 @@ for (const file of files) {
 }
 
 fs.writeFileSync('FULL_CODEBASE_CONSOLIDATED.md', output, 'utf8');
-fs.writeFileSync('public/FULL_CODEBASE_CONSOLIDATED.md', output, 'utf8');
-fs.writeFileSync('public/codebase-export.txt', output, 'utf8');
-console.log('Successfully generated FULL_CODEBASE_CONSOLIDATED.md and public copies');
+console.log('Successfully generated FULL_CODEBASE_CONSOLIDATED.md (local development export only)');
 console.log('Total file size:', (fs.statSync('FULL_CODEBASE_CONSOLIDATED.md').size / 1024).toFixed(2), 'KB');

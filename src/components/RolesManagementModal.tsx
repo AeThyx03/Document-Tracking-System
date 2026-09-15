@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AppUserRole, UserRoleType, DocumentItem, RegistryDropdownOptions } from '../types';
-import { CANONICAL_ROLES, normalizeRole, ROLE_CONFIGS, getRoleConfig, encodePersonnelSyncCode, decodePersonnelSyncCode, generateDeviceShareUrl } from '../mockData';
+import { CANONICAL_ROLES, normalizeRole, ROLE_CONFIGS, getRoleConfig } from '../mockData';
 import { PossdLogo } from './PossdLogo';
 import {
   Users,
@@ -40,17 +40,26 @@ interface RolesManagementModalProps {
   currentUser?: AppUserRole | null;
   onSelectUser: (user: AppUserRole) => void;
   staffList: AppUserRole[];
-  onAddStaffMember: (newStaff: AppUserRole) => void;
-  onUpdateStaffRole: (staffId: string, newRole: UserRoleType) => void;
-  onDeleteStaffMember: (staffId: string) => void;
+  onAddStaffMember: (newStaff: AppUserRole & { password?: string }) => Promise<void> | void;
+  onUpdateStaffRole: (staffId: string, newRole: UserRoleType, newDivision?: string, newDesk?: string) => Promise<void> | void;
+  onDeleteStaffMember: (staffId: string) => Promise<void> | void;
   documents: DocumentItem[];
   dropdownOptions: RegistryDropdownOptions;
   onUpdateDropdownOptions: (newOptions: RegistryDropdownOptions) => void;
   onUpdateStaffCredentials?: (
     staffId: string,
-    updates: { username?: string; status?: 'active' | 'suspended'; email?: string }
-  ) => void;
-  onImportStaff?: (staff: AppUserRole[], options?: RegistryDropdownOptions) => void;
+    updates: {
+      name?: string;
+      role?: UserRoleType;
+      division?: string;
+      assignedDesk?: string;
+      username?: string;
+      status?: 'active' | 'suspended';
+      email?: string;
+      password?: string;
+    }
+  ) => Promise<void> | void;
+  onImportStaff?: (staff: AppUserRole[], options?: RegistryDropdownOptions) => Promise<void> | void;
 }
 
 const SYSTEM_ROLES: string[] = [
@@ -95,12 +104,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   onUpdateStaffCredentials,
   onImportStaff,
 }) => {
-  const [activeTab, setActiveTab] = useState<'directory' | 'dropdown_options' | 'add' | 'permissions' | 'sync'>('directory');
-
-  // Multi-Device & Cloud Sync state
-  const [syncCodeInput, setSyncCodeInput] = useState('');
-  const [copiedSyncUrl, setCopiedSyncUrl] = useState(false);
-  const [copiedSyncCode, setCopiedSyncCode] = useState(false);
+  const [activeTab, setActiveTab] = useState<'directory' | 'dropdown_options' | 'add' | 'permissions' | 'backup'>('directory');
 
   // Combined roles, departments, and desks
   const availableRoles = Array.from(new Set([...dropdownOptions.roles, ...SYSTEM_ROLES]));
@@ -124,6 +128,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
 
   // Credentials fields for Detailed Enrollment
   const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [newStatus, setNewStatus] = useState<'active' | 'suspended'>('active');
   const [isUsernameCustomized, setIsUsernameCustomized] = useState(false);
 
@@ -152,9 +157,15 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
 
   // Account & Identity Dialog for existing staff
   const [credentialStaff, setCredentialStaff] = useState<AppUserRole | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editRole, setEditRole] = useState<UserRoleType>('Staff');
+  const [editDivision, setEditDivision] = useState('');
+  const [editDesk, setEditDesk] = useState('');
   const [editUsername, setEditUsername] = useState('');
   const [editEmail, setEditEmail] = useState('');
+  const [editPassword, setEditPassword] = useState('');
   const [editStatus, setEditStatus] = useState<'active' | 'suspended'>('active');
+  const [isSavingCredentials, setIsSavingCredentials] = useState(false);
 
   if (!isOpen) return null;
 
@@ -163,43 +174,6 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     setTimeout(() => {
       setFeedbackMsg(null);
     }, 3200);
-  };
-
-  // --- Cross-Device Sync Handlers ---
-  const handleCopyMultiDeviceUrl = () => {
-    const url = generateDeviceShareUrl(staffList);
-    navigator.clipboard.writeText(url);
-    setCopiedSyncUrl(true);
-    showFeedback('Cross-device sync link copied! Open this link on your other device to load all personnel.', 'success');
-    setTimeout(() => setCopiedSyncUrl(false), 2500);
-  };
-
-  const handleCopySyncCode = () => {
-    const code = encodePersonnelSyncCode(staffList, dropdownOptions);
-    navigator.clipboard.writeText(code);
-    setCopiedSyncCode(true);
-    showFeedback('Sync code copied! Paste it into another device to import personnel.', 'success');
-    setTimeout(() => setCopiedSyncCode(false), 2500);
-  };
-
-  const handleImportFromCode = () => {
-    if (!syncCodeInput.trim()) {
-      showFeedback('Please paste a sync link or sync code first.', 'error');
-      return;
-    }
-    const payload = decodePersonnelSyncCode(syncCodeInput.trim());
-    if (!payload || !Array.isArray(payload.staff) || payload.staff.length === 0) {
-      showFeedback('Invalid sync code or link. Please verify and try again.', 'error');
-      return;
-    }
-
-    if (onImportStaff) {
-      onImportStaff(payload.staff, payload.dropdownOptions);
-    } else {
-      payload.staff.forEach((s) => onAddStaffMember(s));
-    }
-    setSyncCodeInput('');
-    showFeedback(`Successfully imported ${payload.staff.length} personnel profiles from sync code!`, 'success');
   };
 
   const handleExportJson = () => {
@@ -342,6 +316,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       documentTypes: [],
       communicationTypes: [],
       reportTypes: [],
+      priorities: [],
       personnel: [],
     });
     setIsConfirmingClearAll(false);
@@ -349,7 +324,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
   };
 
   // --- Handlers for Staff Management ---
-  const handleQuickAddStaff = (e: React.FormEvent) => {
+  const handleQuickAddStaff = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!quickName.trim()) return;
 
@@ -369,7 +344,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     const newStaff: AppUserRole = {
       id: `staff-${Date.now()}`,
       name: quickName.trim(),
-      role: chosenRole,
+      role: chosenRole as UserRoleType,
       division: chosenDivision,
       avatarInitials: initials || 'ST',
       email: `${autoUsername}@agency.gov`,
@@ -378,14 +353,23 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       status: 'active',
     };
 
-    onAddStaffMember(newStaff);
-    setQuickName('');
-    showFeedback(`Personnel ${newStaff.name} enrolled with username "${autoUsername}".`);
+    try {
+      await onAddStaffMember(newStaff);
+      setQuickName('');
+      showFeedback(`Personnel ${newStaff.name} enrolled in PostgreSQL (@${autoUsername}).`, 'success');
+    } catch (err: any) {
+      showFeedback(err?.message || 'Failed to enroll personnel in database.', 'error');
+    }
   };
 
-  const handleCreateStaff = (e: React.FormEvent) => {
+  const handleCreateStaff = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
+
+    if (newPassword && newPassword.length < 6) {
+      showFeedback('Password must be at least 6 characters.', 'error');
+      return;
+    }
 
     const chosenRole = isCustomRoleActive && customRoleInput.trim()
       ? customRoleInput.trim()
@@ -431,7 +415,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
     const newStaff: AppUserRole = {
       id: `staff-${Date.now()}`,
       name: newName.trim(),
-      role: chosenRole,
+      role: chosenRole as UserRoleType,
       division: chosenDivision,
       avatarInitials: initials || 'ST',
       email: newEmail.trim() || `${cleanUsername}@agency.gov`,
@@ -440,59 +424,100 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
       status: newStatus,
     };
 
-    onAddStaffMember(newStaff);
-    setNewName('');
-    setNewRole(availableRoles[0] || 'Staff');
-    setNewDivision(availableDepartments[0] || 'Central Records & Receiving Desk');
-    setNewDesk(availableDesks[0] || 'Records Receiving Counter A');
-    setNewEmail('');
-    setNewUsername('');
-    setNewStatus('active');
-    setIsUsernameCustomized(false);
-    setIsCustomRoleActive(false);
-    setCustomRoleInput('');
-    setIsCustomDeptActive(false);
-    setCustomDeptInput('');
-    setIsCustomDeskActive(false);
-    setCustomDeskInput('');
-    setActiveTab('directory');
-    showFeedback(`Personnel ${newStaff.name} registered (@${cleanUsername}).`);
+    try {
+      await onAddStaffMember({
+        ...newStaff,
+        password: newPassword.trim() || undefined,
+      });
+      setNewName('');
+      setNewPassword('');
+      setNewRole(availableRoles[0] || 'Staff');
+      setNewDivision(availableDepartments[0] || 'Central Records & Receiving Desk');
+      setNewDesk(availableDesks[0] || 'Records Receiving Counter A');
+      setNewEmail('');
+      setNewUsername('');
+      setNewStatus('active');
+      setIsUsernameCustomized(false);
+      setIsCustomRoleActive(false);
+      setCustomRoleInput('');
+      setIsCustomDeptActive(false);
+      setCustomDeptInput('');
+      setIsCustomDeskActive(false);
+      setCustomDeskInput('');
+      setActiveTab('directory');
+      showFeedback(`Personnel ${newStaff.name} registered in PostgreSQL (@${cleanUsername}).`, 'success');
+    } catch (err: any) {
+      showFeedback(err?.message || 'Failed to register personnel in database.', 'error');
+    }
   };
 
-  const handleDeleteStaff = (staffId: string) => {
-    onDeleteStaffMember(staffId);
-    setConfirmDeleteId(null);
+  const handleDeleteStaff = async (staffId: string) => {
+    try {
+      await onDeleteStaffMember(staffId);
+      showFeedback('Personnel record deleted from PostgreSQL.', 'success');
+      setConfirmDeleteId(null);
+    } catch (err: any) {
+      showFeedback(err?.message || 'Failed to delete personnel in database.', 'error');
+    }
   };
 
   const handleOpenCredentialsModal = (staff: AppUserRole) => {
     setCredentialStaff(staff);
+    setEditName(staff.name || '');
+    setEditRole(staff.role || 'Staff');
+    setEditDivision(staff.division || '');
+    setEditDesk(staff.assignedDesk || '');
     setEditUsername(staff.username || (staff.name || '').toLowerCase().replace(/[^a-z0-9]/g, '.'));
     setEditEmail(staff.email || '');
+    setEditPassword('');
     setEditStatus(staff.status || 'active');
   };
 
-  const handleSaveCredentials = (e: React.FormEvent) => {
+  const handleSaveCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!credentialStaff) return;
 
+    const trimmedName = editName.trim();
     const trimmedUsername = editUsername.trim().toLowerCase();
     const trimmedEmail = editEmail.trim();
+
+    if (!trimmedName) {
+      showFeedback('Full name cannot be empty.', 'error');
+      return;
+    }
 
     if (!trimmedUsername) {
       showFeedback('Username cannot be empty.', 'error');
       return;
     }
 
-    if (onUpdateStaffCredentials) {
-      onUpdateStaffCredentials(credentialStaff.id, {
-        username: trimmedUsername,
-        email: trimmedEmail || undefined,
-        status: editStatus,
-      });
+    if (editPassword && editPassword.length < 6) {
+      showFeedback('Password must be at least 6 characters.', 'error');
+      return;
     }
 
-    showFeedback(`Account details updated for ${credentialStaff.name} (@${trimmedUsername}).`);
-    setCredentialStaff(null);
+    setIsSavingCredentials(true);
+    try {
+      if (onUpdateStaffCredentials) {
+        await onUpdateStaffCredentials(credentialStaff.id, {
+          name: trimmedName,
+          role: editRole,
+          division: editDivision,
+          assignedDesk: editDesk || undefined,
+          username: trimmedUsername,
+          email: trimmedEmail || undefined,
+          status: editStatus,
+          password: editPassword.trim() || undefined,
+        });
+      }
+
+      showFeedback(`Account details persisted in PostgreSQL for ${trimmedName} (@${trimmedUsername}).`, 'success');
+      setCredentialStaff(null);
+    } catch (err: any) {
+      showFeedback(err?.message || 'Failed to persist personnel update in database.', 'error');
+    } finally {
+      setIsSavingCredentials(false);
+    }
   };
 
   const totalConfiguredEntries =
@@ -587,15 +612,15 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
           </button>
 
           <button
-            onClick={() => setActiveTab('sync')}
+            onClick={() => setActiveTab('backup')}
             className={`px-3.5 py-2.5 text-xs font-semibold border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
-              activeTab === 'sync'
+              activeTab === 'backup'
                 ? 'border-blue-700 dark:border-blue-500 text-blue-900 dark:text-blue-300 bg-white dark:bg-slate-900 rounded-t-lg shadow-2xs font-bold'
                 : 'border-transparent text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
-            <Smartphone className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-            <span>Roster Transfer &amp; Backup</span>
+            <FileJson className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+            <span>Personnel Backup &amp; Export</span>
           </button>
         </div>
 
@@ -879,7 +904,14 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                                 <button
                                   key={r}
                                   type="button"
-                                  onClick={() => onUpdateStaffRole(staff.id, r)}
+                                  onClick={async () => {
+                                    try {
+                                      await onUpdateStaffRole(staff.id, r as UserRoleType);
+                                      showFeedback(`Role updated to "${r}" in PostgreSQL.`, 'success');
+                                    } catch (err: any) {
+                                      showFeedback(err?.message || 'Failed to update role in database.', 'error');
+                                    }
+                                  }}
                                   className={`text-[10px] px-2 py-1 rounded-lg font-semibold transition-all cursor-pointer ${
                                     isSelected
                                       ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-xs ring-1 ring-slate-900 dark:ring-white'
@@ -1602,6 +1634,20 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                       />
                     </div>
 
+                    {/* Initial Password */}
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                        Initial Password <span className="text-slate-400 font-normal">(optional, default: agency2026!)</span>
+                      </label>
+                      <input
+                        type="password"
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                        placeholder="Min 6 characters"
+                        className="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+
                     {/* Account Status */}
                     <div>
                       <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -1861,18 +1907,18 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
             </div>
           )}
 
-          {/* TAB 5: ROSTER TRANSFER & BACKUP */}
-          {activeTab === 'sync' && (
+          {/* TAB 5: PERSONNEL BACKUP & DATABASE SYNCHRONIZATION */}
+          {activeTab === 'backup' && (
             <div className="space-y-6">
               <div className="border-b border-slate-100 dark:border-slate-800 pb-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
                     <h3 className="font-bold text-sm text-slate-900 dark:text-white flex items-center gap-2">
-                      <Smartphone className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-                      Personnel Roster Transfer &amp; Backup
+                      <FileJson className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                      Personnel Backup &amp; Registry Export
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                      Export and import enrolled personnel profiles and role definitions across workstations via secure transfer links or backup codes.
+                      Export and backup enrolled personnel profiles through secure file exports or synchronized authoritative PostgreSQL database records.
                     </p>
                   </div>
                   <span className="text-[11px] px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 rounded-lg font-semibold self-start sm:self-auto">
@@ -1881,79 +1927,14 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                 </div>
               </div>
 
-              {/* Section: Instant Multi-Device Link */}
-              <div className="rounded-xl border border-indigo-200 dark:border-indigo-800/70 bg-indigo-50/60 dark:bg-indigo-950/40 p-4 space-y-3">
-                <div className="flex items-start gap-2.5">
-                  <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center shrink-0 mt-0.5">
-                    <Share2 className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-indigo-950 dark:text-indigo-200 uppercase tracking-wider">
-                      Instant Multi-Device Link (One-Click Transfer)
-                    </h4>
-                    <p className="text-xs text-indigo-900/80 dark:text-indigo-300/80 mt-0.5 leading-relaxed">
-                      Generate a unique secure link that contains all {staffList.length} enrolled personnel, credentials, and custom roles. Open this link on your second computer, smartphone, or tablet, and it will immediately save the personnel into that device's permanent storage!
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={handleCopyMultiDeviceUrl}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-indigo-700 hover:bg-indigo-800 text-white rounded-lg text-xs font-bold transition-colors shadow-xs cursor-pointer"
-                  >
-                    {copiedSyncUrl ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    {copiedSyncUrl ? 'Multi-Device Link Copied!' : 'Copy Multi-Device Link'}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleCopySyncCode}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 bg-white dark:bg-slate-800 border border-indigo-300 dark:border-indigo-700 text-indigo-900 dark:text-indigo-200 hover:bg-indigo-50 dark:hover:bg-slate-700 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
-                  >
-                    {copiedSyncCode ? <Check className="w-3.5 h-3.5 text-indigo-600" /> : <Copy className="w-3.5 h-3.5 text-indigo-600" />}
-                    {copiedSyncCode ? 'Sync Code Copied!' : 'Copy Raw Sync Code'}
-                  </button>
-                </div>
-              </div>
-
-              {/* Section 3: Import from Another Device */}
-              <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3 bg-white dark:bg-slate-900">
-                <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
-                  <UploadCloud className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                  Import from Another Device
-                </h4>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Received a Multi-Device Link or Sync Code from another computer? Paste it below to load all personnel into this device.
-                </p>
-
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
-                  <input
-                    type="text"
-                    value={syncCodeInput}
-                    onChange={(e) => setSyncCodeInput(e.target.value)}
-                    placeholder="Paste Multi-Device Link or Sync Code here..."
-                    className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2 text-xs text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleImportFromCode}
-                    className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer shrink-0"
-                  >
-                    Import &amp; Synchronize
-                  </button>
-                </div>
-              </div>
-
-              {/* Section 4: File Backup & Offline Storage */}
+              {/* Section 1: File Backup & Offline Storage */}
               <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 space-y-3 bg-slate-50/50 dark:bg-slate-800/40">
                 <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
                   <FileJson className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                   Offline Backup &amp; File Export
                 </h4>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  You can also download an offline JSON backup file of your personnel roster and import it on any offline or air-gapped machine.
+                  You can download an offline JSON backup file of your personnel roster and import it into any authenticated POSSD workstation.
                 </p>
 
                 <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -1978,7 +1959,6 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                   </label>
                 </div>
               </div>
-
             </div>
           )}
 
@@ -2024,38 +2004,112 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
               </button>
             </div>
 
-            <form onSubmit={handleSaveCredentials} className="p-5 space-y-4 text-xs">
-              <div className="space-y-1.5">
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
-                  Login Username <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={editUsername}
-                  onChange={(e) => setEditUsername(e.target.value)}
-                  placeholder="e.g. maria.santos"
-                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
-                />
-                <p className="text-[10.5px] text-slate-400 dark:text-slate-500">
-                  Unique identifier used for personnel session matching.
-                </p>
+            <form onSubmit={handleSaveCredentials} className="p-5 space-y-3.5 text-xs max-h-[75vh] overflow-y-auto">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    Full Name <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    placeholder="e.g. Maria Santos"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-medium focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    System Role <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value as UserRoleType)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-medium focus:outline-none focus:ring-2 focus:ring-amber-500 cursor-pointer"
+                  >
+                    {availableRoles.map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
-              <div className="space-y-1.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    Division / Office
+                  </label>
+                  <select
+                    value={editDivision}
+                    onChange={(e) => setEditDivision(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-medium focus:outline-none focus:ring-2 focus:ring-amber-500 cursor-pointer"
+                  >
+                    {availableDepartments.map((d) => (
+                      <option key={d} value={d}>
+                        {d}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    Assigned Desk / Station
+                  </label>
+                  <input
+                    type="text"
+                    value={editDesk}
+                    onChange={(e) => setEditDesk(e.target.value)}
+                    placeholder="e.g. Counter A"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-medium focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    Login Username <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editUsername}
+                    onChange={(e) => setEditUsername(e.target.value)}
+                    placeholder="e.g. maria.santos"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    Institutional Email
+                  </label>
+                  <input
+                    type="email"
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    placeholder="e.g. user@agency.gov"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-200">
-                  Institutional Email
+                  New Password <span className="text-slate-400 font-normal">(leave blank to keep current)</span>
                 </label>
                 <input
-                  type="email"
-                  value={editEmail}
-                  onChange={(e) => setEditEmail(e.target.value)}
-                  placeholder="e.g. user@agency.gov"
+                  type="password"
+                  value={editPassword}
+                  onChange={(e) => setEditPassword(e.target.value)}
+                  placeholder="Leave empty to maintain existing password"
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
                 />
-                <p className="text-[10.5px] text-slate-400 dark:text-slate-500">
-                  Mapped to Google / Firebase SSO authentication.
-                </p>
               </div>
 
               <div className="space-y-1.5">
@@ -2073,7 +2127,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                     }`}
                   >
                     <UserCheck className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Active</span>
+                    <span>Active (Allowed)</span>
                   </button>
                   <button
                     type="button"
@@ -2085,7 +2139,7 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                     }`}
                   >
                     <Ban className="w-3.5 h-3.5 text-rose-600" />
-                    <span>Suspended</span>
+                    <span>Suspended (Blocked)</span>
                   </button>
                 </div>
               </div>
@@ -2094,16 +2148,18 @@ export const RolesManagementModal: React.FC<RolesManagementModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setCredentialStaff(null)}
-                  className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 font-semibold cursor-pointer"
+                  disabled={isSavingCredentials}
+                  className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 font-semibold cursor-pointer disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                  disabled={isSavingCredentials}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                 >
                   <Key className="w-3.5 h-3.5" />
-                  <span>Save Account Details</span>
+                  <span>{isSavingCredentials ? 'Persisting...' : 'Save Changes'}</span>
                 </button>
               </div>
             </form>

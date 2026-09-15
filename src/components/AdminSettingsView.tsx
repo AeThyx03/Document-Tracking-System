@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { TimeInDeskConfig, DocumentItem, AppUserRole } from '../types';
+import { TimeInDeskConfig, DocumentItem, AppUserRole, RegistryDropdownOptions, DEFAULT_REGISTRY_DROPDOWN_OPTIONS } from '../types';
 import { calculateDocumentTimeInDesk, DEFAULT_TIME_IN_DESK_CONFIG } from '../lib/timeInDesk';
 import {
   Sliders,
@@ -29,9 +29,13 @@ import {
   FileCode,
   ExternalLink,
   FileText,
+  Tag,
+  ShieldAlert,
 } from 'lucide-react';
 import { useOnlineStatus } from './usePWAInstall';
 import { PWAInstallButton } from './PWAInstallButton';
+import { AdminDropdownsConfig } from './AdminDropdownsConfig';
+import { fetchCodebaseBundle, CodebaseBundleResponse } from '../lib/api';
 
 interface AdminSettingsViewProps {
   timeInDeskConfig: TimeInDeskConfig;
@@ -40,6 +44,9 @@ interface AdminSettingsViewProps {
   staffList: AppUserRole[];
   onOpenRolesModal: () => void;
   availableDivisions: string[];
+  currentUser?: AppUserRole | null;
+  dropdownOptions?: RegistryDropdownOptions;
+  onUpdateDropdownOptions?: (newOptions: RegistryDropdownOptions) => void;
 }
 
 export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
@@ -49,7 +56,11 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
   staffList,
   onOpenRolesModal,
   availableDivisions,
+  currentUser,
+  dropdownOptions = DEFAULT_REGISTRY_DROPDOWN_OPTIONS,
+  onUpdateDropdownOptions = () => {},
 }) => {
+  const [adminActiveTab, setAdminActiveTab] = useState<'dropdowns' | 'sla' | 'overview'>('dropdowns');
   const [defaultHours, setDefaultHours] = useState(timeInDeskConfig.defaultThresholdHours);
   const [divisionThresholds, setDivisionThresholds] = useState<Record<string, number>>({
     ...timeInDeskConfig.divisionThresholds,
@@ -59,6 +70,93 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
   const [overrideHoursToAdd, setOverrideHoursToAdd] = useState(48);
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
   const isOnline = useOnlineStatus();
+
+  // Codebase compilation & verification states
+  const [copyPromptStatus, setCopyPromptStatus] = useState<'idle' | 'loading' | 'copied' | 'error'>('idle');
+  const [copyRawStatus, setCopyRawStatus] = useState<'idle' | 'loading' | 'copied' | 'error'>('idle');
+  const [codebaseSummary, setCodebaseSummary] = useState<CodebaseBundleResponse | null>(null);
+
+  const handleCopyPrompt = async () => {
+    try {
+      setCopyPromptStatus('loading');
+      const bundle = await fetchCodebaseBundle();
+      setCodebaseSummary(bundle);
+      await navigator.clipboard.writeText(bundle.fullPrompt);
+      setCopyPromptStatus('copied');
+      setTimeout(() => setCopyPromptStatus('idle'), 3000);
+    } catch (err) {
+      console.error('Failed to copy codebase prompt:', err);
+      setCopyPromptStatus('error');
+      setTimeout(() => setCopyPromptStatus('idle'), 3500);
+    }
+  };
+
+  const handleCopyRawCodebase = async () => {
+    try {
+      setCopyRawStatus('loading');
+      const bundle = await fetchCodebaseBundle();
+      setCodebaseSummary(bundle);
+      await navigator.clipboard.writeText(bundle.rawCodebase);
+      setCopyRawStatus('copied');
+      setTimeout(() => setCopyRawStatus('idle'), 3000);
+    } catch (err) {
+      console.error('Failed to copy raw codebase:', err);
+      setCopyRawStatus('error');
+      setTimeout(() => setCopyRawStatus('idle'), 3500);
+    }
+  };
+
+  const handleDownloadCodebase = async () => {
+    try {
+      const bundle = await fetchCodebaseBundle();
+      setCodebaseSummary(bundle);
+      const blob = new Blob([bundle.fullPrompt], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `possd-codebase-verification-${new Date().toISOString().slice(0, 10)}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to download codebase:', err);
+    }
+  };
+
+  // Strict check: Only System Admin may access System Admin Settings
+  const isSystemAdmin = currentUser ? currentUser.role === 'System Admin' : true;
+
+  if (currentUser && currentUser.role !== 'System Admin') {
+    return (
+      <div className="p-8 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm text-center max-w-lg mx-auto my-12 space-y-4 animate-in fade-in">
+        <div className="w-12 h-12 rounded-2xl bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-900 text-rose-600 dark:text-rose-400 mx-auto flex items-center justify-center shadow-xs">
+          <ShieldAlert className="w-6 h-6" />
+        </div>
+        <div>
+          <h2 className="text-base font-bold text-slate-900 dark:text-white">
+            System Admin Access Restricted
+          </h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+            System Administration, Registry Dropdown Options, and Focal Person configurations are strictly restricted to <strong>System Admin</strong> accounts.
+          </p>
+          <div className="mt-3 inline-block px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-mono">
+            Current account: <span className="font-bold">{currentUser.name}</span> ({currentUser.role})
+          </div>
+        </div>
+        <div className="pt-2">
+          <button
+            type="button"
+            onClick={onOpenRolesModal}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-xl bg-slate-800 hover:bg-slate-900 text-white transition-colors cursor-pointer"
+          >
+            <Users className="w-3.5 h-3.5" />
+            <span>Switch Role or View Directory</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Overdue count calculation under tentative/active settings
   const overdueDocs = documents.filter((doc) => {
@@ -125,48 +223,6 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
 
   const unconfiguredDivisions = allDivisions.filter((d) => divisionThresholds[d] === undefined);
 
-  const [copyCodeStatus, setCopyCodeStatus] = useState<'idle' | 'copying' | 'copied' | 'error'>('idle');
-  const [copyPromptStatus, setCopyPromptStatus] = useState<'idle' | 'copying' | 'copied'>('idle');
-
-  const handleCopyCodebase = async () => {
-    try {
-      setCopyCodeStatus('copying');
-      const res = await fetch('/codebase-export.txt');
-      if (!res.ok) throw new Error('Could not load bundle');
-      const text = await res.text();
-      await navigator.clipboard.writeText(text);
-      setCopyCodeStatus('copied');
-      setTimeout(() => setCopyCodeStatus('idle'), 3000);
-    } catch {
-      window.open('/FULL_CODEBASE_CONSOLIDATED.md', '_blank');
-      setCopyCodeStatus('error');
-      setTimeout(() => setCopyCodeStatus('idle'), 3000);
-    }
-  };
-
-  const handleCopyGeminiPrompt = async () => {
-    try {
-      setCopyPromptStatus('copying');
-      const promptIntro = `Please thoroughly review and verify this compiled codebase for the POSSD Document Tracking System web application:
-
-Key validation areas:
-1. Persistence and data integrity across document movements, compliance, and clearance.
-2. React state performance, re-rendering prevention, and table virtualization.
-3. SLA Time-in-Desk dwell time calculations, overdue detection, and business hour accounting.
-4. Offline storage persistence and error handling.
-
-Compiled Codebase:
-`;
-      const res = await fetch('/codebase-export.txt');
-      const code = res.ok ? await res.text() : '';
-      await navigator.clipboard.writeText(promptIntro + '\n\n' + code);
-      setCopyPromptStatus('copied');
-      setTimeout(() => setCopyPromptStatus('idle'), 3000);
-    } catch {
-      setCopyPromptStatus('idle');
-    }
-  };
-
   return (
     <div className="space-y-6 animate-in fade-in duration-200">
       {/* Top Header Card */}
@@ -186,8 +242,32 @@ Compiled Codebase:
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           <PWAInstallButton />
+          <button
+            type="button"
+            id="btn-header-compile-code"
+            onClick={handleCopyPrompt}
+            title="Compile full codebase with audit prompt for AI checking"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-colors cursor-pointer"
+          >
+            {copyPromptStatus === 'loading' ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
+                <span>Compiling...</span>
+              </>
+            ) : copyPromptStatus === 'copied' ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-300" />
+                <span>Copied for Checking!</span>
+              </>
+            ) : (
+              <>
+                <FileCode className="w-3.5 h-3.5 text-white" />
+                <span>Compile Code for Checking</span>
+              </>
+            )}
+          </button>
           <button
             type="button"
             onClick={handleResetDefaults}
@@ -214,10 +294,294 @@ Compiled Codebase:
         </div>
       )}
 
+      {/* Navigation Pills for Admin Settings */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
+        <button
+          type="button"
+          id="admin-tab-dropdowns"
+          onClick={() => setAdminActiveTab('dropdowns')}
+          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            adminActiveTab === 'dropdowns'
+              ? 'bg-indigo-600 text-white shadow-sm'
+              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-750 border border-slate-200 dark:border-slate-700'
+          }`}
+        >
+          <Tag className="w-3.5 h-3.5" />
+          <span>Dropdown Options &amp; Focal Persons</span>
+          <span className="px-1.5 py-0.5 rounded-full text-[10px] bg-white/20 dark:bg-slate-900/40 text-white font-mono">
+            System Admin
+          </span>
+        </button>
 
+        <button
+          type="button"
+          id="admin-tab-sla"
+          onClick={() => setAdminActiveTab('sla')}
+          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            adminActiveTab === 'sla'
+              ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-sm'
+              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-750 border border-slate-200 dark:border-slate-700'
+          }`}
+        >
+          <Timer className="w-3.5 h-3.5" />
+          <span>Time-in-Desk SLA Thresholds</span>
+        </button>
 
-      {/* SLA Thresholds & Configuration Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <button
+          type="button"
+          id="admin-tab-overview"
+          onClick={() => setAdminActiveTab('overview')}
+          className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            adminActiveTab === 'overview'
+              ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-sm'
+              : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-750 border border-slate-200 dark:border-slate-700'
+          }`}
+        >
+          <HardDrive className="w-3.5 h-3.5" />
+          <span>System Diagnostics &amp; Bundle</span>
+        </button>
+      </div>
+
+      {/* Render Active Admin Tab */}
+      {adminActiveTab === 'dropdowns' ? (
+        <AdminDropdownsConfig
+          dropdownOptions={dropdownOptions}
+          onUpdateDropdownOptions={onUpdateDropdownOptions}
+          staffList={staffList}
+          currentUser={currentUser}
+        />
+      ) : adminActiveTab === 'overview' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Quick Staff Roles & Access Box */}
+          <div className="p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Users className="w-4 h-4 text-slate-500" />
+                <span className="text-xs font-bold text-slate-900 dark:text-white">
+                  Staff Personnel Registry
+                </span>
+              </div>
+              <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                {staffList.length} Staff
+              </span>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-400">
+              Configure personnel accounts, manage login passwords, assign role hierarchies, and customize registry dropdowns.
+            </p>
+
+            <button
+              type="button"
+              id="admin-overview-open-roles-btn"
+              onClick={onOpenRolesModal}
+              className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              <Users className="w-3.5 h-3.5" />
+              <span>Manage Staff Roles &amp; Passwords</span>
+            </button>
+          </div>
+
+          {/* Data Persistence Architecture Box */}
+          <div className="p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <HardDrive className="w-4 h-4 text-slate-500" />
+                <span className="text-xs font-bold text-slate-900 dark:text-white">
+                  Database &amp; Persistence Layer
+                </span>
+              </div>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                PostgreSQL Ready
+              </span>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-400">
+              Authoritative document tracking, full movement history, supervisor remarks, and compliance trails.
+            </p>
+
+            <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700/60 text-[11px] text-slate-600 dark:text-slate-300 space-y-1">
+              <div className="flex justify-between">
+                <span>Enrolled Documents:</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">{documents.length}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Personnel Profiles:</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">{staffList.length}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>SLA Overdue Items:</span>
+                <span className="font-mono font-bold text-slate-900 dark:text-white">{overdueDocs.length}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Service Worker & Caching Status Box */}
+          <div className="p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs space-y-2 text-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-bold text-slate-900 dark:text-white">
+                <ShieldCheck className="w-4 h-4 text-slate-600 dark:text-slate-400" />
+                <span>Service Worker &amp; Offline Cache</span>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 font-bold">
+                Active
+              </span>
+            </div>
+            <p className="text-slate-500 dark:text-slate-400 leading-relaxed">
+              Static bundles, typography, and registry icons are precached. The application loads instantly even on weak or intermittent internet connections.
+            </p>
+            <div className="pt-1 flex items-center gap-2 text-[11px] text-slate-600 dark:text-slate-400">
+              {isOnline ? (
+                <>
+                  <Wifi className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>Connection: Active Internet</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Connection: Offline (Operating from local cache)</span>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* System Architecture & Status Card */}
+          <div className="p-5 bg-gradient-to-br from-white to-blue-50/40 dark:from-slate-900 dark:to-blue-950/20 border border-blue-200/80 dark:border-blue-900/60 rounded-2xl shadow-xs space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <FileCode className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <span className="text-xs font-bold text-slate-900 dark:text-white">
+                  System Architecture &amp; Database
+                </span>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200 font-bold">
+                PostgreSQL
+              </span>
+            </div>
+
+            <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
+              Fully hardened with server-side document pagination, ACID relational transactions, append-only routing history, SLA computation in Asia/Manila timezone, and authenticated role-based audit logging.
+            </p>
+
+            <div className="pt-2 border-t border-blue-200/60 dark:border-blue-900/40 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+              <span>Timezone: <strong className="text-slate-700 dark:text-slate-200">Asia/Manila (PST)</strong></span>
+              <span>Pagination: <strong className="text-emerald-600 dark:text-emerald-400">Server-Side</strong></span>
+            </div>
+          </div>
+
+          {/* Codebase Compilation & Checking Card */}
+          <div className="p-5 bg-gradient-to-br from-white to-blue-50/60 dark:from-slate-900 dark:to-blue-950/30 border border-blue-200 dark:border-blue-900 rounded-2xl shadow-xs space-y-4 text-xs md:col-span-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-blue-600 dark:bg-blue-500 flex items-center justify-center text-white shadow-xs">
+                  <FileCode className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+                    Compile Full Codebase for AI Checking &amp; Verification
+                  </h4>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Aggregates all project source files and bundles them with a comprehensive architecture audit prompt.
+                  </p>
+                </div>
+              </div>
+              <span className="text-[11px] font-mono px-2.5 py-1 rounded-lg bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200 font-bold flex items-center gap-1.5 border border-blue-200 dark:border-blue-800">
+                <CheckCircle2 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                Bundle &amp; Audit Ready
+              </span>
+            </div>
+
+            <div className="p-3.5 bg-white/90 dark:bg-slate-800/90 rounded-xl border border-blue-100 dark:border-blue-900/60 text-slate-600 dark:text-slate-300 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex flex-wrap items-center gap-4">
+                <div>
+                  <span className="text-slate-400 text-[10px] uppercase font-bold block">Status</span>
+                  <span className="font-semibold text-emerald-600 dark:text-emerald-400">Ready to Compile</span>
+                </div>
+                <div className="border-l border-slate-200 dark:border-slate-700 pl-4">
+                  <span className="text-slate-400 text-[10px] uppercase font-bold block">Scope</span>
+                  <span className="font-medium text-slate-700 dark:text-slate-200">Server Routes, PostgreSQL Schema, UI &amp; Tests</span>
+                </div>
+                {codebaseSummary && (
+                  <div className="border-l border-slate-200 dark:border-slate-700 pl-4">
+                    <span className="text-slate-400 text-[10px] uppercase font-bold block">Compiled Stats</span>
+                    <span className="font-mono font-bold text-slate-900 dark:text-white">
+                      {codebaseSummary.fileCount} files ({(codebaseSummary.totalSize / 1024).toFixed(1)} KB)
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+              <button
+                type="button"
+                id="btn-copy-codebase-prompt"
+                onClick={handleCopyPrompt}
+                disabled={copyPromptStatus === 'loading'}
+                className="py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-bold transition-all cursor-pointer flex items-center justify-center gap-2 text-xs shadow-xs"
+              >
+                {copyPromptStatus === 'loading' ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Compiling Codebase...</span>
+                  </>
+                ) : copyPromptStatus === 'copied' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-300" />
+                    <span>Copied Code + Prompt!</span>
+                  </>
+                ) : copyPromptStatus === 'error' ? (
+                  <>
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-300" />
+                    <span>Failed - Click to Retry</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy Code + Check Prompt</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                id="btn-copy-raw-codebase"
+                onClick={handleCopyRawCodebase}
+                disabled={copyRawStatus === 'loading'}
+                className="py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-900 disabled:opacity-60 text-white font-bold transition-all cursor-pointer flex items-center justify-center gap-2 text-xs"
+              >
+                {copyRawStatus === 'loading' ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Bundling...</span>
+                  </>
+                ) : copyRawStatus === 'copied' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-300" />
+                    <span>Raw Codebase Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <FileText className="w-3.5 h-3.5 text-slate-300" />
+                    <span>Copy Raw Codebase Only</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                id="btn-download-codebase"
+                onClick={handleDownloadCodebase}
+                className="py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-bold transition-all cursor-pointer flex items-center justify-center gap-2 text-xs border border-slate-200 dark:border-slate-700"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download .txt Bundle</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        /* SLA Thresholds & Configuration Grid */
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Columns: Time-in-Desk SLA Configuration Form */}
         <div className="lg:col-span-2 space-y-6">
           <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs space-y-5">
@@ -528,96 +892,9 @@ Compiled Codebase:
               )}
             </div>
           </div>
-
-          {/* Codebase Compilation & Gemini AI Checking Box */}
-          <div
-            id="codebase-export-card"
-            className="p-5 bg-gradient-to-br from-white to-blue-50/40 dark:from-slate-900 dark:to-blue-950/20 border border-blue-200/80 dark:border-blue-900/60 rounded-2xl shadow-xs space-y-3 text-xs"
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <FileCode className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                <span className="text-xs font-bold text-slate-900 dark:text-white">
-                  Full Codebase for Google Gemini
-                </span>
-              </div>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200 font-bold">
-                Compiled Bundle
-              </span>
-            </div>
-
-            <p className="text-slate-600 dark:text-slate-400 leading-relaxed">
-              All 28 application source modules, TypeScript interfaces, sync engines, and UI components compiled into a single consolidated file for review in Google Gemini.
-            </p>
-
-            <div className="flex flex-col gap-2 pt-1">
-              <button
-                type="button"
-                id="btn-copy-codebase-gemini"
-                onClick={handleCopyGeminiPrompt}
-                className="w-full py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold transition-all cursor-pointer flex items-center justify-center gap-2 shadow-2xs text-xs"
-              >
-                {copyPromptStatus === 'copying' ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Copying Code + Prompt...</span>
-                  </>
-                ) : copyPromptStatus === 'copied' ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-300" />
-                    <span>Copied! Ready to paste into Gemini</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy Prompt + Code for Gemini</span>
-                  </>
-                )}
-              </button>
-
-              <div className="grid grid-cols-2 gap-2">
-                <a
-                  href="/FULL_CODEBASE_CONSOLIDATED.md"
-                  download="FULL_CODEBASE_CONSOLIDATED.md"
-                  className="py-2 px-2.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-200 dark:border-slate-700 text-center"
-                >
-                  <Download className="w-3.5 h-3.5 text-slate-500" />
-                  <span>Download .md</span>
-                </a>
-
-                <a
-                  href="/codebase-export.txt"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="py-2 px-2.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-200 dark:border-slate-700 text-center"
-                >
-                  <ExternalLink className="w-3.5 h-3.5 text-slate-500" />
-                  <span>Open in Tab</span>
-                </a>
-              </div>
-
-              <button
-                type="button"
-                id="btn-copy-raw-codebase"
-                onClick={handleCopyCodebase}
-                className="w-full py-2 px-3 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold transition-colors cursor-pointer flex items-center justify-center gap-1.5 border border-slate-200 dark:border-slate-700"
-              >
-                {copyCodeStatus === 'copied' ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-500" />
-                    <span>Raw Code Copied to Clipboard</span>
-                  </>
-                ) : (
-                  <>
-                    <FileText className="w-3.5 h-3.5 text-slate-500" />
-                    <span>Copy Raw Codebase Only</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
         </div>
       </div>
+      )}
     </div>
   );
 };
