@@ -30,13 +30,23 @@ export function getJwtSecret(): string {
 
   // Generate ephemeral 256-bit random key if not configured in environment
   if (!cachedSecret) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error(
+        '[AUTH CONFIG ERROR] JWT_SECRET is missing in production environment. ' +
+        'A secure, persistent JWT_SECRET is strongly recommended to prevent authentication ' +
+        'reliability issues across container restarts and multiple instances. ' +
+        'Falling back to an ephemeral 256-bit random secret for this container instance.'
+      );
+    }
     cachedSecret = crypto.randomBytes(32).toString('hex');
-    const envName = process.env.NODE_ENV === 'production' ? 'production' : 'development';
-    console.warn(
-      `[AUTH CONFIG] JWT_SECRET is not set in environment (${envName}). ` +
-      'Generated an ephemeral 256-bit random secret for this container session. ' +
-      'To persist session tokens across container restarts or multiple instances, set JWT_SECRET in your environment variables.'
-    );
+    const envName = process.env.NODE_ENV === 'production' ? 'production (fallback)' : 'development';
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn(
+        `[AUTH CONFIG] JWT_SECRET is not set in environment (${envName}). ` +
+        'Generated an ephemeral 256-bit random secret for this container session. ' +
+        'To persist session tokens across container restarts or multiple instances, set JWT_SECRET in your environment variables.'
+      );
+    }
   }
 
   return cachedSecret;

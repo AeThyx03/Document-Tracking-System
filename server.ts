@@ -14,6 +14,7 @@ import { desksRouter } from "./server/routes/desks.ts";
 import { dashboardRouter } from "./server/routes/dashboard.ts";
 import { auditRouter } from "./server/routes/audit.ts";
 import { codebaseRouter } from "./server/routes/codebase.ts";
+import { dropdownsRouter } from "./server/routes/dropdowns.ts";
 import { createAuditLog } from "./server/services/auditService.ts";
 import { validateJwtConfiguration } from "./server/config/jwt.ts";
 
@@ -46,31 +47,8 @@ app.use("/api", desksRouter);
 app.use("/api", dashboardRouter);
 app.use("/api", auditRouter);
 app.use("/api", codebaseRouter);
+app.use("/api", dropdownsRouter);
 app.use("/api", slaRouter);
-
-// POST /api/audit - Saves directly to PostgreSQL audit_logs table
-app.post("/api/audit", async (req: any, res) => {
-  try {
-    const { action, docId, previousValue, newValue } = req.body;
-    await createAuditLog({
-      userId: req.user?.id ? String(req.user.id) : null,
-      action: action || 'AUDIT_EVENT',
-      entityType: 'document',
-      entityId: docId || null,
-      oldValue: previousValue ? { value: previousValue } : null,
-      newValue: newValue ? { value: newValue } : null,
-      metadata: {
-        source: 'client_api',
-        actorEmail: req.user?.email,
-        actorRole: req.user?.role,
-        actorName: req.user?.name,
-      }
-    });
-    res.json({ success: true });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: 'AUDIT_ERROR', message: err.message });
-  }
-});
 
 // Centralized error handler
 app.use(errorHandler);

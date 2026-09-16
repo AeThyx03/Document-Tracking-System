@@ -35,8 +35,10 @@ export interface DocumentItem {
   id: string; // unique ID or tracking number
   trackingNumber: string;
   title: string;
-  direction?: 'Incoming' | 'Outgoing';
-  documentType: string;
+  documentClassification?: string; // Dedicated field e.g. 'Incoming' | 'Outgoing'
+  transactionType?: string; // Dedicated field e.g. 'Simple Transaction' | 'Complex Transaction' | 'Highly Technical Transaction'
+  direction?: 'Incoming' | 'Outgoing'; // Preserved for backward compatibility
+  documentType?: string; // Preserved for backward compatibility
   communicationType: string;
   reportType: string;
   originDepartment: string;
@@ -44,7 +46,8 @@ export interface DocumentItem {
   timeReceived: string; // HH:mm:ss
   targetDivision: string;
   responsiblePerson: string;
-  priority: 'Routine' | 'Urgent' | 'Rush';
+  responsiblePersonId?: number;
+  priority: string;
   currentStatus: 'Incoming Logged' | 'Under Review' | 'Supervisor Comment Needed' | 'Complied / Ready for Clearance' | 'Cleared for Out' | 'Dispatched / Completed';
   currentLocation: string; // e.g. "Records Receiving Desk", "Admin Office Room 2", "Accounting Section"
   currentCustodian: string; // who holds it physically right now
@@ -55,6 +58,13 @@ export interface DocumentItem {
   version?: number;
   createdAt: string;
   updatedAt: string;
+  isCleared?: boolean;
+  clearedBy?: string | null;
+  clearedAt?: string | null;
+  clearanceType?: string | null;
+  exitTrackingNumber?: string | null;
+  forwardedToExternal?: string | null;
+  clearanceRemarks?: string | null;
 }
 
 export type SortField =
@@ -284,6 +294,7 @@ export interface AppUserRole {
   assignedDesk?: string;
   username: string;
   status?: UserAccountStatus;
+  isFocalPerson?: boolean;
   lastLogin?: string;
 }
 
@@ -394,8 +405,10 @@ export function normalizeDocumentItem(doc: any): DocumentItem {
     id: String(doc.id || doc.trackingNumber || `doc-${Date.now()}`),
     trackingNumber: String(doc.trackingNumber || doc.id || 'TRK-UNKNOWN'),
     title: String(doc.title || 'Untitled Document'),
-    direction: doc.direction === 'Outgoing' || isCleared ? 'Outgoing' : 'Incoming',
-    documentType: doc.documentType || 'Simple Transaction',
+    documentClassification: doc.documentClassification || doc.direction || (isCleared ? 'Outgoing' : 'Incoming'),
+    transactionType: doc.transactionType || doc.documentType || 'Simple Transaction',
+    direction: doc.direction === 'Outgoing' || doc.documentClassification === 'Outgoing' || isCleared ? 'Outgoing' : 'Incoming',
+    documentType: doc.documentType || doc.transactionType || 'Simple Transaction',
     communicationType: doc.communicationType || 'General Communication',
     reportType: doc.reportType || 'Standard',
     originDepartment: String(doc.originDepartment || 'General Inflow'),

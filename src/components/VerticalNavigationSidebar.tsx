@@ -19,6 +19,7 @@ import {
   ExternalLink,
   FolderGit2,
 } from 'lucide-react';
+import { canUserManageSettings } from '../lib/permissions';
 
 export type WorkspaceTab = 'documents' | 'distribution' | 'analytics' | 'links' | 'admin';
 
@@ -58,6 +59,7 @@ export const VerticalNavigationSidebar: React.FC<VerticalNavigationSidebarProps>
   setIsCollapsed,
 }) => {
   const isSysAdmin = currentUserRole === 'System Admin';
+  const canManageSettings = canUserManageSettings(currentUserRole);
 
   const navItems = [
     {
@@ -101,13 +103,13 @@ export const VerticalNavigationSidebar: React.FC<VerticalNavigationSidebarProps>
       badgeType: 'pill' as const,
       color: 'indigo',
     },
-    ...(isSysAdmin
+    ...(canManageSettings
       ? [
           {
             id: 'admin' as WorkspaceTab,
-            label: 'System Admin Settings',
-            shortLabel: 'Admin Settings',
-            description: 'Time-in-desk SLA thresholds & system controls',
+            label: 'System Settings',
+            shortLabel: 'Settings',
+            description: 'Time-in-desk SLA thresholds & system registries',
             icon: Sliders,
             badgeLabel: 'Admin',
             badgeType: 'pill' as const,

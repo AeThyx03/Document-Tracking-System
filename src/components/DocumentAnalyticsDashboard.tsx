@@ -627,7 +627,7 @@ export const DocumentAnalyticsDashboard: React.FC<DocumentAnalyticsDashboardProp
                       <div className="flex items-center gap-2">
                         <span
                           className="w-2.5 h-2.5 rounded-full"
-                          style={{ backgroundColor: PRIORITY_COLORS[row.priority] }}
+                          style={{ backgroundColor: PRIORITY_COLORS[row.priority] || '#64748b' }}
                         />
                         <span className="font-bold text-slate-900 dark:text-white">{row.priority}</span>
                       </div>

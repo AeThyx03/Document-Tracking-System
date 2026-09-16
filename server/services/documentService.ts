@@ -12,6 +12,8 @@ import {
   departments,
 } from '../db/schema.ts';
 import { createAuditLog, AuditActor } from './auditService.ts';
+import { getDropdownOptionsGrouped } from './dropdownService.ts';
+
 
 export class DocumentConflictError extends Error {
   constructor(message = 'Document has been modified by another process. Please refresh and retry.') {
@@ -38,16 +40,17 @@ export class DocumentValidationError extends Error {
  * Resolves canonical personnel name and ID bidirectionally.
  * Prioritizes ID if present; otherwise queries by name.
  */
-export async function resolvePersonnelInfo(id?: number | null, name?: string | null): Promise<{ id: number | null; name: string }> {
+export async function resolvePersonnelInfo(id?: number | null, name?: string | null): Promise<{ id: number | null; name: string; status?: string; isFocalPerson?: boolean }> {
   if (id) {
     const [p] = await db.select().from(personnel).where(eq(personnel.id, Number(id)));
-    if (p) return { id: p.id, name: p.name };
+    if (p) return { id: p.id, name: p.name, status: p.status || 'active', isFocalPerson: p.isFocalPerson || false };
+    throw new DocumentValidationError("Invalid personnel ID provided.");
   }
   if (name && name.trim() && name !== 'Unassigned' && name !== 'Records Officer') {
     const [p] = await db.select().from(personnel).where(ilike(personnel.name, name.trim()));
-    if (p) return { id: p.id, name: p.name };
+    if (p) return { id: p.id, name: p.name, status: p.status || 'active', isFocalPerson: p.isFocalPerson || false };
   }
-  return { id: id ? Number(id) : null, name: name || 'Unassigned' };
+  return { id: id ? Number(id) : null, name: name || 'Unassigned', status: 'active', isFocalPerson: false };
 }
 
 /**
@@ -119,22 +122,29 @@ export async function getAuthoritativeUserById(userId: string | number | undefin
  * Ensures legacy documents fields and managerClearance object are 100% synchronized and never contradictory.
  */
 export function formatDocumentWithClearance(d: any, mc?: any) {
-  const isActuallyCleared = mc ? Boolean(mc.isCleared) : false;
+  const isActuallyCleared = mc ? Boolean(mc.isCleared) : Boolean(d?.isCleared);
   const managerClearance = {
     isCleared: isActuallyCleared,
-    clearedBy: isActuallyCleared ? (mc?.clearedBy || null) : null,
-    clearedAt: isActuallyCleared ? (mc?.clearedAt ? new Date(mc.clearedAt).toISOString() : null) : null,
-    clearanceType: isActuallyCleared ? (mc?.clearanceType || null) : (mc?.clearanceType === 'returned_for_revision' ? 'returned_for_revision' : null),
-    exitTrackingNumber: isActuallyCleared ? (mc?.exitTrackingNumber || null) : null,
-    forwardedToExternal: isActuallyCleared ? (mc?.forwardedToExternal || null) : null,
-    clearanceRemarks: mc?.clearanceRemarks || null,
+    clearedBy: isActuallyCleared ? (mc?.clearedBy || d?.clearedBy || null) : null,
+    clearedAt: isActuallyCleared ? (mc?.clearedAt ? new Date(mc.clearedAt).toISOString() : (d?.clearedAt ? new Date(d.clearedAt).toISOString() : null)) : null,
+    clearanceType: isActuallyCleared ? (mc?.clearanceType || d?.clearanceType || null) : (mc?.clearanceType === 'returned_for_revision' || d?.clearanceType === 'returned_for_revision' ? 'returned_for_revision' : null),
+    exitTrackingNumber: isActuallyCleared ? (mc?.exitTrackingNumber || d?.exitTrackingNumber || null) : null,
+    forwardedToExternal: isActuallyCleared ? (mc?.forwardedToExternal || d?.forwardedToExternal || null) : null,
+    clearanceRemarks: mc?.clearanceRemarks || d?.clearanceRemarks || null,
   };
+
+  const docClassification = d?.documentClassification || d?.direction || 'Incoming';
+  const txType = d?.transactionType || d?.documentType || 'Simple Transaction';
 
   return {
     ...d,
+    documentClassification: docClassification,
+    transactionType: txType,
+    direction: d?.direction || docClassification,
+    documentType: d?.documentType || txType,
     isCleared: isActuallyCleared,
-    clearedBy: isActuallyCleared ? (mc?.clearedBy || null) : null,
-    clearedAt: isActuallyCleared ? (mc?.clearedAt ? new Date(mc.clearedAt).toISOString() : null) : null,
+    clearedBy: isActuallyCleared ? (mc?.clearedBy || d?.clearedBy || null) : null,
+    clearedAt: isActuallyCleared ? (mc?.clearedAt ? new Date(mc.clearedAt).toISOString() : (d?.clearedAt ? new Date(d.clearedAt).toISOString() : null)) : null,
     clearanceType: managerClearance.clearanceType,
     exitTrackingNumber: managerClearance.exitTrackingNumber,
     forwardedToExternal: managerClearance.forwardedToExternal,
@@ -311,6 +321,28 @@ export async function getDocumentById(id: string) {
 }
 
 export async function createNewDocument(data: any, userId?: string, actor?: AuditActor) {
+
+  const activeOptions = await getDropdownOptionsGrouped({ includeInactive: false });
+  const validateDropdown = (category: string, value: string | undefined, label: string) => {
+    if (!value) return;
+    const items = activeOptions[category] || [];
+    if (!items.some(opt => opt.value === value)) {
+      throw new DocumentValidationError(`Invalid or deactivated ${label} selected: "${value}". Please refresh your options.`);
+    }
+  };
+
+  const docClassification = data.documentClassification || data.direction || 'Incoming';
+  const txType = data.transactionType || data.documentType || 'Simple Transaction';
+
+  validateDropdown('document_classification', docClassification, 'Document Classification');
+  validateDropdown('transaction_type', txType, 'Transaction Type');
+  
+  if (data.communicationType && data.communicationType !== 'N/A') validateDropdown('communication_type', data.communicationType, 'Communication Type');
+  if (data.reportType && data.reportType !== 'N/A') validateDropdown('report_type', data.reportType, 'Report Type');
+  if (data.originDepartment && data.originDepartment !== 'General Records') validateDropdown('originating_agency', data.originDepartment, 'Originating Department / Agency');
+  if (data.targetDivision && data.targetDivision !== 'Unassigned') validateDropdown('target_division', data.targetDivision, 'Target Division');
+  if (data.priority && data.priority !== 'Routine') validateDropdown('priority_level', data.priority, 'Priority Level');
+
   if (!data.trackingNumber || typeof data.trackingNumber !== 'string' || !data.trackingNumber.trim()) {
     throw new DocumentValidationError('Tracking number is required and cannot be empty.');
   }
@@ -328,16 +360,40 @@ export async function createNewDocument(data: any, userId?: string, actor?: Audi
     const now = new Date();
 
     // Canonical bidirectional resolution
-    const resp = await resolvePersonnelInfo(data.responsiblePersonId, data.responsiblePerson);
+    
+    // Strict validation for Focal Person
+    let resp;
+    if (!data.responsiblePersonId) {
+      throw new DocumentValidationError("A valid Focal Person ID (responsiblePersonId) is required.");
+    }
+    const [focalP] = await tx.select().from(personnel).where(eq(personnel.id, Number(data.responsiblePersonId)));
+    if (!focalP) {
+      throw new DocumentValidationError("The provided Focal Person does not exist in the personnel database.");
+    }
+    if (focalP.status === 'suspended') {
+      throw new DocumentValidationError("Suspended personnel cannot be designated as Focal Person for new documents.");
+    }
+    
+    // LIMITATION: Currently, we do NOT enforce `focalP.isFocalPerson === true` because the business rule
+    // is not fully established, and the frontend falls back to all active supervisors if no one is explicitly
+    // designated. This preserves current behavior until the focal person designation logic is strictly confirmed.
+    
+    resp = { id: focalP.id, name: focalP.name };
+
     const cust = await resolvePersonnelInfo(data.currentCustodianId, data.currentCustodian);
     const desk = await resolveDeskInfo(data.currentDeskId, data.currentLocation);
+
+    const docClassification = data.documentClassification || data.direction || 'Incoming';
+    const txType = data.transactionType || data.documentType || 'Simple Transaction';
 
     const newDocValues = {
       id: docId,
       trackingNumber: data.trackingNumber.trim(),
       title: data.title.trim(),
-      direction: data.direction || 'Incoming',
-      documentType: data.documentType || 'General Communication',
+      documentClassification: docClassification,
+      transactionType: txType,
+      direction: data.direction || docClassification,
+      documentType: data.documentType || txType,
       communicationType: data.communicationType || 'Internal Memo',
       reportType: data.reportType || 'N/A',
       originDepartment: data.originDepartment || 'General Records',
@@ -347,20 +403,20 @@ export async function createNewDocument(data: any, userId?: string, actor?: Audi
       responsiblePerson: resp.name,
       responsiblePersonId: resp.id,
       priority: data.priority || 'Routine',
-      currentStatus: data.currentStatus || 'Received',
+      currentStatus: data.currentStatus || 'Incoming Logged',
       currentLocation: desk.name,
       currentCustodian: cust.name,
       currentCustodianId: cust.id,
       currentDeskId: desk.id,
       fileLink: data.fileLink || null,
       version: 1,
-      isCleared: data.managerClearance?.isCleared || false,
-      clearedBy: data.managerClearance?.clearedBy || null,
-      clearedAt: data.managerClearance?.clearedAt ? new Date(data.managerClearance.clearedAt) : null,
-      clearanceType: data.managerClearance?.clearanceType || null,
-      exitTrackingNumber: data.managerClearance?.exitTrackingNumber || null,
-      forwardedToExternal: data.managerClearance?.forwardedToExternal || null,
-      clearanceRemarks: data.managerClearance?.clearanceRemarks || null,
+      isCleared: false,
+      clearedBy: null,
+      clearedAt: null,
+      clearanceType: null,
+      exitTrackingNumber: null,
+      forwardedToExternal: null,
+      clearanceRemarks: null,
       createdAt: data.createdAt ? new Date(data.createdAt) : now,
       updatedAt: now,
     };
@@ -430,7 +486,18 @@ export async function updateExistingDocument(id: string, data: any, clientVersio
     // Resolve relational references if updated
     const resp = (data.responsiblePersonId !== undefined || data.responsiblePerson !== undefined)
       ? await resolvePersonnelInfo(data.responsiblePersonId !== undefined ? (data.responsiblePersonId ? Number(data.responsiblePersonId) : null) : currentDoc.responsiblePersonId, data.responsiblePerson ?? currentDoc.responsiblePerson)
-      : { id: currentDoc.responsiblePersonId, name: currentDoc.responsiblePerson };
+      : { id: currentDoc.responsiblePersonId, name: currentDoc.responsiblePerson, status: 'active', isFocalPerson: false };
+
+    if (
+      resp.status === 'suspended' &&
+      data.responsiblePersonId !== undefined &&
+      Number(data.responsiblePersonId) !== currentDoc.responsiblePersonId
+    ) {
+      throw new DocumentValidationError("Suspended personnel cannot be designated as Focal Person for documents.");
+    }
+
+    // LIMITATION: Similar to document creation, we do NOT enforce `resp.isFocalPerson === true` here
+    // to preserve current workflows until the explicit focal-person business rule is confirmed.
 
     const cust = (data.currentCustodianId !== undefined || data.currentCustodian !== undefined)
       ? await resolvePersonnelInfo(data.currentCustodianId !== undefined ? (data.currentCustodianId ? Number(data.currentCustodianId) : null) : currentDoc.currentCustodianId, data.currentCustodian ?? currentDoc.currentCustodian)
@@ -440,10 +507,20 @@ export async function updateExistingDocument(id: string, data: any, clientVersio
       ? await resolveDeskInfo(data.currentDeskId !== undefined ? (data.currentDeskId ? Number(data.currentDeskId) : null) : currentDoc.currentDeskId, data.currentLocation ?? currentDoc.currentLocation)
       : { id: currentDoc.currentDeskId, name: currentDoc.currentLocation };
 
+    const updatedDocClassification = data.documentClassification !== undefined
+      ? data.documentClassification
+      : (data.direction !== undefined ? data.direction : currentDoc.documentClassification);
+
+    const updatedTxType = data.transactionType !== undefined
+      ? data.transactionType
+      : (data.documentType !== undefined ? data.documentType : currentDoc.transactionType);
+
     const updateFields: any = {
       title: data.title ?? currentDoc.title,
-      direction: data.direction ?? currentDoc.direction,
-      documentType: data.documentType ?? currentDoc.documentType,
+      documentClassification: updatedDocClassification,
+      transactionType: updatedTxType,
+      direction: data.direction ?? updatedDocClassification,
+      documentType: data.documentType ?? updatedTxType,
       communicationType: data.communicationType ?? currentDoc.communicationType,
       reportType: data.reportType ?? currentDoc.reportType,
       originDepartment: data.originDepartment ?? currentDoc.originDepartment,

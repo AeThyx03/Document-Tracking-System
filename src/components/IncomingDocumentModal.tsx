@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { DocumentItem, TimeInDeskConfig, RegistryDropdownOptions, generatePOSSDTrackingNumber, AppUserRole, DEFAULT_REGISTRY_DROPDOWN_OPTIONS } from '../types';
 import { generateEntityId, reconcileDocumentIntegrity } from '../lib/workflow';
+import { apiRequest } from '../lib/api';
 import { PossdLogo } from './PossdLogo';
 import { PlusCircle, Clock, Hash, Building2, User, Send, Inbox, FileText, AlertTriangle, Timer, Link2, ExternalLink, CheckCircle2, Tag, RefreshCw, AlertCircle, ShieldCheck, UserCheck, Edit3 } from 'lucide-react';
 import { getDivisionThreshold, DEFAULT_TIME_IN_DESK_CONFIG } from '../lib/timeInDesk';
@@ -42,37 +43,33 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
   staffList = [],
   existingDocuments = [],
 }) => {
-  const documentTypeList = (dropdownOptions?.documentTypes && dropdownOptions.documentTypes.length > 0)
-    ? dropdownOptions.documentTypes
-    : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.documentTypes;
+  
+  const [dbOptions, setDbOptions] = useState<Record<string, { value: string; label: string }[]>>({});
+  const [isLoadingOptions, setIsLoadingOptions] = useState(false);
 
-  const communicationTypeList = (dropdownOptions?.communicationTypes && dropdownOptions.communicationTypes.length > 0)
-    ? dropdownOptions.communicationTypes
-    : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.communicationTypes;
+  useEffect(() => {
+    if (isOpen) {
+      setIsLoadingOptions(true);
+      apiRequest('/api/dropdown-options/grouped?includeInactive=false')
+        .then((data) => {
+          setDbOptions(data.dropdownOptions || {});
+        })
+        .catch(err => {
+          console.error("Failed to load options", err);
+          setValidationError("Failed to load active dropdown configurations. Please refresh the page.");
+        })
+        .finally(() => setIsLoadingOptions(false));
+    }
+  }, [isOpen]);
 
-  const reportTypeList = (dropdownOptions?.reportTypes && dropdownOptions.reportTypes.length > 0)
-    ? dropdownOptions.reportTypes
-    : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.reportTypes;
+  const transactionTypeList = useMemo(() => (dbOptions['transaction_type'] || []).map(o => o.value), [dbOptions]);
+  const communicationTypeList = useMemo(() => (dbOptions['communication_type'] || []).map(o => o.value), [dbOptions]);
+  const reportTypeList = useMemo(() => (dbOptions['report_type'] || []).map(o => o.value), [dbOptions]);
+  const originatingAgencyList = useMemo(() => (dbOptions['originating_agency'] || []).map(o => o.value), [dbOptions]);
+  const divisionList = useMemo(() => (dbOptions['target_division'] || []).map(o => o.value), [dbOptions]);
+  const documentClassificationList = useMemo(() => (dbOptions['document_classification'] || []).map(o => o.value), [dbOptions]);
+  const priorityList = useMemo(() => (dbOptions['priority_level'] || []).map(o => o.value), [dbOptions]);
 
-  const originatingAgencyList = (dropdownOptions?.originatingAgencies && dropdownOptions.originatingAgencies.length > 0)
-    ? dropdownOptions.originatingAgencies
-    : (DEFAULT_REGISTRY_DROPDOWN_OPTIONS.originatingAgencies || [
-        'Central Records & Receiving Desk',
-        'Executive Office of the Manager',
-        'Administrative & General Services',
-        'Finance & Budget Division',
-        'Planning & Quality Assurance',
-        'Legal & Regulatory Affairs',
-        'Office of the Regional Director',
-        'Department of Transportation',
-        'Civil Service Commission',
-        'Department of Budget and Management',
-        'External Contractor / Supplier',
-      ]);
-
-  const divisionList = (dropdownOptions?.targetDivisions && dropdownOptions.targetDivisions.length > 0)
-    ? dropdownOptions.targetDivisions
-    : (availableDivisions && availableDivisions.length > 0 ? availableDivisions : DIVISIONS);
 
   // Filter enrolled personnel with supervisor permissions
   const enrolledSupervisors = useMemo(() => {
@@ -84,48 +81,46 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
   // Active focal persons: If system admin designated specific supervisor focal persons in dropdownOptions.focalPersons,
   // use those (validated against supervisor permissions); otherwise include all enrolled supervisors.
   const activeFocalSupervisors = useMemo(() => {
-    if (dropdownOptions?.focalPersons && dropdownOptions.focalPersons.length > 0) {
-      // Pick enrolled supervisors matching the configured focalPersons
-      const matched = enrolledSupervisors.filter((s) => dropdownOptions.focalPersons!.includes(s.name));
-      if (matched.length > 0) return matched;
-      // If configured focal persons were saved by name and supervisors exist
-      const namedMatches = dropdownOptions.focalPersons.map((name) => {
-        const found = enrolledSupervisors.find((s) => s.name === name);
-        return found || { id: name, name, role: 'Supervisor' as const, division: 'Operations & Emergency', username: name.toLowerCase().replace(/\s+/g, '.') };
-      });
-      return namedMatches;
-    }
+    // 1. Authoritative source: staffList with isFocalPerson === true and status !== suspended
+    const designated = (staffList || []).filter(
+      (s) => s.status !== 'suspended' && s.isFocalPerson
+    );
+    if (designated.length > 0) return designated;
+
+    // 2. Fallback: all non-suspended supervisors (if none explicitly designated)
     if (enrolledSupervisors.length > 0) {
       return enrolledSupervisors;
     }
-    // Baseline fallback with supervisor role if no staff enrolled yet
+
+    // 3. Baseline mock fallback
     return [
       { id: 'focal-1', name: 'Mary Flor Aquino', role: 'Supervisor' as const, division: 'Operations & Emergency', username: 'mfaquino' },
       { id: 'focal-2', name: 'Aubrey Camille Cabreras', role: 'Supervisor' as const, division: 'Planning & QA', username: 'acabreras' },
     ];
-  }, [enrolledSupervisors, dropdownOptions?.focalPersons]);
+  }, [staffList, enrolledSupervisors]);
 
-  // Direction: Incoming vs Outgoing
-  const [direction, setDirection] = useState<'Incoming' | 'Outgoing'>('Incoming');
+  // Document Classification: Incoming vs Outgoing
+  const [documentClassification, setDocumentClassification] = useState<'Incoming' | 'Outgoing'>('Incoming');
   // Tracking number: auto-generated for incoming, strictly blank and editable for outgoing
   const [trackingNumber, setTrackingNumber] = useState('');
   const [title, setTitle] = useState('');
-  const [documentType, setDocumentType] = useState<string>(documentTypeList[0] || 'Simple Transaction');
+  // Transaction Type: Simple Transaction, Complex Transaction, etc.
+  const [transactionType, setTransactionType] = useState<string>(transactionTypeList[0] || 'Simple Transaction');
   const [communicationType, setCommunicationType] = useState<string>(communicationTypeList[0] || 'Memorandum');
   const [reportType, setReportType] = useState<string>(reportTypeList[0] || 'Inspection Report');
   
   // Originating Dept / Agency state with option for custom typing
   const [originDepartment, setOriginDepartment] = useState(originatingAgencyList[0] || '');
-  const [isCustomOriginAgency, setIsCustomOriginAgency] = useState(false);
-  const [customOriginInput, setCustomOriginInput] = useState('');
-
+    
   const [dateReceived, setDateReceived] = useState('');
   const [timeReceived, setTimeReceived] = useState('');
   const [targetDivision, setTargetDivision] = useState(divisionList[0] || 'Administration');
   
   // Focal Person state (Selected among enrolled personnel with supervisor permissions)
-  const [responsiblePerson, setResponsiblePerson] = useState(activeFocalSupervisors[0]?.name || 'Mary Flor Aquino');
-  const [priority, setPriority] = useState<DocumentItem['priority']>('Routine');
+  const [responsiblePersonId, setResponsiblePersonId] = useState<string>(
+    activeFocalSupervisors[0]?.id || ''
+  );
+  const [priority, setPriority] = useState<string>(priorityList[0] || 'Routine');
   
   const [fileLink, setFileLink] = useState('');
   const [notes, setNotes] = useState('');
@@ -135,8 +130,8 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
   // Update default selections when options change or modal opens
   useEffect(() => {
     if (isOpen) {
-      if (documentTypeList.length > 0 && !documentTypeList.includes(documentType)) {
-        setDocumentType(documentTypeList[0]);
+      if (transactionTypeList.length > 0 && !transactionTypeList.includes(transactionType)) {
+        setTransactionType(transactionTypeList[0]);
       }
       if (communicationTypeList.length > 0 && !communicationTypeList.includes(communicationType)) {
         setCommunicationType(communicationTypeList[0]);
@@ -144,17 +139,23 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       if (reportTypeList.length > 0 && !reportTypeList.includes(reportType)) {
         setReportType(reportTypeList[0]);
       }
-      if (!isCustomOriginAgency && originatingAgencyList.length > 0 && !originatingAgencyList.includes(originDepartment)) {
+      if (originatingAgencyList.length > 0 && !originatingAgencyList.includes(originDepartment)) {
         setOriginDepartment(originatingAgencyList[0]);
+      }
+      if (documentClassificationList.length > 0 && !documentClassificationList.includes(documentClassification as any)) {
+        setDocumentClassification(documentClassificationList[0] as any);
+      }
+      if (priorityList.length > 0 && !priorityList.includes(priority as any)) {
+        setPriority(priorityList[0] as any);
       }
       if (divisionList.length > 0 && !divisionList.includes(targetDivision)) {
         setTargetDivision(divisionList[0]);
       }
-      if (activeFocalSupervisors.length > 0 && !activeFocalSupervisors.some(s => s.name === responsiblePerson)) {
-        setResponsiblePerson(activeFocalSupervisors[0].name);
+      if (activeFocalSupervisors.length > 0 && !activeFocalSupervisors.some(s => s.id === responsiblePersonId)) {
+        setResponsiblePersonId(activeFocalSupervisors[0].id);
       }
     }
-  }, [isOpen, documentTypeList, communicationTypeList, reportTypeList, originatingAgencyList, divisionList, activeFocalSupervisors]);
+  }, [isOpen, transactionTypeList, communicationTypeList, reportTypeList, originatingAgencyList, divisionList, documentClassificationList, priorityList, activeFocalSupervisors]);
 
   // Clock tick to automatically show current date and time upon opening
   useEffect(() => {
@@ -172,7 +173,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       setDateReceived(`${yyyy}-${mm}-${dd}`);
       setTimeReceived(`${hh}:${min}:${ss}`);
 
-      if (direction === 'Incoming') {
+      if (documentClassification === 'Incoming') {
         // Auto tracking number for incoming: POSSD-YYYY-MM-XXXX
         setTrackingNumber(generatePOSSDTrackingNumber(existingDocuments));
       } else {
@@ -182,10 +183,10 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
     }
   }, [isOpen]);
 
-  const handleDirectionChange = (newDirection: 'Incoming' | 'Outgoing') => {
-    setDirection(newDirection);
+  const handleClassificationChange = (newClassification: 'Incoming' | 'Outgoing') => {
+    setDocumentClassification(newClassification);
     setValidationError(null);
-    if (newDirection === 'Outgoing') {
+    if (newClassification === 'Outgoing') {
       // User specifically requested: tracking number is blank and can be typed into if outgoing document is selected
       setTrackingNumber('');
     } else {
@@ -210,18 +211,52 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       setValidationError('Document title is required.');
       return;
     }
-    const effectiveOrigin = isCustomOriginAgency ? customOriginInput.trim() : originDepartment.trim();
+    const effectiveOrigin = originDepartment.trim();
     if (!effectiveOrigin) {
-      setValidationError(direction === 'Outgoing' ? 'Destination / recipient entity is required.' : 'Originating department / agency is required.');
+      setValidationError(documentClassification === 'Outgoing' ? 'Destination / recipient entity is required.' : 'Originating department / agency is required.');
       return;
     }
-    if (!responsiblePerson.trim()) {
+    
+    const selectedFocal = activeFocalSupervisors.find(s => s.id === responsiblePersonId);
+    if (!selectedFocal) {
       setValidationError('Action officer / responsible person is required.');
       return;
     }
 
+
+    
+    if (!documentClassificationList.includes(documentClassification)) {
+      setValidationError("Selected document classification is not active. Please refresh.");
+      return;
+    }
+    if (!transactionTypeList.includes(transactionType)) {
+      setValidationError("Selected transaction type is not active. Please refresh.");
+      return;
+    }
+    if (!communicationTypeList.includes(communicationType)) {
+      setValidationError("Selected communication type is not active. Please refresh.");
+      return;
+    }
+    if (!reportTypeList.includes(reportType)) {
+      setValidationError("Selected report type is not active. Please refresh.");
+      return;
+    }
+    if (!originatingAgencyList.includes(effectiveOrigin)) {
+      setValidationError("Selected originating agency is not active. Please refresh.");
+      return;
+    }
+    if (!divisionList.includes(targetDivision)) {
+      setValidationError("Selected target division is not active. Please refresh.");
+      return;
+    }
+    if (!priorityList.includes(priority)) {
+      setValidationError("Selected priority level is not active. Please refresh.");
+      return;
+    }
+    
     setValidationError(null);
     setIsSubmitting(true);
+
 
     try {
       const nowIso = new Date().toISOString();
@@ -229,18 +264,21 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
         id: generateEntityId('doc'),
         trackingNumber: trackingNumber.trim(),
         title: title.trim(),
-        direction,
-        documentType,
+        documentClassification,
+        transactionType,
+        direction: documentClassification,
+        documentType: transactionType,
         communicationType,
         reportType,
         originDepartment: effectiveOrigin,
         dateReceived,
         timeReceived,
         targetDivision,
-        responsiblePerson: responsiblePerson.trim(),
+        responsiblePerson: selectedFocal.name,
+        responsiblePersonId: parseInt(selectedFocal.id, 10),
         priority,
-        currentStatus: direction === 'Outgoing' ? 'Cleared for Out' : 'Incoming Logged',
-        currentLocation: direction === 'Outgoing' ? 'Dispatch / Outbox Desk' : 'Receiving Station',
+        currentStatus: 'Incoming Logged',
+        currentLocation: documentClassification === 'Outgoing' ? 'Dispatch / Outbox Desk' : 'Receiving Station',
         currentCustodian: currentUser?.name || 'Receiving Clerk',
         fileLink: fileLink.trim() || undefined,
         movements: [
@@ -249,20 +287,20 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
             timestamp: nowIso,
             personnelName: currentUser?.name || 'Receiving Clerk',
             personnelRole: currentUser?.role || 'Staff',
-            currentDesk: direction === 'Outgoing' ? currentUser?.division || 'Originating Desk' : 'Receiving Desk',
+            currentDesk: documentClassification === 'Outgoing' ? currentUser?.division || 'Originating Desk' : 'Receiving Desk',
             forwardToDesk: targetDivision,
-            statusUpdate: direction === 'Outgoing' ? 'dispatched' : 'received',
-            notes: notes.trim() || (direction === 'Outgoing' 
+            statusUpdate: 'received',
+            notes: notes.trim() || (documentClassification === 'Outgoing' 
               ? 'Outgoing document recorded and dispatched in official registry.' 
               : 'Incoming document received and logged in official office registry.'),
           },
         ],
         supervisorRemarks: [],
         managerClearance: {
-          isCleared: direction === 'Outgoing',
-          clearedBy: direction === 'Outgoing' ? (currentUser?.name || 'Authorized Manager') : undefined,
-          clearedAt: direction === 'Outgoing' ? nowIso : undefined,
-          clearanceType: direction === 'Outgoing' ? 'approved_for_dispatch' : undefined,
+          isCleared: false,
+          clearedBy: undefined,
+          clearedAt: undefined,
+          clearanceType: undefined,
         },
         version: 1,
         createdAt: nowIso,
@@ -275,7 +313,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       // Reset form
       setTitle('');
       setOriginDepartment('');
-      setResponsiblePerson('');
+      setResponsiblePersonId('');
       setFileLink('');
       setNotes('');
     } finally {
@@ -318,7 +356,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
             </div>
           )}
 
-          {/* Incoming vs Outgoing Mode Option */}
+          {/* Document Classification Mode Option */}
           <div className="p-1.5 bg-slate-100 dark:bg-slate-800/80 rounded-xl border border-slate-200 dark:border-slate-700">
             <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 px-1 mb-1 uppercase tracking-wider">
               Document Classification
@@ -327,35 +365,35 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
               <button
                 type="button"
                 id="doc-option-incoming-btn"
-                onClick={() => handleDirectionChange('Incoming')}
+                onClick={() => handleClassificationChange('Incoming')}
                 className={`py-2 px-3.5 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                  direction === 'Incoming'
+                  documentClassification === 'Incoming'
                     ? 'bg-emerald-600 text-white shadow-xs ring-1 ring-emerald-500'
                     : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/70 dark:hover:bg-slate-700/60'
                 }`}
               >
                 <Inbox className="w-4 h-4" />
                 <span>Incoming Document</span>
-                <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${direction === 'Incoming' ? 'bg-emerald-700 text-emerald-100' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>Auto-ID</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${documentClassification === 'Incoming' ? 'bg-emerald-700 text-emerald-100' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>Auto-ID</span>
               </button>
               <button
                 type="button"
                 id="doc-option-outgoing-btn"
-                onClick={() => handleDirectionChange('Outgoing')}
+                onClick={() => handleClassificationChange('Outgoing')}
                 className={`py-2 px-3.5 rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
-                  direction === 'Outgoing'
+                  documentClassification === 'Outgoing'
                     ? 'bg-sky-600 text-white shadow-xs ring-1 ring-sky-500'
                     : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/70 dark:hover:bg-slate-700/60'
                 }`}
               >
                 <Send className="w-4 h-4" />
                 <span>Outgoing Document</span>
-                <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${direction === 'Outgoing' ? 'bg-sky-700 text-sky-100' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>Blank ID</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${documentClassification === 'Outgoing' ? 'bg-sky-700 text-sky-100' : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'}`}>Blank ID</span>
               </button>
             </div>
           </div>
 
-          {/* Tracking Number & Document Type */}
+          {/* Tracking Number & Transaction Type */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <div className="flex items-center justify-between mb-1">
@@ -363,7 +401,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
                   <Hash className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
                   Tracking Number <span className="text-rose-500">*</span>
                 </label>
-                {direction === 'Incoming' ? (
+                {documentClassification === 'Incoming' ? (
                   <button
                     type="button"
                     onClick={() => {
@@ -388,14 +426,14 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
                 value={trackingNumber}
                 onChange={(e) => setTrackingNumber(e.target.value)}
                 placeholder={
-                  direction === 'Outgoing'
+                  documentClassification === 'Outgoing'
                     ? 'Enter outgoing tracking code (e.g. OUT-2026-001)...'
                     : 'e.g. TRK-2026-1234'
                 }
                 className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 font-mono uppercase"
               />
               <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
-                {direction === 'Outgoing'
+                {documentClassification === 'Outgoing'
                   ? 'Tracking number is blank for outgoing documents. Type in your official dispatch or control code.'
                   : 'Auto-generated incoming registry code. Editable if using physical transmittal numbering.'}
               </p>
@@ -406,11 +444,12 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
                 Transaction Type
               </label>
               <select
-                value={documentType}
-                onChange={(e) => setDocumentType(e.target.value)}
+                id="document-transaction-type-select"
+                value={transactionType}
+                onChange={(e) => setTransactionType(e.target.value)}
                 className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 cursor-pointer"
               >
-                {documentTypeList.map((type) => (
+                {transactionTypeList.map((type) => (
                   <option key={type} value={type}>{type}</option>
                 ))}
               </select>
@@ -427,7 +466,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
               id="document-title-input"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder={direction === 'Outgoing' ? 'e.g. Transmittal of Monthly Audit Report to Regional Office' : 'e.g. Budget Proposal for Q3'}
+              placeholder="Enter document title or subject"
               className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
             />
           </div>
@@ -473,47 +512,30 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    setIsCustomOriginAgency(!isCustomOriginAgency);
-                    if (!isCustomOriginAgency) {
-                      setCustomOriginInput(originDepartment || '');
+                    (() => {})();
+                    if (!false) {
+                      (() => {})();
                     }
                   }}
                   className="text-[11px] font-medium text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
                 >
                   <Edit3 className="w-3 h-3" />
-                  {isCustomOriginAgency ? 'Select Preset Agency' : '+ Type Custom'}
+                  {false ? 'Select Preset Agency' : '+ Type Custom'}
                 </button>
               </div>
-              {isCustomOriginAgency ? (
-                <input
-                  type="text"
-                  required
-                  value={customOriginInput}
-                  onChange={(e) => setCustomOriginInput(e.target.value)}
-                  placeholder="Type specific originating entity or agency..."
-                  className="w-full text-sm rounded-xl border border-blue-400 dark:border-blue-600 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                />
-              ) : (
-                <select
+              
+              <select
                   value={originDepartment}
-                  onChange={(e) => {
-                    if (e.target.value === '__custom__') {
-                      setIsCustomOriginAgency(true);
-                      setCustomOriginInput('');
-                    } else {
-                      setOriginDepartment(e.target.value);
-                    }
-                  }}
+                  onChange={(e) => setOriginDepartment(e.target.value)}
                   className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 cursor-pointer"
                 >
-                  {originatingAgencyList.map((agency) => (
+                  {originatingAgencyList.map((agency: any) => (
                     <option key={agency} value={agency}>
                       {agency}
                     </option>
                   ))}
-                  <option value="__custom__">+ Other / Enter Custom Agency...</option>
-                </select>
-              )}
+              </select>
+
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -544,12 +566,12 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
             </div>
             <select
               id="responsible-person-input"
-              value={responsiblePerson}
-              onChange={(e) => setResponsiblePerson(e.target.value)}
+              value={responsiblePersonId}
+              onChange={(e) => setResponsiblePersonId(e.target.value)}
               className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 cursor-pointer"
             >
               {activeFocalSupervisors.map((person) => (
-                <option key={person.id || person.name} value={person.name}>
+                <option key={person.id} value={person.id}>
                   {person.name} — {person.role} ({person.division})
                 </option>
               ))}
@@ -635,14 +657,14 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
           {/* Initial Remarks / Notes */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-              {direction === 'Outgoing' ? 'Dispatch Notes / Transmittal Details' : 'Receiving Notes / Envelope Contents'}
+              {documentClassification === 'Outgoing' ? 'Dispatch Notes / Transmittal Details' : 'Receiving Notes / Envelope Contents'}
             </label>
             <textarea
               id="receiving-notes-input"
               rows={2}
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder={direction === 'Outgoing' ? 'e.g. Dispatched via courier with tracking reference, signed acknowledgment requested.' : 'e.g. Contains 3 original copies, supporting receipts, and executive brief.'}
+              placeholder={documentClassification === 'Outgoing' ? 'e.g. Dispatched via courier with tracking reference, signed acknowledgment requested.' : 'e.g. Contains 3 original copies, supporting receipts, and executive brief.'}
               className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 resize-none"
             />
           </div>
@@ -670,7 +692,7 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
               ) : (
                 <>
                   <PlusCircle className="w-4 h-4" />
-                  <span>{direction === 'Outgoing' ? 'Log & Dispatch Document' : 'Log & Forward Document'}</span>
+                  <span>{documentClassification === 'Outgoing' ? 'Log & Dispatch Document' : 'Log & Forward Document'}</span>
                 </>
               )}
             </button>

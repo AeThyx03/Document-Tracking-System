@@ -1,0 +1,1 @@
+ALTER TABLE personnel ADD COLUMN IF NOT EXISTS is_focal_person BOOLEAN DEFAULT false;

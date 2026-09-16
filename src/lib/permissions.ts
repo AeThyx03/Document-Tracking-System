@@ -222,7 +222,7 @@ export const ROLE_CONFIGS: Record<CanonicalRole, RolePermissionConfig> = {
     canFulfillCompliance: true,
     canAuthorizeClearance: true,
     canConfigureSync: true,
-    canManageStaff: true,
+    canManageStaff: false,
     canDeleteDocuments: true,
     canManageCredentials: false,
     canDeleteDivisionThresholdOverrides: false,

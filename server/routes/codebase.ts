@@ -157,6 +157,10 @@ ${codebaseText}
  * Compiles and returns all project files and checking prompt.
  */
 codebaseRouter.get('/codebase', async (req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return sendApiError(res, 403, 'FORBIDDEN', 'Codebase export is disabled in production environments for security reasons.');
+  }
+
   try {
     const rootDir = process.cwd();
     const files = await collectFiles(rootDir, rootDir);

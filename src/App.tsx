@@ -1493,8 +1493,8 @@ export default function App() {
               { id: 'distribution' as WorkspaceTab, label: 'Distribution', count: focalPendingCount, icon: Users, color: 'text-slate-300' },
               { id: 'analytics' as WorkspaceTab, label: 'Analytics', icon: BarChart3, color: 'text-slate-300' },
               { id: 'links' as WorkspaceTab, label: 'Dedicated Links', count: dedicatedLinks.length, icon: Link2, color: 'text-sky-400' },
-              ...(currentUser?.role === 'System Admin'
-                ? [{ id: 'admin' as WorkspaceTab, label: 'Admin Settings', icon: Sliders, color: 'text-slate-300' }]
+              ...(canUserManageSettings(currentUser)
+                ? [{ id: 'admin' as WorkspaceTab, label: 'Settings', icon: Sliders, color: 'text-slate-300' }]
                 : []),
             ].map((tab, _idx_tab) => {
               const Icon = tab.icon;
@@ -1842,9 +1842,11 @@ export default function App() {
                   className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-2.5 py-1 font-semibold text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-slate-500 cursor-pointer"
                 >
                   <option value="ALL">All Priorities</option>
-                  <option value="Routine">Routine</option>
-                  <option value="Urgent">Urgent</option>
-                  <option value="Rush">Rush</option>
+                  {(dropdownOptions.priorities && dropdownOptions.priorities.length > 0 
+                      ? dropdownOptions.priorities 
+                      : ['Routine', 'Urgent', 'Rush']).map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
                 </select>
               </div>
 
@@ -2000,9 +2002,11 @@ export default function App() {
                   </optgroup>
 
                   <optgroup label="Change Priority...">
-                    <option value="priority:Routine">Set Priority: Routine</option>
-                    <option value="priority:Urgent">Set Priority: Urgent</option>
-                    <option value="priority:Rush">Set Priority: Rush</option>
+                    {(dropdownOptions.priorities && dropdownOptions.priorities.length > 0 
+                      ? dropdownOptions.priorities 
+                      : ['Routine', 'Urgent', 'Rush']).map(p => (
+                    <option key={p} value={`priority:${p}`}>Set Priority: {p}</option>
+                  ))}
                   </optgroup>
 
                   <optgroup label="Update Lifecycle Status...">
@@ -2335,7 +2339,10 @@ export default function App() {
                     const isSelected = selectedDocIds.has(doc.id);
 
                     return (
-                      <tr
+                      <motion.tr
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.2, delay: (_idx_doc % 20) * 0.05 }}
                         key={`${doc.id}-${_idx_doc}`}
                         onClick={() => setSelectedDoc(doc)}
                         className={`transition-all duration-150 cursor-pointer group border-l-4 ${
@@ -2513,7 +2520,7 @@ export default function App() {
                             </button>
                           </div>
                         </td>
-                      </tr>
+                      </motion.tr>
                     );
                   })
                 )}

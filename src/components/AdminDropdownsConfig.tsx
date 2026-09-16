@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { AppUserRole, RegistryDropdownOptions, DEFAULT_REGISTRY_DROPDOWN_OPTIONS } from '../types';
+import { apiRequest } from '../lib/api';
 import { getRoleConfig, hasSupervisorPermissions } from '../mockData';
 import {
   Tag,
@@ -21,6 +22,9 @@ import {
   Search,
   Check,
   HelpCircle,
+  ArrowUp,
+  ArrowDown,
+  RefreshCw,
 } from 'lucide-react';
 
 interface AdminDropdownsConfigProps {
@@ -31,69 +35,82 @@ interface AdminDropdownsConfigProps {
 }
 
 type DropdownCategoryKey =
-  | 'documentTypes'
-  | 'communicationTypes'
-  | 'reportTypes'
-  | 'originatingAgencies'
-  | 'targetDivisions';
+  | 'document_classification'
+  | 'transaction_type'
+  | 'communication_type'
+  | 'report_type'
+  | 'originating_agency'
+  | 'target_division'
+  | 'priority_level';
 
 interface CategoryMeta {
   key: DropdownCategoryKey;
   label: string;
-  fieldInDoc: string;
   description: string;
   placeholder: string;
   icon: React.ComponentType<{ className?: string }>;
-  defaultItems: string[];
 }
 
 const CATEGORIES: CategoryMeta[] = [
   {
-    key: 'documentTypes',
+    key: 'document_classification',
+    label: 'Document Classification',
+    description: 'Routing direction classification (e.g., Incoming, Outgoing).',
+    placeholder: 'e.g. Incoming',
+    icon: ShieldCheck,
+  },
+  {
+    key: 'transaction_type',
     label: 'Transaction Type',
-    fieldInDoc: 'documentType',
-    description: 'Categories of transactions processed through POSSD (e.g. Simple, Complex, Technical).',
+    description: 'Categories of transactions processed (e.g. Simple, Complex).',
     placeholder: 'e.g. Urgent Special Clearance',
     icon: Tag,
-    defaultItems: DEFAULT_REGISTRY_DROPDOWN_OPTIONS.documentTypes,
   },
   {
-    key: 'communicationTypes',
+    key: 'communication_type',
     label: 'Communication Type',
-    fieldInDoc: 'communicationType',
-    description: 'Official correspondence and communication forms received or transmitted.',
+    description: 'Official correspondence and communication forms.',
     placeholder: 'e.g. Administrative Order',
     icon: FileText,
-    defaultItems: DEFAULT_REGISTRY_DROPDOWN_OPTIONS.communicationTypes,
   },
   {
-    key: 'reportTypes',
+    key: 'report_type',
     label: 'Report / Document Type',
-    fieldInDoc: 'reportType',
     description: 'Document classifications, inspection findings, and specialized reports.',
     placeholder: 'e.g. Environmental Clearance Slip',
     icon: Layers,
-    defaultItems: DEFAULT_REGISTRY_DROPDOWN_OPTIONS.reportTypes,
   },
   {
-    key: 'originatingAgencies',
+    key: 'originating_agency',
     label: 'Originating Dept / Agency',
-    fieldInDoc: 'originDepartment',
-    description: 'External departments, government bureaus, regional offices, and external senders.',
+    description: 'External departments, regional offices, external senders.',
     placeholder: 'e.g. Department of Transportation, Regional Trial Court',
     icon: Building2,
-    defaultItems: DEFAULT_REGISTRY_DROPDOWN_OPTIONS.originatingAgencies || [],
   },
   {
-    key: 'targetDivisions',
+    key: 'target_division',
     label: 'Forward To / Target Division',
-    fieldInDoc: 'targetDivision',
-    description: 'Internal receiving sections, operating units, and division offices within the agency.',
+    description: 'Internal receiving sections within the agency.',
     placeholder: 'e.g. Administrative Section, Finance Division',
     icon: Send,
-    defaultItems: DEFAULT_REGISTRY_DROPDOWN_OPTIONS.targetDivisions || [],
   },
+  {
+    key: 'priority_level',
+    label: 'Routing Priority Level',
+    description: 'Routing priorities (e.g. Normal, Urgent).',
+    placeholder: 'e.g. High Priority',
+    icon: Sparkles,
+  }
 ];
+
+export interface DropdownOptionRecord {
+  id: number;
+  category: string;
+  value: string;
+  label: string | null;
+  sortOrder: number;
+  isActive: boolean;
+}
 
 export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
   dropdownOptions,
@@ -101,195 +118,201 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
   staffList,
   currentUser,
 }) => {
-  // Active editable state
-  const [transactionTypes, setTransactionTypes] = useState<string[]>(
-    dropdownOptions.documentTypes?.length > 0
-      ? dropdownOptions.documentTypes
-      : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.documentTypes
-  );
-  const [communicationTypes, setCommunicationTypes] = useState<string[]>(
-    dropdownOptions.communicationTypes?.length > 0
-      ? dropdownOptions.communicationTypes
-      : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.communicationTypes
-  );
-  const [reportTypes, setReportTypes] = useState<string[]>(
-    dropdownOptions.reportTypes?.length > 0
-      ? dropdownOptions.reportTypes
-      : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.reportTypes
-  );
-  const [originatingAgencies, setOriginatingAgencies] = useState<string[]>(
-    dropdownOptions.originatingAgencies && dropdownOptions.originatingAgencies.length > 0
-      ? dropdownOptions.originatingAgencies
-      : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.originatingAgencies || []
-  );
-  const [targetDivisions, setTargetDivisions] = useState<string[]>(
-    dropdownOptions.targetDivisions && dropdownOptions.targetDivisions.length > 0
-      ? dropdownOptions.targetDivisions
-      : dropdownOptions.departments?.length > 0
-      ? dropdownOptions.departments
-      : DEFAULT_REGISTRY_DROPDOWN_OPTIONS.targetDivisions || []
-  );
-
-  // Focal person designated state
   const [designatedFocalPersons, setDesignatedFocalPersons] = useState<string[]>(() => {
-    if (dropdownOptions.focalPersons && dropdownOptions.focalPersons.length > 0) {
-      return dropdownOptions.focalPersons;
-    }
-    return DEFAULT_REGISTRY_DROPDOWN_OPTIONS.focalPersons || ['Mary Flor Aquino', 'Aubrey Camille Cabreras'];
+    return (staffList || []).filter(s => s.isFocalPerson).map(s => s.id);
   });
 
-  // Inputs for adding new options
-  const [newOptionInputs, setNewOptionInputs] = useState<Record<DropdownCategoryKey, string>>({
-    documentTypes: '',
-    communicationTypes: '',
-    reportTypes: '',
-    originatingAgencies: '',
-    targetDivisions: '',
-  });
+  const [dbOptionsGrouped, setDbOptionsGrouped] = useState<Record<string, DropdownOptionRecord[]>>({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [selectedCategory, setSelectedCategory] = useState<DropdownCategoryKey>('documentTypes');
+  const [newOptionInput, setNewOptionInput] = useState<string>('');
+  const [selectedCategory, setSelectedCategory] = useState<DropdownCategoryKey>('document_classification');
   const [quickSupervisorToAdd, setQuickSupervisorToAdd] = useState<string>('');
   const [saveSuccessMsg, setSaveSuccessMsg] = useState<string | null>(null);
   const [staffSearchQuery, setStaffSearchQuery] = useState<string>('');
 
-  // 1. Filter enrolled personnel who have supervisor permissions
   const eligibleSupervisors = useMemo(() => {
     return staffList.filter((staff) => {
-      // Must not be suspended
       if (staff.status === 'suspended') return false;
       return hasSupervisorPermissions(staff);
     });
   }, [staffList]);
 
-  // 2. Filter personnel who DO NOT have supervisor permissions (for institutional transparency note)
   const nonSupervisorStaff = useMemo(() => {
     return staffList.filter((staff) => {
       return !hasSupervisorPermissions(staff);
     });
   }, [staffList]);
 
-  // Handlers for adding and deleting dropdown options
-  const handleAddOption = (categoryKey: DropdownCategoryKey, e?: React.FormEvent) => {
+  const fetchOptions = async () => {
+    setIsLoading(true);
+    try {
+      const data = await apiRequest<{ dropdownOptions: Record<string, DropdownOptionRecord[]> }>('/api/dropdown-options/grouped?includeInactive=true');
+      setDbOptionsGrouped(data.dropdownOptions || {});
+      setErrorMsg(null);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Error fetching dropdowns');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchOptions();
+  }, []);
+
+  const handleAddOption = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const rawVal = newOptionInputs[categoryKey]?.trim();
+    const rawVal = newOptionInput.trim();
     if (!rawVal) return;
 
-    const updaterMap: Record<DropdownCategoryKey, React.Dispatch<React.SetStateAction<string[]>>> = {
-      documentTypes: setTransactionTypes,
-      communicationTypes: setCommunicationTypes,
-      reportTypes: setReportTypes,
-      originatingAgencies: setOriginatingAgencies,
-      targetDivisions: setTargetDivisions,
-    };
+    try {
+      await apiRequest('/api/dropdown-options', {
+        method: 'POST',
+        body: JSON.stringify({
+          category: selectedCategory,
+          value: rawVal,
+          label: rawVal,
+        }),
+      });
 
-    updaterMap[categoryKey]((prev) => {
-      if (prev.some((item) => item.toLowerCase() === rawVal.toLowerCase())) {
-        return prev;
+      await fetchOptions();
+      setNewOptionInput('');
+      setSaveSuccessMsg(`Option added successfully.`);
+      setTimeout(() => setSaveSuccessMsg(null), 3000);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to add option');
+      setTimeout(() => setErrorMsg(null), 4000);
+    }
+  };
+
+  const handleDeactivateOption = async (id: number) => {
+    try {
+      await apiRequest(`/api/dropdown-options/${id}/deactivate`, { method: 'PATCH' });
+      await fetchOptions();
+      setSaveSuccessMsg(`Option deactivated.`);
+      setTimeout(() => setSaveSuccessMsg(null), 3000);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to deactivate option');
+      setTimeout(() => setErrorMsg(null), 4000);
+    }
+  };
+
+  const handleRestoreOption = async (id: number) => {
+    try {
+      await apiRequest(`/api/dropdown-options/${id}/restore`, { method: 'PATCH' });
+      await fetchOptions();
+      setSaveSuccessMsg(`Option restored.`);
+      setTimeout(() => setSaveSuccessMsg(null), 3000);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to restore option');
+      setTimeout(() => setErrorMsg(null), 4000);
+    }
+  };
+
+  const handleReorder = async (id: number, direction: 'up' | 'down') => {
+    const currentList = dbOptionsGrouped[selectedCategory] || [];
+    const index = currentList.findIndex(o => o.id === id);
+    if (index === -1) return;
+    if (direction === 'up' && index === 0) return;
+    if (direction === 'down' && index === currentList.length - 1) return;
+
+    const newList = [...currentList];
+    const swapIndex = direction === 'up' ? index - 1 : index + 1;
+    
+    const temp = newList[index].sortOrder;
+    newList[index].sortOrder = newList[swapIndex].sortOrder;
+    newList[swapIndex].sortOrder = temp;
+
+    try {
+      await apiRequest('/api/dropdown-options/reorder', {
+        method: 'PUT',
+        body: JSON.stringify({
+          items: [
+            { id: newList[index].id, sortOrder: newList[index].sortOrder },
+            { id: newList[swapIndex].id, sortOrder: newList[swapIndex].sortOrder }
+          ]
+        })
+      });
+      await fetchOptions();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to reorder');
+      setTimeout(() => setErrorMsg(null), 4000);
+    }
+  };
+
+  const handleToggleFocalPerson = async (id: string) => {
+    const staff = staffList.find(s => s.id === id);
+    if (!staff) return;
+    const isCurrentlyDesignated = designatedFocalPersons.includes(id);
+    try {
+      const res = await fetch(`/api/personnel/${staff.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...staff, isFocalPerson: !isCurrentlyDesignated })
+      });
+      if (res.ok) {
+        setDesignatedFocalPersons(prev => {
+          if (isCurrentlyDesignated) {
+            return prev.filter(p => p !== id);
+          } else {
+            return [...prev, id];
+          }
+        });
       }
-      return [...prev, rawVal];
-    });
-
-    setNewOptionInputs((prev) => ({ ...prev, [categoryKey]: '' }));
+    } catch (e) {
+      console.error(e);
+    }
   };
 
-  const handleDeleteOption = (categoryKey: DropdownCategoryKey, itemToDelete: string) => {
-    const updaterMap: Record<DropdownCategoryKey, React.Dispatch<React.SetStateAction<string[]>>> = {
-      documentTypes: setTransactionTypes,
-      communicationTypes: setCommunicationTypes,
-      reportTypes: setReportTypes,
-      originatingAgencies: setOriginatingAgencies,
-      targetDivisions: setTargetDivisions,
-    };
-
-    updaterMap[categoryKey]((prev) => prev.filter((item) => item !== itemToDelete));
-  };
-
-  const handleResetCategory = (categoryKey: DropdownCategoryKey) => {
-    const cat = CATEGORIES.find((c) => c.key === categoryKey);
-    if (!cat) return;
-    const updaterMap: Record<DropdownCategoryKey, React.Dispatch<React.SetStateAction<string[]>>> = {
-      documentTypes: setTransactionTypes,
-      communicationTypes: setCommunicationTypes,
-      reportTypes: setReportTypes,
-      originatingAgencies: setOriginatingAgencies,
-      targetDivisions: setTargetDivisions,
-    };
-    updaterMap[categoryKey]([...cat.defaultItems]);
-    setSaveSuccessMsg(`Reset "${cat.label}" options to institutional presets.`);
-    setTimeout(() => setSaveSuccessMsg(null), 3000);
-  };
-
-  // Focal person toggle handler - strictly selects among eligible supervisors
-  const handleToggleFocalPerson = (supervisorName: string) => {
-    setDesignatedFocalPersons((prev) => {
-      if (prev.includes(supervisorName)) {
-        // Remove
-        return prev.filter((name) => name !== supervisorName);
-      } else {
-        // Add
-        return [...prev, supervisorName];
-      }
-    });
-  };
-
-  const handleAddQuickSupervisor = () => {
+  const handleAddQuickSupervisor = async () => {
     if (!quickSupervisorToAdd) return;
-    if (!designatedFocalPersons.includes(quickSupervisorToAdd)) {
-      setDesignatedFocalPersons((prev) => [...prev, quickSupervisorToAdd]);
+    const staff = staffList.find(s => s.id === quickSupervisorToAdd);
+    if (!staff) return;
+    
+    try {
+      const res = await fetch(`/api/personnel/${staff.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...staff, isFocalPerson: true })
+      });
+      if (res.ok) {
+        setDesignatedFocalPersons(prev => [...prev, staff.id]);
+        setSaveSuccessMsg('Focal Person added successfully!');
+        setTimeout(() => setSaveSuccessMsg(null), 4000);
+      }
+    } catch (e) {
+      console.error(e);
     }
     setQuickSupervisorToAdd('');
   };
 
-  // Save all options
-  const handleSaveAll = () => {
-    const updated: RegistryDropdownOptions = {
-      ...dropdownOptions,
-      documentTypes: transactionTypes,
-      transactionTypes: transactionTypes,
-      communicationTypes,
-      reportTypes,
-      originatingAgencies,
-      targetDivisions,
-      departments: targetDivisions, // keep departments aligned
-      focalPersons: designatedFocalPersons,
-    };
-
-    onUpdateDropdownOptions(updated);
-    setSaveSuccessMsg('System Admin dropdown options & Focal Person configurations saved successfully!');
-    setTimeout(() => setSaveSuccessMsg(null), 4000);
-  };
-
-  const handleResetAllToDefaults = () => {
-    setTransactionTypes([...DEFAULT_REGISTRY_DROPDOWN_OPTIONS.documentTypes]);
-    setCommunicationTypes([...DEFAULT_REGISTRY_DROPDOWN_OPTIONS.communicationTypes]);
-    setReportTypes([...DEFAULT_REGISTRY_DROPDOWN_OPTIONS.reportTypes]);
-    setOriginatingAgencies([...(DEFAULT_REGISTRY_DROPDOWN_OPTIONS.originatingAgencies || [])]);
-    setTargetDivisions([...(DEFAULT_REGISTRY_DROPDOWN_OPTIONS.targetDivisions || [])]);
-    setDesignatedFocalPersons([...(DEFAULT_REGISTRY_DROPDOWN_OPTIONS.focalPersons || [])]);
-
-    setSaveSuccessMsg('Reset all dropdown options and focal persons to default settings.');
-    setTimeout(() => setSaveSuccessMsg(null), 3500);
-  };
-
-  // Current category data helper
-  const getCategoryList = (key: DropdownCategoryKey): string[] => {
-    switch (key) {
-      case 'documentTypes':
-        return transactionTypes;
-      case 'communicationTypes':
-        return communicationTypes;
-      case 'reportTypes':
-        return reportTypes;
-      case 'originatingAgencies':
-        return originatingAgencies;
-      case 'targetDivisions':
-        return targetDivisions;
+  const handleRemoveFocalPerson = async (id: string) => {
+    const staff = staffList.find(s => s.id === id);
+    if (!staff) return;
+    try {
+      const res = await fetch(`/api/personnel/${staff.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...staff, isFocalPerson: false })
+      });
+      if (res.ok) {
+        setDesignatedFocalPersons(prev => prev.filter(p => p !== id));
+      }
+    } catch (e) {
+      console.error(e);
     }
+  };
+
+  const handleSaveFocalPersons = () => {
+    // Legacy save, nothing to do since it's saved automatically now
+    setSaveSuccessMsg('Focal Person configurations are saved automatically!');
+    setTimeout(() => setSaveSuccessMsg(null), 4000);
   };
 
   return (
     <div className="space-y-6" id="admin-dropdown-settings-module">
-      {/* Top Banner & Save Action Bar */}
       <div className="p-5 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-indigo-900/60 rounded-2xl text-white shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
@@ -303,27 +326,19 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
             Dropdown Options &amp; Focal Person Assignment
           </h3>
           <p className="text-xs text-slate-300 mt-1 max-w-2xl leading-relaxed">
-            Configure authoritative dropdown choices for Transaction Type, Communication Type, Report / Document Type, Originating Dept / Agency, and Forward To / Target Division. Designate Focal Persons exclusively from enrolled personnel with supervisor permissions.
+            Configure authoritative dropdown choices. Changes are instantly synchronized with PostgreSQL. Designate Focal Persons exclusively from enrolled personnel with supervisor permissions.
           </p>
         </div>
 
         <div className="flex items-center gap-2.5 shrink-0">
           <button
             type="button"
-            onClick={handleResetAllToDefaults}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-colors cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Reset All</span>
-          </button>
-          <button
-            type="button"
             id="admin-save-dropdowns-btn"
-            onClick={handleSaveAll}
+            onClick={handleSaveFocalPersons}
             className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white shadow-sm transition-all cursor-pointer hover:shadow-md"
           >
             <Save className="w-3.5 h-3.5" />
-            <span>Save Dropdown Settings</span>
+            <span>Save Focal Persons</span>
           </button>
         </div>
       </div>
@@ -334,8 +349,15 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
           <span>{saveSuccessMsg}</span>
         </div>
       )}
+      
+      {errorMsg && (
+        <div className="p-3.5 bg-rose-950/80 border border-rose-800 rounded-xl text-xs font-medium text-rose-200 flex items-center gap-2 shadow-sm animate-in fade-in">
+          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+          <span>{errorMsg}</span>
+        </div>
+      )}
 
-      {/* Part 1: Focal Person Assignment (Supervisor Permissions Mandatory) */}
+      {/* Part 1: Focal Person Assignment */}
       <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-4">
           <div className="flex items-start gap-3">
@@ -369,7 +391,6 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
           </div>
         </div>
 
-        {/* Quick Add from Eligible Supervisors Bar */}
         <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700/80 space-y-3">
           <div className="flex flex-col sm:flex-row items-center gap-3">
             <div className="flex-1 w-full">
@@ -384,7 +405,7 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
               >
                 <option value="">-- Choose from Enrolled Personnel with Supervisor Roles --</option>
                 {eligibleSupervisors
-                  .filter((s) => !designatedFocalPersons.includes(s.name))
+                  .filter((s) => !designatedFocalPersons.includes(s.id))
                   .map((s) => (
                     <option key={s.id} value={s.name}>
                       {s.name} — {s.role} ({s.division})
@@ -415,7 +436,6 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
           </div>
         </div>
 
-        {/* Search & Active Designated Badges */}
         <div className="space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <span className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">
@@ -433,7 +453,6 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
             </div>
           </div>
 
-          {/* Supervisor Personnel Cards Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
             {eligibleSupervisors
               .filter(
@@ -444,13 +463,13 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
                   s.role.toLowerCase().includes(staffSearchQuery.toLowerCase())
               )
               .map((staff) => {
-                const isDesignated = designatedFocalPersons.includes(staff.name);
+                const isDesignated = designatedFocalPersons.includes(staff.id);
                 const roleConfig = getRoleConfig(staff.role);
 
                 return (
                   <div
                     key={staff.id}
-                    onClick={() => handleToggleFocalPerson(staff.name)}
+                    onClick={() => handleToggleFocalPerson(staff.id)}
                     className={`p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between gap-3 ${
                       isDesignated
                         ? 'bg-indigo-50/70 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-800 ring-1 ring-indigo-400/50 shadow-xs'
@@ -477,7 +496,6 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
                           </p>
                         </div>
                       </div>
-
                       <span
                         className={`px-2 py-0.5 text-[10px] font-bold rounded-md border ${roleConfig.badgeBg} ${roleConfig.badgeText} ${roleConfig.badgeBorder}`}
                       >
@@ -490,12 +508,11 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
                         <ShieldCheck className="w-3.5 h-3.5" />
                         <span className="text-[10px] font-medium">Supervisor Auth Verified</span>
                       </div>
-
                       <div className="flex items-center gap-1.5">
                         <input
                           type="checkbox"
                           checked={isDesignated}
-                          onChange={() => {}} // handled by card click
+                          onChange={() => {}} 
                           className="w-3.5 h-3.5 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                         />
                         <span
@@ -519,7 +536,6 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
             </div>
           )}
 
-          {/* Non-supervisor exclusion note */}
           {nonSupervisorStaff.length > 0 && (
             <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400 flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -533,19 +549,25 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
         </div>
       </div>
 
-      {/* Part 2: Configurable Dropdown Options (5 Categories) */}
-      <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs space-y-6">
+      {/* Part 2: PostgreSQL Configurable Dropdown Options (7 Categories) */}
+      <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-xs space-y-6 relative">
+        {isLoading && (
+          <div className="absolute inset-0 bg-white/50 dark:bg-slate-900/50 backdrop-blur-sm z-10 flex items-center justify-center rounded-2xl">
+            <RefreshCw className="w-6 h-6 text-indigo-500 animate-spin" />
+          </div>
+        )}
         <div className="border-b border-slate-200 dark:border-slate-800 pb-4">
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950/70 border border-blue-200 dark:border-blue-800 flex items-center justify-center text-blue-600 dark:text-blue-400 shrink-0">
               <Tag className="w-5 h-5" />
             </div>
             <div>
-              <h4 className="text-sm font-bold text-slate-900 dark:text-white">
-                Registry Dropdown Options Editor
+              <h4 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                PostgreSQL Dropdown Options Editor
+                <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300 text-[9px] uppercase tracking-wider font-bold border border-emerald-200 dark:border-emerald-800">Live Sync</span>
               </h4>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Enter, customize, or remove standard dropdown choices used across document intake, logging, and routing slips.
+                Enter, customize, or remove standard dropdown choices used across document intake, logging, and routing slips. Database changes are applied immediately.
               </p>
             </div>
           </div>
@@ -554,16 +576,20 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
           <div className="flex flex-wrap gap-2 mt-4">
             {CATEGORIES.map((cat) => {
               const Icon = cat.icon;
-              const items = getCategoryList(cat.key);
-              const isActive = selectedCategory === cat.key;
+              const items = dbOptionsGrouped[cat.key] || [];
+              const activeCount = items.filter(o => o.isActive).length;
+              const isActiveTab = selectedCategory === cat.key;
 
               return (
                 <button
                   key={cat.key}
                   type="button"
-                  onClick={() => setSelectedCategory(cat.key)}
+                  onClick={() => {
+                    setSelectedCategory(cat.key);
+                    setNewOptionInput('');
+                  }}
                   className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    isActive
+                    isActiveTab
                       ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 shadow-sm'
                       : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
                   }`}
@@ -572,12 +598,12 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
                   <span>{cat.label}</span>
                   <span
                     className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold ${
-                      isActive
+                      isActiveTab
                         ? 'bg-white/20 dark:bg-slate-900/20 text-white dark:text-slate-900'
                         : 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-400'
                     }`}
                   >
-                    {items.length}
+                    {activeCount}
                   </span>
                 </button>
               );
@@ -585,10 +611,9 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
           </div>
         </div>
 
-        {/* Selected Category Management Area */}
         {(() => {
           const currentMeta = CATEGORIES.find((c) => c.key === selectedCategory)!;
-          const currentItems = getCategoryList(selectedCategory);
+          const currentItems = (dbOptionsGrouped[selectedCategory] || []).sort((a, b) => a.sortOrder - b.sortOrder);
           const Icon = currentMeta.icon;
 
           return (
@@ -603,32 +628,17 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
                     {currentMeta.description}
                   </p>
                 </div>
-
-                <button
-                  type="button"
-                  onClick={() => handleResetCategory(selectedCategory)}
-                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 transition-colors cursor-pointer self-start sm:self-auto"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  <span>Reset {currentMeta.label} to Presets</span>
-                </button>
               </div>
 
-              {/* Add Input Form */}
               <form
-                onSubmit={(e) => handleAddOption(selectedCategory, e)}
+                onSubmit={handleAddOption}
                 className="flex flex-col sm:flex-row gap-2"
               >
                 <div className="relative flex-1">
                   <input
                     type="text"
-                    value={newOptionInputs[selectedCategory]}
-                    onChange={(e) =>
-                      setNewOptionInputs((prev) => ({
-                        ...prev,
-                        [selectedCategory]: e.target.value,
-                      }))
-                    }
+                    value={newOptionInput}
+                    onChange={(e) => setNewOptionInput(e.target.value)}
                     placeholder={currentMeta.placeholder}
                     className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-medium text-slate-800 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
@@ -637,7 +647,7 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
                 <button
                   type="submit"
                   id={`btn-add-${selectedCategory}-option`}
-                  disabled={!newOptionInputs[selectedCategory].trim()}
+                  disabled={!newOptionInput.trim() || isLoading}
                   className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold disabled:opacity-40 transition-colors cursor-pointer shrink-0"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -645,14 +655,13 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
                 </button>
               </form>
 
-              {/* List of Current Options */}
               <div className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden bg-slate-50/50 dark:bg-slate-850/40">
-                <div className="p-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-bold text-slate-600 dark:text-slate-400">
+                <div className="p-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs font-bold text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-slate-800">
                   <span>Configured Option Value</span>
-                  <span>Action</span>
+                  <span className="w-24 text-right">Actions</span>
                 </div>
 
-                <div className="divide-y divide-slate-200 dark:divide-slate-800 max-h-72 overflow-y-auto">
+                <div className="divide-y divide-slate-200 dark:divide-slate-800 max-h-96 overflow-y-auto">
                   {currentItems.length === 0 ? (
                     <div className="p-6 text-center text-xs text-slate-400 italic">
                       No options currently configured for {currentMeta.label}. Type an option above and click Add.
@@ -660,26 +669,60 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
                   ) : (
                     currentItems.map((item, index) => (
                       <div
-                        key={`${item}-${index}`}
-                        className="px-3.5 py-2.5 flex items-center justify-between gap-3 hover:bg-white dark:hover:bg-slate-800 transition-colors"
+                        key={item.id}
+                        className={`px-3.5 py-2.5 flex items-center justify-between gap-3 transition-colors ${item.isActive ? 'hover:bg-white dark:hover:bg-slate-800/80 bg-transparent' : 'bg-slate-100 dark:bg-slate-900/50 opacity-60'}`}
                       >
-                        <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
                           <span className="w-5 h-5 rounded-full bg-slate-200 dark:bg-slate-700 flex items-center justify-center text-[10px] font-mono text-slate-600 dark:text-slate-300 shrink-0">
                             {index + 1}
                           </span>
-                          <span className="text-xs font-medium text-slate-800 dark:text-slate-200 truncate">
-                            {item}
+                          <span className={`text-xs font-medium truncate ${item.isActive ? 'text-slate-800 dark:text-slate-200' : 'text-slate-500 dark:text-slate-400 line-through'}`}>
+                            {item.value}
                           </span>
+                          {!item.isActive && (
+                            <span className="px-1.5 py-0.5 bg-slate-200 dark:bg-slate-700 text-[9px] font-bold uppercase rounded text-slate-600 dark:text-slate-400">Inactive</span>
+                          )}
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteOption(selectedCategory, item)}
-                          className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer shrink-0"
-                          title={`Delete option "${item}"`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="flex items-center justify-end gap-1 shrink-0 w-24">
+                          <button
+                            type="button"
+                            onClick={() => handleReorder(item.id, 'up')}
+                            disabled={index === 0 || !item.isActive}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-30 transition-colors"
+                            title="Move Up"
+                          >
+                            <ArrowUp className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleReorder(item.id, 'down')}
+                            disabled={index === currentItems.length - 1 || !item.isActive}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 disabled:opacity-30 transition-colors"
+                            title="Move Down"
+                          >
+                            <ArrowDown className="w-3.5 h-3.5" />
+                          </button>
+                          {item.isActive ? (
+                            <button
+                              type="button"
+                              onClick={() => handleDeactivateOption(item.id)}
+                              className="p-1.5 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer"
+                              title="Deactivate option"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleRestoreOption(item.id)}
+                              className="p-1.5 text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors cursor-pointer"
+                              title="Restore option"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))
                   )}
@@ -692,3 +735,4 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
     </div>
   );
 };
+export default AdminDropdownsConfig;

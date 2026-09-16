@@ -133,6 +133,7 @@ const postStaffHandler = async (req: any, res: any) => {
               assignedDesk: p.assignedDesk || null,
               username: cleanUsername,
               status: p.status || 'active',
+          isFocalPerson: p.isFocalPerson || false,
               createdAt: now,
               updatedAt: now,
             })
@@ -146,6 +147,7 @@ const postStaffHandler = async (req: any, res: any) => {
                 email: cleanEmail,
                 assignedDesk: p.assignedDesk,
                 status: p.status || 'active',
+          isFocalPerson: p.isFocalPerson || false,
                 updatedAt: now,
               },
             });
@@ -233,6 +235,7 @@ const postStaffHandler = async (req: any, res: any) => {
           assignedDesk: p.assignedDesk || null,
           username: cleanUsername,
           status: p.status || 'active',
+          isFocalPerson: p.isFocalPerson || false,
           createdAt: now,
           updatedAt: now,
         })
@@ -246,6 +249,7 @@ const postStaffHandler = async (req: any, res: any) => {
             email: cleanEmail,
             assignedDesk: p.assignedDesk,
             status: p.status || 'active',
+          isFocalPerson: p.isFocalPerson || false,
             updatedAt: now,
           },
         })
@@ -381,6 +385,7 @@ personnelRouter.put('/personnel/:id', authorizeStaffManagement, async (req: any,
           email: cleanEmail,
           assignedDesk: p.assignedDesk !== undefined ? p.assignedDesk : existing.assignedDesk,
           status: p.status !== undefined ? p.status : existing.status,
+          isFocalPerson: p.isFocalPerson !== undefined ? p.isFocalPerson : existing.isFocalPerson,
           username: cleanUsername,
           updatedAt: now,
         })

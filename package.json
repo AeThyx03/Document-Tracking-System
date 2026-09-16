@@ -12,7 +12,7 @@
     "db:migrate": "tsx server/migrations/runner.ts",
     "db:seed:dev": "tsx server/db/seed-dev.ts",
     "clean": "rm -rf dist server.js",
-    "test": "tsx src/lib/workflow.test.ts && tsx src/lib/audit.test.ts && tsx server/routes/codebase.test.ts && tsx server/config/jwt.test.ts && tsx server/middleware/authorize.test.ts && tsx tests/phase5-integrity.test.ts && tsx tests/phase6-seeds-integrity.test.ts",
+    "test": "tsx tests/phase7-final-verification.test.ts && tsx tests/phase6-routing-priority.test.ts && tsx src/lib/workflow.test.ts && tsx src/lib/audit.test.ts && tsx server/routes/codebase.test.ts && tsx server/config/jwt.test.ts && tsx server/middleware/authorize.test.ts && tsx tests/phase1-classification-transaction-type.test.ts && tsx tests/phase2-dropdown-configuration.test.ts && tsx tests/phase5-integrity.test.ts && tsx tests/phase6-seeds-integrity.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

@@ -28,7 +28,8 @@ export const personnel = pgTable('personnel', {
   email: text('email').unique(),
   assignedDesk: text('assigned_desk'),
   username: text('username').notNull().unique(),
-  status: text('status').default('active'), // 'active' | 'suspended'
+  status: text('status').default('active'),
+  isFocalPerson: boolean('is_focal_person').default(false),
   lastLogin: timestamp('last_login'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow(),
@@ -67,8 +68,10 @@ export const documents = pgTable('documents', {
   id: text('id').primaryKey(), // Preserves existing string IDs (e.g. 'doc_172000...')
   trackingNumber: text('tracking_number').notNull().unique(),
   title: text('title').notNull(),
-  direction: text('direction').default('Incoming'), // 'Incoming' | 'Outgoing'
-  documentType: text('document_type').notNull(),
+  documentClassification: text('document_classification').notNull().default('Incoming'), // Dedicated field ('Incoming' | 'Outgoing')
+  transactionType: text('transaction_type').notNull().default('Simple Transaction'), // Dedicated field ('Simple Transaction' | 'Complex Transaction' | 'Highly Technical Transaction')
+  direction: text('direction').default('Incoming'), // Preserved for backward compatibility
+  documentType: text('document_type'), // Preserved for backward compatibility
   communicationType: text('communication_type').notNull(),
   reportType: text('report_type').notNull(),
   originDepartment: text('origin_department').notNull(),
@@ -99,6 +102,8 @@ export const documents = pgTable('documents', {
   return {
     trackingNumberIdx: index('idx_docs_tracking_number').on(table.trackingNumber),
     currentStatusIdx: index('idx_docs_current_status').on(table.currentStatus),
+    classificationIdx: index('idx_docs_classification').on(table.documentClassification),
+    transactionTypeIdx: index('idx_docs_transaction_type').on(table.transactionType),
     currentLocationIdx: index('idx_docs_current_location').on(table.currentLocation),
     currentCustodianIdx: index('idx_docs_current_custodian').on(table.currentCustodian),
     targetDivisionIdx: index('idx_docs_target_division').on(table.targetDivision),

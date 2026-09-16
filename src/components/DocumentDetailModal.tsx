@@ -338,11 +338,14 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                     {document.currentStatus}
                   </span>
                   
-                  <span className="text-xs px-2 py-0.5 rounded bg-blue-900/60 dark:bg-blue-950 text-blue-200 border border-blue-700/50 dark:border-blue-800 font-medium">
-                    {document.communicationType}
+                  <span className="text-xs px-2 py-0.5 rounded bg-emerald-900/60 dark:bg-emerald-950 text-emerald-200 border border-emerald-700/50 dark:border-emerald-800 font-medium">
+                    {document.documentClassification || document.direction || 'Incoming'}
                   </span>
                   <span className="text-xs px-2 py-0.5 rounded bg-purple-900/60 dark:bg-purple-950 text-purple-200 border border-purple-700/50 dark:border-purple-800 font-medium">
-                    {document.documentType}
+                    {document.transactionType || document.documentType || 'Simple Transaction'}
+                  </span>
+                  <span className="text-xs px-2 py-0.5 rounded bg-blue-900/60 dark:bg-blue-950 text-blue-200 border border-blue-700/50 dark:border-blue-800 font-medium">
+                    {document.communicationType}
                   </span>
                   <span className="text-xs px-2 py-0.5 rounded bg-indigo-900/60 dark:bg-indigo-950 text-indigo-200 border border-indigo-700/50 dark:border-indigo-800 font-medium truncate max-w-[200px]">
                     {document.reportType}
@@ -1397,12 +1400,16 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                 <span className="text-sm font-bold text-black">{document.title}</span>
               </div>
               <div>
-                <span className="text-[10px] uppercase font-bold text-slate-500 block">Communication Type:</span>
-                <span className="font-semibold text-black">{document.communicationType}</span>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Document Classification:</span>
+                <span className="font-semibold text-black">{document.documentClassification || document.direction || 'Incoming'}</span>
               </div>
               <div>
-                <span className="text-[10px] uppercase font-bold text-slate-500 block">Document Type:</span>
-                <span className="font-semibold text-black">{document.documentType}</span>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Transaction Type:</span>
+                <span className="font-semibold text-black">{document.transactionType || document.documentType || 'Simple Transaction'}</span>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Communication Type:</span>
+                <span className="font-semibold text-black">{document.communicationType}</span>
               </div>
               <div>
                 <span className="text-[10px] uppercase font-bold text-slate-500 block">Report Classification:</span>

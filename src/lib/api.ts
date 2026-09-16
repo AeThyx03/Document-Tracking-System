@@ -639,15 +639,9 @@ export async function logAudit(
 
   // Record in append-only client repository with deduplication
   recordGlobalAudit(event);
-
-  try {
-    await apiRequest('/api/audit', {
-      method: 'POST',
-      body: JSON.stringify(event),
-    });
-  } catch (err) {
-    console.error('Failed to sync audit log to backend:', err);
-  }
+  
+  // NOTE: We no longer post to /api/audit. 
+  // The backend natively and authoritatively records audit logs during ACID transactions.
 }
 
 // -------------------------------------------------------------

@@ -28,16 +28,15 @@ async function runTests() {
 
   try {
     // -------------------------------------------------------------
-    // Test 1: Ephemeral generation in production when JWT_SECRET is missing (failsafe container boot)
+    // Test 1: Generates fallback secret in production when JWT_SECRET is missing (ensures successful container deployment boot)
     // -------------------------------------------------------------
     process.env.NODE_ENV = 'production';
     delete process.env.JWT_SECRET;
     delete process.env.DEV_JWT_SECRET;
     resetCachedDevSecretForTesting();
 
-    const prodEphemeral = getJwtSecret();
-    assert(Boolean(prodEphemeral), 'Production generates ephemeral secret when unconfigured to prevent container crashes');
-    assert(prodEphemeral.length === 64, 'Ephemeral production secret is 256-bit hex (64 chars)');
+    const prodFallbackSecret = getJwtSecret();
+    assert(typeof prodFallbackSecret === 'string' && prodFallbackSecret.length === 64, 'Production successfully generates fallback secret when JWT_SECRET is missing to prevent deployment crash');
 
     // -------------------------------------------------------------
     // Test 2: Derives secure 256-bit key when configured secret is short
