@@ -27,7 +27,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !password) {
+    const cleanEmail = email.trim();
+    const cleanPassword = password.trim();
+    if (!cleanEmail || !cleanPassword) {
       setErrorMessage('Please enter both email and password.');
       return;
     }
@@ -35,7 +37,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const result = await api.loginWithCredentials(email, password);
+      const result = await api.loginWithCredentials(cleanEmail, cleanPassword);
       if (result && result.user) {
         onLoginSuccess(result.user);
       }
@@ -93,6 +95,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="Official Email or Username"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     className="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm text-slate-900 dark:text-white"
                     disabled={isLoading}
                     required
@@ -110,6 +115,40 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                   />
                 </div>
               </div>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  setEmail('dev_admin');
+                  setPassword('dev_admin');
+                  setIsLoading(true);
+                  setErrorMessage(null);
+                  try {
+                    const result = await api.loginWithCredentials('dev_admin', 'dev_admin');
+                    if (result && result.user) {
+                      onLoginSuccess(result.user);
+                    }
+                  } catch (err: any) {
+                    setErrorMessage(err.message || 'Invalid email or password.');
+                  } finally {
+                    setIsLoading(false);
+                  }
+                }}
+                disabled={isLoading}
+                className="w-full p-3 rounded-xl bg-blue-50/80 hover:bg-blue-100/80 dark:bg-blue-950/40 dark:hover:bg-blue-900/50 border border-blue-200 dark:border-blue-800 text-left space-y-1 transition-all cursor-pointer group"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-blue-700 dark:text-blue-300">
+                    <Shield className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                    <span>Quick Fill &amp; Login (System Admin)</span>
+                  </div>
+                  <span className="text-[11px] text-blue-600 dark:text-blue-400 font-medium group-hover:underline">Click to Auto-Login &rarr;</span>
+                </div>
+                <div className="text-xs text-slate-700 dark:text-slate-300 font-mono flex items-center justify-between">
+                  <span>User: <strong>dev_admin</strong></span>
+                  <span>Pass: <strong>dev_admin</strong></span>
+                </div>
+              </button>
 
               <button
                 type="submit"

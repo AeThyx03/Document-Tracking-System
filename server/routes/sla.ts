@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { eq } from 'drizzle-orm';
-import { db } from '../db/index.ts';
+import { db, withTransaction } from '../db/index.ts';
 import { slaRules, businessHours, holidays } from '../db/schema.ts';
 import { sendApiSuccess, sendApiError } from '../middleware/errorHandler.ts';
 import { getAuthenticatedUser, authorizeSettingsManagement } from '../middleware/authorize.ts';
@@ -11,12 +11,14 @@ export const slaRouter = Router();
 const getSlaConfig = async () => {
   const rules = await db.select().from(slaRules);
   const hours = await db.select().from(businessHours);
+  const hols = await db.select().from(holidays);
 
   const config = {
     defaultThresholdHours: 24,
     divisionThresholds: {} as Record<string, number>,
     highlightRowOnExceed: true,
     businessHours: hours,
+    holidays: hols,
   };
 
   rules.forEach((r) => {
@@ -28,33 +30,37 @@ const getSlaConfig = async () => {
     }
   });
 
-  return { config, rules, hours };
+  return { config, rules, hours, holidays: hols };
 };
 
-// Helper to update SLA config
+// Helper to update SLA config transactionally
 const updateSlaConfig = async (body: any) => {
   const { defaultThresholdHours, divisionThresholds, highlightRowOnExceed } = body;
 
-  await db.delete(slaRules);
+  await withTransaction(async (tx) => {
+    await tx.delete(slaRules);
 
-  const inserts = [];
-  inserts.push({
-    targetType: 'default',
-    targetName: null,
-    thresholdHours: defaultThresholdHours || 24,
-    highlightRowOnExceed: highlightRowOnExceed !== undefined ? highlightRowOnExceed : true,
-  });
-
-  for (const [div, hours] of Object.entries(divisionThresholds || {})) {
+    const inserts = [];
     inserts.push({
-      targetType: 'division',
-      targetName: div,
-      thresholdHours: hours as number,
+      targetType: 'default',
+      targetName: null,
+      thresholdHours: defaultThresholdHours || 24,
       highlightRowOnExceed: highlightRowOnExceed !== undefined ? highlightRowOnExceed : true,
     });
-  }
 
-  await db.insert(slaRules).values(inserts);
+    for (const [div, hours] of Object.entries(divisionThresholds || {})) {
+      inserts.push({
+        targetType: 'division',
+        targetName: div,
+        thresholdHours: hours as number,
+        highlightRowOnExceed: highlightRowOnExceed !== undefined ? highlightRowOnExceed : true,
+      });
+    }
+
+    if (inserts.length > 0) {
+      await tx.insert(slaRules).values(inserts);
+    }
+  });
 };
 
 // GET /api/sla and /api/sla/config
@@ -130,17 +136,19 @@ slaRouter.put('/business-hours', authorizeSettingsManagement, async (req: any, r
   try {
     const { hours } = req.body;
     if (Array.isArray(hours)) {
-      await db.delete(businessHours);
-      if (hours.length > 0) {
-        await db.insert(businessHours).values(
-          hours.map((h: any) => ({
-            dayOfWeek: Number(h.dayOfWeek),
-            isOpen: h.isOpen !== undefined ? !!h.isOpen : true,
-            openTime: h.openTime || '08:00',
-            closeTime: h.closeTime || '17:00',
-          }))
-        );
-      }
+      await withTransaction(async (tx) => {
+        await tx.delete(businessHours);
+        if (hours.length > 0) {
+          await tx.insert(businessHours).values(
+            hours.map((h: any) => ({
+              dayOfWeek: Number(h.dayOfWeek),
+              isOpen: h.isOpen !== undefined ? !!h.isOpen : true,
+              openTime: h.openTime || '08:00',
+              closeTime: h.closeTime || '17:00',
+            }))
+          );
+        }
+      });
     }
     const updated = await db.select().from(businessHours).orderBy(businessHours.dayOfWeek);
     return sendApiSuccess(res, { message: 'Business hours updated successfully', businessHours: updated });

@@ -14,7 +14,6 @@ export interface HolidayEntry {
   name: string;
   isWorkingDayOverride?: boolean;
   isHalfDay?: boolean;
-  halfDayCloseTime?: string; // Optional custom close time for half days (defaults to '12:00')
 }
 
 export interface SlaWorkingConfig {
@@ -130,7 +129,7 @@ export function calculateWorkingMinutes(
   const startMs = start.getTime();
   const endMs = end.getTime();
 
-  if (startMs >= endMs) {
+  if (isNaN(startMs) || isNaN(endMs) || startMs >= endMs) {
     return { workingMinutes: 0, workingHours: 0 };
   }
 
@@ -143,7 +142,6 @@ export function calculateWorkingMinutes(
   let totalWorkingMinutes = 0;
 
   // Iterate day by day in Manila local calendar
-  // 1 day in ms is 86400000
   const startManila = getManilaDateParts(start);
   const endManila = getManilaDateParts(end);
 
@@ -158,18 +156,22 @@ export function calculateWorkingMinutes(
     const dayOfWeek = currentParts.dayOfWeek;
 
     const holiday = holidayMap.get(dateStr);
+    const isOverride = !!holiday && !!holiday.isWorkingDayOverride;
     const isFullHoliday = !!holiday && !holiday.isWorkingDayOverride && !holiday.isHalfDay;
     const isHalfDayHoliday = !!holiday && !holiday.isWorkingDayOverride && !!holiday.isHalfDay;
 
     const schedule = hoursMap.get(dayOfWeek);
     const isOpenDay = schedule ? schedule.isOpen : dayOfWeek >= 1 && dayOfWeek <= 5; // Default Mon-Fri open
 
-    if (isOpenDay && !isFullHoliday) {
+    // A day is a working day if:
+    // 1. It is explicitly set as a working day override (isOverride = true), OR
+    // 2. It is a normally open operating day AND NOT a full holiday
+    const isWorkingDay = isOverride || (isOpenDay && !isFullHoliday);
+
+    if (isWorkingDay) {
       const openTime = schedule?.openTime || '08:00';
-      // If half-day holiday, use configurable halfDayCloseTime or standard 12:00 midday cutoff
-      const closeTime = isHalfDayHoliday
-        ? (holiday?.halfDayCloseTime || '12:00')
-        : (schedule?.closeTime || '17:00');
+      const isHalfDay = isHalfDayHoliday || (isOverride && !!holiday?.isHalfDay);
+      const closeTime = isHalfDay ? '12:00' : (schedule?.closeTime || '17:00');
 
       const windowStartMs = parseManilaTimeToUtc(dateStr, openTime);
       const windowEndMs = parseManilaTimeToUtc(dateStr, closeTime);

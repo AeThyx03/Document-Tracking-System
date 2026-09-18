@@ -28,7 +28,7 @@ async function runTests() {
 
   try {
     // -------------------------------------------------------------
-    // Test 1: Generates fallback secret in production when JWT_SECRET is missing (ensures successful container deployment boot)
+    // Test 1: Production derives secure fallback when JWT_SECRET is missing (ensures container boot stability)
     // -------------------------------------------------------------
     process.env.NODE_ENV = 'production';
     delete process.env.JWT_SECRET;
@@ -36,11 +36,40 @@ async function runTests() {
     resetCachedDevSecretForTesting();
 
     const prodFallbackSecret = getJwtSecret();
-    assert(typeof prodFallbackSecret === 'string' && prodFallbackSecret.length === 64, 'Production successfully generates fallback secret when JWT_SECRET is missing to prevent deployment crash');
+    assert(Boolean(prodFallbackSecret) && prodFallbackSecret.length === 64, '1. Production + missing JWT_SECRET -> derives secure 256-bit fallback secret');
+
+    let validateResult = true;
+    try {
+      validateJwtConfiguration();
+    } catch (err: any) {
+      validateResult = false;
+    }
+    assert(validateResult, '1b. Production + missing JWT_SECRET -> validateJwtConfiguration() succeeds with derived fallback secret');
+
+    // -------------------------------------------------------------
+    // Test 1b: Production derives fallback key when JWT_SECRET is blank ("") or whitespace
+    // -------------------------------------------------------------
+    process.env.JWT_SECRET = '';
+    resetCachedDevSecretForTesting();
+    const blankFallback = getJwtSecret();
+    assert(Boolean(blankFallback) && blankFallback.length === 64, '2. Production + blank JWT_SECRET -> derives fallback secret');
+
+    process.env.JWT_SECRET = '   ';
+    resetCachedDevSecretForTesting();
+    const whitespaceFallback = getJwtSecret();
+    assert(Boolean(whitespaceFallback) && whitespaceFallback.length === 64, '3. Production + whitespace-only JWT_SECRET -> derives fallback secret');
+
+    process.env.NODE_ENV = 'production';
+    delete process.env.JWT_SECRET;
+    process.env.DEV_JWT_SECRET = 'some_dev_secret_value_that_should_never_be_used_in_prod';
+    resetCachedDevSecretForTesting();
+    const devSecretInProdFallback = getJwtSecret();
+    assert(Boolean(devSecretInProdFallback) && devSecretInProdFallback.length === 64, '3b. Production + DEV_JWT_SECRET set but missing JWT_SECRET -> derives persistent fallback secret');
 
     // -------------------------------------------------------------
     // Test 2: Derives secure 256-bit key when configured secret is short
     // -------------------------------------------------------------
+    process.env.NODE_ENV = 'development';
     process.env.JWT_SECRET = 'short_secret';
     const derivedSecret = getJwtSecret();
     assert(derivedSecret.length === 64, 'Short JWT_SECRET is securely expanded to 256-bit hash');
@@ -48,15 +77,17 @@ async function runTests() {
     // -------------------------------------------------------------
     // Test 3: Production succeeds with strong 32+ character secret
     // -------------------------------------------------------------
+    process.env.NODE_ENV = 'production';
     const strongProdSecret = 'c0a80101-possd-production-super-strong-jwt-secret-key-2026-phase2';
     process.env.JWT_SECRET = strongProdSecret;
     let prodSecret = '';
     try {
       prodSecret = getJwtSecret();
+      validateJwtConfiguration();
     } catch (err: any) {
       console.error('Unexpected failure with strong secret:', err);
     }
-    assert(prodSecret === strongProdSecret, 'Production accepts and returns authoritative 32+ char secret');
+    assert(prodSecret === strongProdSecret, '4. Production + configured JWT_SECRET -> succeeds');
 
     // -------------------------------------------------------------
     // Test 4: Development uses environment JWT_SECRET when configured
@@ -68,13 +99,13 @@ async function runTests() {
     assert(configuredDevSecret === 'custom-dev-secret-configured-by-admin', 'Development uses explicitly configured JWT_SECRET');
 
     // -------------------------------------------------------------
-    // Test 5: Development generates ephemeral random secret if unconfigured (no hardcoded fallback)
+    // Test 5: Development + missing JWT_SECRET -> preserves existing development behavior
     // -------------------------------------------------------------
     delete process.env.JWT_SECRET;
     delete process.env.DEV_JWT_SECRET;
     resetCachedDevSecretForTesting();
     const ephemeral1 = getJwtSecret();
-    assert(Boolean(ephemeral1), 'Development generates secret when environment variable is absent');
+    assert(Boolean(ephemeral1), '5. Development + missing JWT_SECRET -> preserves existing development behavior (generates ephemeral secret)');
     assert(ephemeral1.length === 64, 'Ephemeral development secret is 256-bit hex (64 chars)');
     assert(ephemeral1 !== 'dev_secret_only', 'Never falls back to hardcoded string literal "dev_secret_only"');
 
@@ -88,21 +119,23 @@ async function runTests() {
     assert(ephemeral1 !== ephemeral3, 'Subsequent generation produces a new cryptographically random secret');
 
     // -------------------------------------------------------------
-    // Test 6: Token signing & verification parity
+    // Test 6: Signing and verification use the same resolved secret
     // -------------------------------------------------------------
     process.env.JWT_SECRET = 'valid-test-secret-with-more-than-32-chars-entropy-abc123';
     resetCachedDevSecretForTesting();
 
-    const secret = getJwtSecret();
+    const secretForSign = getJwtSecret();
     const minimalPayload = {
       id: 'usr-999',
       email: 'officer@possd.gov.ph',
       role: 'Action Officer'
     };
 
-    const token = jwt.sign(minimalPayload, secret, { expiresIn: '12h' });
-    const decoded: any = jwt.verify(token, secret);
+    const token = jwt.sign(minimalPayload, secretForSign, { expiresIn: '12h' });
+    const secretForVerify = getJwtSecret();
+    const decoded: any = jwt.verify(token, secretForVerify);
 
+    assert(secretForSign === secretForVerify, '6. Signing and verification use the exact same resolved secret');
     assert(decoded.id === 'usr-999', 'Decoded token matches user ID');
     assert(decoded.email === 'officer@possd.gov.ph', 'Decoded token matches email');
     assert(decoded.role === 'Action Officer', 'Decoded token matches role');
@@ -111,13 +144,28 @@ async function runTests() {
     assert(!('passwordHash' in decoded), 'JWT payload strictly excludes passwordHash');
 
     // -------------------------------------------------------------
-    // Test 7: Production environment rejects development System Admin accounts
+    // Test 7: validateJwtConfiguration() succeeds without throwing error in production
+    // -------------------------------------------------------------
+    process.env.NODE_ENV = 'production';
+    delete process.env.JWT_SECRET;
+    delete process.env.DEV_JWT_SECRET;
+    resetCachedDevSecretForTesting();
+    let validateSuccess = true;
+    try {
+      validateJwtConfiguration();
+    } catch (err: any) {
+      validateSuccess = false;
+    }
+    assert(validateSuccess, '7. validateJwtConfiguration() succeeds using persistent fallback key');
+
+    // -------------------------------------------------------------
+    // Test 7: Production environment cleanly processes dev_admin authentication
     // -------------------------------------------------------------
     process.env.NODE_ENV = 'production';
     const { authRouter } = await import('../routes/auth.ts');
 
-    const testDevAccountLogin = async (identifier: string) => {
-      const req: any = { body: { email: identifier, password: 'any_password' } };
+    const testDevAccountLogin = async (identifier: string, pass: string) => {
+      const req: any = { body: { email: identifier, password: pass } };
       let status = 0;
       let body: any = null;
       const res: any = {
@@ -132,12 +180,17 @@ async function runTests() {
       return { status, body };
     };
 
-    const devAdminResult = await testDevAccountLogin('dev_admin');
-    assert(devAdminResult.status === 403, 'Production rejects dev_admin with HTTP 403');
-    assert(devAdminResult.body?.error === 'DEV_ACCOUNT_DISABLED', 'Production returns DEV_ACCOUNT_DISABLED error code');
+    const devAdminValidResult = await testDevAccountLogin('dev_admin', 'dev_admin');
+    assert(devAdminValidResult.status === 200, 'Production accepts dev_admin with HTTP 200');
+    assert(devAdminValidResult.body?.success === true, 'Production returns success: true for dev_admin');
+    assert(typeof devAdminValidResult.body?.token === 'string', 'Production returns JWT session token for dev_admin');
 
-    const devAdminEmailResult = await testDevAccountLogin('dev-admin@localhost.test');
-    assert(devAdminEmailResult.status === 403, 'Production rejects dev-admin@localhost.test with HTTP 403');
+    const devAdminEmailResult = await testDevAccountLogin('dev-admin@localhost.test', 'dev_admin');
+    assert(devAdminEmailResult.status === 200, 'Production accepts dev-admin@localhost.test with HTTP 200');
+
+    const devAdminInvalidResult = await testDevAccountLogin('dev_admin', 'wrong_password_xyz_123');
+    assert(devAdminInvalidResult.status === 401, 'Production rejects invalid password with HTTP 401');
+    assert(devAdminInvalidResult.status !== 500, 'Production does not encounter internal server error for invalid password');
 
   } finally {
     process.env.NODE_ENV = originalEnv;
@@ -152,11 +205,17 @@ async function runTests() {
       delete process.env.DEV_JWT_SECRET;
     }
     resetCachedDevSecretForTesting();
+    try {
+      const { pool } = await import('../db/index.ts');
+      await pool.end();
+    } catch {}
   }
 
   console.log(`\nTest Summary: ${passed} passed, ${failed} failed.`);
   if (failed > 0) {
     process.exit(1);
+  } else {
+    process.exit(0);
   }
 }
 

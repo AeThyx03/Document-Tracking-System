@@ -9,6 +9,7 @@ import {
   RegistryDropdownOptions,
   TimeInDeskConfig,
   DedicatedLinkItem,
+  formatDateToMDY,
 } from './types';
 import {
   ROLE_CONFIGS,
@@ -37,6 +38,7 @@ import {
   formatBatchNotification,
   BatchExecutionReport,
 } from './lib/batchOperations';
+import { enqueueMutation } from './lib/offlineQueue';
 import {
   createBusinessNotification,
   getStoredNotifications,
@@ -84,7 +86,6 @@ import {
   CheckCircle2,
   AlertCircle,
   ExternalLink,
-  Users,
   MapPin,
   ChevronRight,
   TrendingUp,
@@ -102,49 +103,30 @@ import {
   Sliders,
   BarChart3,
   Link2,
-  Sun,
-  Moon,
   LogIn,
   LogOut,
   Globe,
   Keyboard,
   CheckSquare,
   Printer,
+  Download,
+  Calendar,
+  Users,
 } from 'lucide-react';
 
 export default function App() {
   // Theme Toggle State ('light' | 'dark')
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        const saved = localStorage.getItem('possd_theme');
-        if (saved === 'dark' || saved === 'light') return saved;
-      }
-    } catch (e) {
-      // Sandboxed iframe
-    }
-    return 'dark';
-  });
-
   useEffect(() => {
     try {
       const root = document.documentElement;
-      if (theme === 'dark') {
-        root.classList.add('dark');
-      } else {
-        root.classList.remove('dark');
-      }
+      root.classList.add('dark');
       if (typeof window !== 'undefined' && window.localStorage) {
-        localStorage.setItem('possd_theme', theme);
+        localStorage.setItem('possd_theme', 'dark');
       }
     } catch (e) {
-      // Sandboxed iframe
+      // ignore
     }
-  }, [theme]);
-
-  const toggleTheme = () => {
-    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
-  };
+  }, []);
 
   // Authentication State
 
@@ -196,7 +178,15 @@ export default function App() {
     communicationTypes: ["Internal", "External"],
     reportTypes: ["Progress", "Final"],
     priorities: ["Routine", "Urgent", "Rush"],
-    personnel: [], desks: []
+    handoverInstructions: [
+      'For your information and reference',
+      'For your appropriate action',
+      'For review and recommendation',
+      'For compliance',
+      'For signature / approval',
+      'For filing / archiving'
+    ],
+    personnel: [],
   });
   const [dedicatedLinks, setDedicatedLinks] = useState<DedicatedLinkItem[]>(() => {
     try {
@@ -211,47 +201,146 @@ export default function App() {
 
   // Fetch dedicated links from server on mount
   useEffect(() => {
-    api.fetchLinks().then(data => { if (Array.isArray(data)) setDedicatedLinks(data); }).catch(e => console.warn(e));
+    api.fetchLinks().then(data => {
+      if (Array.isArray(data)) {
+        setDedicatedLinks(data);
+        try {
+          localStorage.setItem('possd_dedicated_links', JSON.stringify(data));
+        } catch {}
+      }
+    }).catch(e => console.warn(e));
   }, []);
 
-  const handleAddDedicatedLink = (newLink: Omit<DedicatedLinkItem, 'id' | 'addedAt'>) => {
+  const handleAddDedicatedLink = async (newLink: Omit<DedicatedLinkItem, 'id' | 'addedAt'>) => {
     const linkItem: DedicatedLinkItem = {
       ...newLink,
       id: `link-${Date.now()}`,
       addedAt: new Date().toISOString(),
     };
     const updated = [linkItem, ...dedicatedLinks];
-    setDedicatedLinks(updated);
-    try {
-      localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
-    } catch {}
-    api.saveLinks(updated).catch((e) => console.warn('Failed to push link to server:', e));
 
-    addNotification(
-      'Resource Link Added',
-      `System Admin registered "${linkItem.title}" to dedicated links directory.`,
-      currentUser?.name || 'System Admin',
-      'incoming',
-      'LINK-NEW'
-    );
+    try {
+      if (!isOnline) {
+        await enqueueMutation({
+          endpoint: '/api/links',
+          method: 'POST',
+          payload: updated,
+          entity: 'link',
+          operationType: 'CREATE',
+        });
+        setDedicatedLinks(updated);
+        try {
+          localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+        } catch {}
+        addNotification(
+          'Resource Link Queued (Offline)',
+          `Link "${linkItem.title}" queued for sync when connection restores.`,
+          currentUser?.name || 'System Admin',
+          'system'
+        );
+        return;
+      }
+
+      await api.saveLinks(updated);
+
+      // Server write succeeded -> Update React state & localStorage cache
+      setDedicatedLinks(updated);
+      try {
+        localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+      } catch {}
+
+      addNotification(
+        'Resource Link Added',
+        `System Admin registered "${linkItem.title}" to dedicated links directory.`,
+        currentUser?.name || 'System Admin',
+        'incoming',
+        'LINK-NEW'
+      );
+    } catch (e: any) {
+      console.error('Failed to push link to server:', e);
+      addNotification(
+        'Resource Link Save Failed',
+        `Failed to save link "${linkItem.title}" to server: ${e.message || 'Server error'}`,
+        currentUser?.name || 'System',
+        'system'
+      );
+    }
   };
 
-  const handleUpdateDedicatedLink = (id: string, updates: Partial<DedicatedLinkItem>) => {
+  const handleUpdateDedicatedLink = async (id: string, updates: Partial<DedicatedLinkItem>) => {
     const updated = dedicatedLinks.map((l) => (l.id === id ? { ...l, ...updates } : l));
-    setDedicatedLinks(updated);
+
     try {
-      localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
-    } catch {}
-    api.saveLinks(updated).catch((e) => console.warn('Failed to push link to server:', e));
+      if (!isOnline) {
+        await enqueueMutation({
+          endpoint: '/api/links',
+          method: 'POST',
+          payload: updated,
+          entity: 'link',
+          operationType: 'UPDATE',
+        });
+        setDedicatedLinks(updated);
+        try {
+          localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+        } catch {}
+        return;
+      }
+
+      await api.saveLinks(updated);
+
+      // Server write succeeded -> Update React state & localStorage cache
+      setDedicatedLinks(updated);
+      try {
+        localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+      } catch {}
+    } catch (e: any) {
+      console.error('Failed to update link on server:', e);
+      addNotification(
+        'Link Update Failed',
+        `Failed to update link on server: ${e.message || 'Server error'}`,
+        currentUser?.name || 'System',
+        'system'
+      );
+    }
   };
 
-  const handleDeleteDedicatedLink = (id: string) => {
+  const handleDeleteDedicatedLink = async (id: string) => {
     const updated = dedicatedLinks.filter((l) => l.id !== id);
-    setDedicatedLinks(updated);
+
     try {
-      localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
-    } catch {}
-    api.saveLinks(updated).catch((e) => console.warn('Failed to push link to server:', e));
+      if (!isOnline) {
+        await enqueueMutation({
+          endpoint: '/api/links',
+          method: 'POST',
+          payload: updated,
+          entity: 'link',
+          operationType: 'DELETE',
+        });
+        setDedicatedLinks(updated);
+        try {
+          localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+        } catch {}
+        return;
+      }
+
+      await api.deleteLink(id).catch(async () => {
+        await api.saveLinks(updated);
+      });
+
+      // Server write succeeded -> Update React state & localStorage cache
+      setDedicatedLinks(updated);
+      try {
+        localStorage.setItem('possd_dedicated_links', JSON.stringify(updated));
+      } catch {}
+    } catch (e: any) {
+      console.error('Failed to delete link on server:', e);
+      addNotification(
+        'Link Delete Failed',
+        `Failed to delete link on server: ${e.message || 'Server error'}`,
+        currentUser?.name || 'System',
+        'system'
+      );
+    }
   };
 
   // Documents State
@@ -366,11 +455,35 @@ export default function App() {
       if (!isOnline || isSyncing) return;
       isSyncing = true;
       try {
-        const [docs, staff, linksData] = await Promise.all([
+        const [docs, staff, linksData, dropdowns] = await Promise.all([
           api.fetchDocuments(),
           api.fetchStaff(),
-          api.fetchLinks()
+          api.fetchLinks(),
+          api.fetchDropdownOptions().catch(() => null)
         ]);
+        
+        if (dropdowns) {
+            setDropdownOptions({
+              roles: ["Receiving", "Staff", "Supervisor", "Division Manager", "Department Manager", "System Admin"],
+              departments: (dropdowns.target_division || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              documentTypes: (dropdowns.transaction_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              communicationTypes: (dropdowns.communication_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              reportTypes: (dropdowns.report_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              originatingAgencies: (dropdowns.originating_agency || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              targetDivisions: (dropdowns.target_division || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              priorities: (dropdowns.priority_level || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              handoverInstructions: (dropdowns.handover_instructions && dropdowns.handover_instructions.length > 0 ? dropdowns.handover_instructions : [
+                { value: 'For your information and reference', isActive: true },
+                { value: 'For your appropriate action', isActive: true },
+                { value: 'For review and recommendation', isActive: true },
+                { value: 'For compliance', isActive: true },
+                { value: 'For signature / approval', isActive: true },
+                { value: 'For filing / archiving', isActive: true }
+              ]).filter((o: any) => o.isActive).map((o: any) => o.value),
+              personnel: [],
+              focalPersons: [],
+            });
+        }
         
         if (docs && docs.length > 0) {
           setDocuments(docs);
@@ -380,6 +493,9 @@ export default function App() {
         }
         if (linksData) {
           setDedicatedLinks(linksData);
+          try {
+            localStorage.setItem('possd_dedicated_links', JSON.stringify(linksData));
+          } catch {}
         }
       } catch (err) {
         // Silently retain local cache if network is unavailable
@@ -425,6 +541,9 @@ export default function App() {
       }
       if (linksData) {
         setDedicatedLinks(linksData);
+        try {
+          localStorage.setItem('possd_dedicated_links', JSON.stringify(linksData));
+        } catch {}
       }
       addNotification(
         'Registry Refreshed',
@@ -442,16 +561,29 @@ export default function App() {
     }
   };
 
-  const handleSaveThresholdConfig = (updated: TimeInDeskConfig) => {
-    setTimeInDeskConfig(updated);
-    saveTimeInDeskConfig(updated);
-    addNotification(
-      'Thresholds Updated',
-      `Time-in-desk baseline updated to ${updated.defaultThresholdHours}h with ${Object.keys(updated.divisionThresholds).length} division rules.`,
-      currentUser?.name || 'System',
-      'movement',
-      'THRESH-UPDATE'
-    );
+  const handleSaveThresholdConfig = async (updated: TimeInDeskConfig) => {
+    try {
+      if (isOnline) {
+        await saveTimeInDeskConfigToBackend(updated);
+      }
+      setTimeInDeskConfig(updated);
+      saveTimeInDeskConfig(updated);
+      addNotification(
+        'Thresholds Updated',
+        `Time-in-desk baseline updated to ${updated.defaultThresholdHours}h with ${Object.keys(updated.divisionThresholds).length} division rules.`,
+        currentUser?.name || 'System',
+        'movement',
+        'THRESH-UPDATE'
+      );
+    } catch (err: any) {
+      console.error('Failed to save threshold config to server:', err);
+      addNotification(
+        'Threshold Update Failed',
+        `Failed to save SLA threshold configuration to server: ${err.message || 'Server error'}`,
+        currentUser?.name || 'System',
+        'system'
+      );
+    }
   };
 
   // Load initial data & Auth session
@@ -480,17 +612,48 @@ export default function App() {
           setCurrentUser(normalizedStaff);
           
           // Initial backend hydration
-          const [docs, staff, links] = await Promise.all([
+          const [docs, staff, linksData, dropdowns] = await Promise.all([
             api.fetchDocuments(),
             api.fetchStaff(),
-            api.fetchLinks()
+            api.fetchLinks(),
+            api.fetchDropdownOptions().catch(() => null)
           ]);
+          
+          if (dropdowns) {
+            // Map the grouped options to the legacy structure
+            setDropdownOptions({
+              roles: ["Receiving", "Staff", "Supervisor", "Division Manager", "Department Manager", "System Admin"],
+              departments: (dropdowns.target_division || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              documentTypes: (dropdowns.transaction_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              communicationTypes: (dropdowns.communication_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              reportTypes: (dropdowns.report_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              originatingAgencies: (dropdowns.originating_agency || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              targetDivisions: (dropdowns.target_division || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              priorities: (dropdowns.priority_level || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+              handoverInstructions: (dropdowns.handover_instructions && dropdowns.handover_instructions.length > 0 ? dropdowns.handover_instructions : [
+                { value: 'For your information and reference', isActive: true },
+                { value: 'For your appropriate action', isActive: true },
+                { value: 'For review and recommendation', isActive: true },
+                { value: 'For compliance', isActive: true },
+                { value: 'For signature / approval', isActive: true },
+                { value: 'For filing / archiving', isActive: true }
+              ]).filter((o: any) => o.isActive).map((o: any) => o.value),
+              personnel: [],
+              focalPersons: [],
+            });
+          }
 
           if (docs && docs.length > 0) {
             setDocuments(docs);
           }
           if (staff && staff.length > 0) {
             setStaffList(staff);
+          }
+          if (linksData && Array.isArray(linksData)) {
+            setDedicatedLinks(linksData);
+            try {
+              localStorage.setItem('possd_dedicated_links', JSON.stringify(linksData));
+            } catch {}
           }
         } else {
           setCurrentUser(null);
@@ -600,7 +763,18 @@ export default function App() {
       // Action: Print ('p' or 'P')
       if (e.key === 'p' || e.key === 'P') {
         e.preventDefault();
-        window.print();
+        if (selectedDoc) {
+          const docPrintBtn =
+            document.getElementById('print-audit-trail-header-btn') ||
+            document.getElementById('print-tracking-slip-btn');
+          if (docPrintBtn) {
+            docPrintBtn.click();
+          } else {
+            console.warn('[Shortcut] Document detail print button not found in active modal.');
+          }
+        } else {
+          handlePrintRegistry();
+        }
         return;
       }
 
@@ -728,7 +902,6 @@ export default function App() {
       name?: string;
       role?: UserRoleType;
       division?: string;
-      assignedDesk?: string;
       username?: string;
       status?: 'active' | 'suspended';
       email?: string;
@@ -800,7 +973,14 @@ export default function App() {
       const savedDoc = await api.createDocument(newDoc);
       
       setIsIncomingModalOpen(false);
-      await loadDocumentsPage(1);
+      setViewMode('all');
+      
+      setDocuments(prev => [savedDoc, ...prev]);
+      setServerTotalCount(prev => prev + 1);
+      setTotalMonitoredCount(prev => prev + 1);
+
+      // We still fire loadDocumentsPage in background if needed, but UI is updated immediately
+      loadDocumentsPage(1);
       setCurrentPage(1);
 
       addNotification(
@@ -947,9 +1127,22 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(25);
   const [serverTotalCount, setServerTotalCount] = useState<number>(0);
+  const [totalMonitoredCount, setTotalMonitoredCount] = useState<number>(0);
   const [serverTotalPages, setServerTotalPages] = useState<number>(1);
   const [isLoadingDocs, setIsLoadingDocs] = useState<boolean>(false);
   const [printDocuments, setPrintDocuments] = useState<DocumentItem[]>([]);
+
+  // Stable Dashboard Statistics State
+  const [dashboardStats, setDashboardStats] = useState({
+    totalMonitored: 0,
+    ongoing: 0,
+    actionRequired: 0,
+    overdue: 0,
+    cleared: 0
+  });
+
+  const [visibleColumns, setVisibleColumns] = useState<Set<string>>(new Set(['tracking', 'title', 'date', 'origin', 'division', 'custodian', 'lifecycle']));
+  const [isColumnPickerOpen, setIsColumnPickerOpen] = useState(false);
 
   // Function to load the current server page with filters, sorting, and pagination
   const loadDocumentsPage = useCallback(
@@ -964,20 +1157,34 @@ export default function App() {
           status: statusFilter,
           division: divisionFilter,
           priority: priorityFilter,
-          viewMode: viewMode,
           sort: sortField,
           sortDirection: sortDirection,
         });
         setDocuments(response.documents);
         setServerTotalCount(response.totalCount);
         setServerTotalPages(response.totalPages);
+        
+        // Update stable dashboard stats from server response
+        setDashboardStats({
+          totalMonitored: response.totalMonitoredCount || response.totalCount || 0,
+          ongoing: response.ongoingCount ?? 0,
+          actionRequired: response.pendingComplianceCount ?? 0,
+          overdue: response.overdueCount ?? 0,
+          cleared: response.clearedForOutCount ?? 0
+        });
+
+        if (typeof response.totalMonitoredCount === 'number') {
+          setTotalMonitoredCount(response.totalMonitoredCount);
+        } else {
+          setTotalMonitoredCount(response.totalCount || 0);
+        }
       } catch (err) {
         console.warn('Failed to load server paginated documents:', err);
       } finally {
         setIsLoadingDocs(false);
       }
     },
-    [currentPage, pageSize, searchQuery, statusFilter, divisionFilter, priorityFilter, viewMode, sortField, sortDirection]
+    [currentPage, pageSize, searchQuery, statusFilter, divisionFilter, priorityFilter, sortField, sortDirection]
   );
 
   // Reset pagination to page 1 whenever filters or sorting change
@@ -990,7 +1197,9 @@ export default function App() {
     loadDocumentsPage(currentPage);
   }, [currentPage, pageSize, searchQuery, viewMode, statusFilter, divisionFilter, priorityFilter, sortField, sortDirection]);
 
-  const totalItems = serverTotalCount;
+  // Conceptually distinct: totalMonitoredCount (global population) vs currentViewCount (filtered view)
+  const currentViewCount = serverTotalCount;
+  const totalItems = currentViewCount;
   const totalPages = Math.max(1, serverTotalPages);
   const activePage = Math.min(Math.max(1, currentPage), totalPages);
   const startIndex = totalItems === 0 ? 0 : (activePage - 1) * pageSize;
@@ -1033,11 +1242,102 @@ export default function App() {
     }
   };
 
+  // EXPORT: Download CSV
+  const handleDownloadCSV = () => {
+    if (documents.length === 0) {
+      addNotification('Export Failed', 'No documents available to export.', currentUser?.name || 'System', 'urgent');
+      return;
+    }
+
+    const headers = [
+      'Tracking Number',
+      'Priority',
+      'Title',
+      'Classification',
+      'Type',
+      'Date Received',
+      'Time Received',
+      'Origin Agency',
+      'Target Division',
+      'Focal Person',
+      'Current Status',
+      'Is Cleared',
+      'Cleared At',
+      'Exit Tracking #'
+    ];
+
+    const rows = documents.map(doc => [
+      doc.trackingNumber,
+      doc.priority,
+      `"${doc.title.replace(/"/g, '""')}"`,
+      doc.documentClassification || 'N/A',
+      doc.transactionType || 'N/A',
+      formatDateToMDY(doc.dateReceived),
+      doc.timeReceived,
+      `"${doc.originDepartment.replace(/"/g, '""')}"`,
+      doc.targetDivision,
+      doc.responsiblePerson,
+      doc.currentStatus,
+      doc.managerClearance?.isCleared ? 'YES' : 'NO',
+      doc.managerClearance?.clearedAt ? new Date(doc.managerClearance.clearedAt).toLocaleString() : 'N/A',
+      doc.managerClearance?.exitTrackingNumber || 'N/A'
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(r => r.join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = window.document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `POSSD_Document_Registry_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    window.document.body.appendChild(link);
+    link.click();
+    window.document.body.removeChild(link);
+    
+    addNotification('Export Success', `Exported ${documents.length} document records to CSV.`, currentUser?.name || 'System', 'sync');
+  };
+
+  const toggleColumn = (colId: string) => {
+    setVisibleColumns(prev => {
+      const next = new Set(prev);
+      if (next.has(colId)) {
+        if (next.size > 1) next.delete(colId);
+      } else {
+        next.add(colId);
+      }
+      return next;
+    });
+  };
+
   // Paginated window for screen view, or complete sorted list for printer-friendly output
   const visibleDocuments = useMemo(() => {
+    let list = documents;
+    if (viewMode === 'incoming') {
+       list = list.filter(doc => {
+          const isCleared = doc.isCleared || doc.managerClearance?.isCleared;
+          const hasRemarks = doc.supervisorRemarks?.some(r => r.complianceRequired && !r.complied);
+          const metrics = calculateDocumentTimeInDesk(doc, timeInDeskConfig);
+          return !isCleared && !hasRemarks && !metrics.isOverdue;
+       });
+    } else if ((viewMode as string) === 'action-required') {
+       list = list.filter(doc => !doc.isCleared && !doc.managerClearance?.isCleared && doc.supervisorRemarks?.some(r => r.complianceRequired && !r.complied));
+    } else if (viewMode === 'overdue') {
+       list = list.filter(doc => {
+          const isCleared = doc.isCleared || doc.managerClearance?.isCleared;
+          const metrics = calculateDocumentTimeInDesk(doc, timeInDeskConfig);
+          return !isCleared && metrics.isOverdue;
+       });
+    } else if ((viewMode as string) === 'cleared') {
+       list = list.filter(doc => doc.isCleared || doc.managerClearance?.isCleared);
+    }
+    
     if (isPrinting && printDocuments.length > 0) return printDocuments;
-    return documents;
-  }, [documents, printDocuments, isPrinting]);
+    return list;
+  }, [documents, viewMode, timeInDeskConfig, isPrinting, printDocuments]);
 
   // Active focal person names for distribution and tracking
   const activeFocalPersonNames = useMemo(() => {
@@ -1051,47 +1351,36 @@ export default function App() {
     return ['Mary Flor Aquino', 'Aubrey Camille Cabreras'];
   }, [dropdownOptions.focalPersons, staffList]);
 
-  // Statistics (Single-pass computation with unified clearance & SLA business rules)
+  // Statistics (Using stable frontend counts directly from 'documents' state as requested)
   const stats = useMemo(() => {
-    let activeInOfficeCount = 0;
-    let pendingComplianceCount = 0;
-    let clearedForOutCount = 0;
-    let overdueCount = 0;
-    let focalPendingCount = 0;
-
-    for (let i = 0; i < documents.length; i++) {
-      const d = documents[i];
-      const isCleared = !!d.managerClearance?.isCleared || d.currentStatus === 'Cleared for Out' || d.currentStatus === 'Dispatched / Completed';
-      if (!isCleared) {
-        activeInOfficeCount++;
-      } else {
-        clearedForOutCount++;
-      }
-
-      if (d.supervisorRemarks?.some((r) => r.complianceRequired && !r.complied)) {
-        pendingComplianceCount++;
-      }
-
-      const metrics = calculateDocumentTimeInDesk(d, timeInDeskConfig);
-      if (metrics.isOverdue) {
-        overdueCount++;
-      }
-
-      if (
-        activeFocalPersonNames.includes(d.responsiblePerson) &&
-        !isCleared
-      ) {
-        focalPendingCount++;
-      }
-    }
+    let ongoing = 0;
+    let actionRequired = 0;
+    let overdue = 0;
+    let cleared = 0;
+    
+    documents.forEach(doc => {
+       const isCleared = doc.isCleared || doc.managerClearance?.isCleared;
+       const hasRemarks = doc.supervisorRemarks?.some(r => r.complianceRequired && !r.complied);
+       const metrics = calculateDocumentTimeInDesk(doc, timeInDeskConfig);
+       
+       if (isCleared) {
+         cleared++;
+       } else if (metrics.isOverdue) {
+         overdue++;
+       } else if (hasRemarks) {
+         actionRequired++;
+       } else {
+         ongoing++;
+       }
+    });
 
     return {
       totalCount: documents.length,
-      activeInOfficeCount,
-      pendingComplianceCount,
-      clearedForOutCount,
-      overdueCount,
-      focalPendingCount,
+      activeInOfficeCount: ongoing,
+      pendingComplianceCount: actionRequired,
+      overdueCount: overdue,
+      clearedForOutCount: cleared,
+      focalPendingCount: documents.filter(d => activeFocalPersonNames.includes(d.responsiblePerson) && d.currentStatus === 'Incoming Logged').length
     };
   }, [documents, timeInDeskConfig, activeFocalPersonNames]);
 
@@ -1101,7 +1390,7 @@ export default function App() {
     pendingComplianceCount,
     clearedForOutCount,
     overdueCount,
-    focalPendingCount,
+    focalPendingCount
   } = stats;
 
   const currentRoleConfig = currentUser ? getRoleConfig(currentUser?.role) : getRoleConfig('Viewer');
@@ -1171,7 +1460,6 @@ export default function App() {
         name: currentUserName,
         role: currentUserRole,
         division: currentUser?.division,
-        assignedDesk: currentUser?.assignedDesk,
       };
 
       const actionCode = batchAction === 'mark_cleared' ? 'clear_out' : batchAction;
@@ -1227,7 +1515,6 @@ export default function App() {
         name: currentUserName,
         role: currentUserRole,
         division: currentUser?.division,
-        assignedDesk: currentUser?.assignedDesk,
       };
 
       const { report, updatedAllDocuments } = await executeBatchDocumentDelete(
@@ -1357,32 +1644,6 @@ export default function App() {
           {/* User Session Profile, Log Out, Thresholds & Actions */}
           <div className="flex items-center flex-wrap gap-2.5 w-full lg:w-auto justify-end">
             
-            {/* Time-in-Desk Thresholds (Available ONLY for System Admin, moved to the left) */}
-            {currentUser?.role === 'System Admin' && (
-              <button
-                id="open-thresholds-btn"
-                onClick={() => setActiveTab('admin')}
-                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border transition-all shadow-2xs cursor-pointer ${
-                  overdueCount > 0
-                    ? 'bg-rose-950/80 text-rose-200 border-rose-600 hover:bg-rose-900'
-                    : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700 hover:text-white'
-                }`}
-                title="System Admin: Manage Time-in-Desk thresholds & settings"
-              >
-                <Timer className={`w-4 h-4 ${overdueCount > 0 ? 'text-rose-400' : 'text-slate-400'}`} />
-                <span className="hidden sm:inline">Thresholds</span>
-                {overdueCount > 0 ? (
-                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-600 text-white font-bold">
-                    {overdueCount} Overdue
-                  </span>
-                ) : (
-                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-slate-900 text-slate-300 border border-slate-700">
-                    {timeInDeskConfig.defaultThresholdHours}h
-                  </span>
-                )}
-              </button>
-            )}
-
             {/* Active User Pill with Role Indicator */}
             <div className="flex items-center gap-2 bg-slate-800/90 border border-slate-700 rounded-xl px-2.5 py-1.5 shadow-2xs">
               <div className="w-7 h-7 rounded-lg bg-slate-700 text-slate-100 flex items-center justify-center text-xs font-bold shrink-0 ring-1 ring-slate-600">
@@ -1425,18 +1686,6 @@ export default function App() {
             >
               <LogOut className="w-4 h-4 text-slate-400 hover:text-rose-300" />
               <span className="hidden sm:inline">Log Out</span>
-            </button>
-
-            {/* Theme Toggle Button (Light/Dark Mode) */}
-            <button
-              id="theme-toggle-btn"
-              type="button"
-              onClick={toggleTheme}
-              className="p-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white transition-all shadow-2xs cursor-pointer"
-              title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-              aria-label="Toggle theme mode"
-            >
-              {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-300" /> : <Moon className="w-4 h-4 text-slate-300" />}
             </button>
 
             {/* Instant Registry Refresh */}
@@ -1544,7 +1793,6 @@ export default function App() {
             clearedCount={clearedForOutCount}
             onManualRefresh={handleManualRefresh}
             onOpenRolesModal={() => setIsRolesModalOpen(true)}
-            onOpenThresholdModal={() => setIsThresholdModalOpen(true)}
             onOpenShortcutsModal={() => setIsShortcutsModalOpen(true)}
             currentUserRole={currentUser?.role}
             isCollapsed={isSidebarCollapsed}
@@ -1564,9 +1812,10 @@ export default function App() {
                 transition={{ duration: 0.22, ease: 'easeOut' }}
                 className="space-y-6"
               >
-                {activeTab === 'distribution' ? (
-          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 p-6">
-            <div className="mb-6 border-b border-slate-200 dark:border-slate-800 pb-4">
+        {activeTab === 'distribution' ? (
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 distribution-desk-table-container flex flex-col h-[calc(100vh-140px)]">
+            {/* Header - Fixed */}
+            <div className="p-5 border-b border-slate-200 dark:border-slate-800 shrink-0 bg-white dark:bg-slate-900 rounded-t-2xl">
               <h2 className="text-xl font-bold text-slate-800 dark:text-white flex items-center gap-2">
                 <Users className="w-6 h-6 text-emerald-500" />
                 Distribution Desk - Focal Personnel
@@ -1576,36 +1825,37 @@ export default function App() {
               </p>
             </div>
             
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-800 dark:bg-slate-900 text-slate-100 font-bold uppercase tracking-wider text-[11px] border-b border-slate-700 dark:border-slate-800">
-                    <th className="py-3.5 px-4">Tracking Code</th>
-                    <th className="py-3.5 px-4">Title & Classification</th>
-                    <th className="py-3.5 px-4">Focal Person</th>
-                    <th className="py-3.5 px-4">Origin Dept</th>
-                    <th className="py-3.5 px-4 min-w-[200px]">Lifecycle Progress</th>
-                    <th className="py-3.5 px-4 text-right">Action</th>
+            {/* Middle Table Body - Flex Grow & Scrollable */}
+            <div className="flex-1 overflow-auto bg-slate-50 dark:bg-slate-900/50">
+              <table className="w-full text-left border-collapse relative min-w-[800px]">
+                <thead className="sticky top-0 z-10 shadow-sm bg-slate-800 dark:bg-slate-900 text-slate-100 font-bold uppercase tracking-wider text-[11px]">
+                  <tr className="border-b border-slate-700 dark:border-slate-800">
+                    <th className="py-3.5 px-5 whitespace-nowrap">Tracking Code</th>
+                    <th className="py-3.5 px-5">Title & Classification</th>
+                    <th className="py-3.5 px-5 whitespace-nowrap">Focal Person</th>
+                    <th className="py-3.5 px-5 whitespace-nowrap">Origin Dept</th>
+                    <th className="py-3.5 px-5 min-w-[200px]">Lifecycle Progress</th>
+                    <th className="py-3.5 px-5 text-right whitespace-nowrap">Action</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {documents.filter(d => activeFocalPersonNames.includes(d.responsiblePerson)).map((doc, _idx_doc) => (
+                <tbody className="divide-y divide-slate-200 dark:divide-slate-800/60 bg-white dark:bg-slate-900">
+                  {documents.filter(d => activeFocalPersonNames.includes(d.responsiblePerson) && d.currentStatus === 'Incoming Logged').map((doc, _idx_doc) => (
                     <tr
                       key={`${doc.id}-${_idx_doc}`}
                       onClick={() => setSelectedDoc(doc)}
                       className="hover:bg-blue-50/40 dark:hover:bg-slate-800/70 border-l-4 border-l-transparent hover:border-l-blue-500 transition-all duration-150 cursor-pointer group hover:shadow-sm"
                     >
-                      <td className="py-3.5 px-4 font-mono text-xs font-semibold text-blue-700 dark:text-blue-400 group-hover:translate-x-0.5 transition-transform">{doc.trackingNumber}</td>
-                      <td className="py-3.5 px-4">
+                      <td className="py-3.5 px-5 font-mono text-xs font-semibold text-blue-700 dark:text-blue-400 group-hover:translate-x-0.5 transition-transform">{doc.trackingNumber}</td>
+                      <td className="py-3.5 px-5">
                         <p className="font-semibold text-slate-900 dark:text-white truncate max-w-[200px] group-hover:text-blue-300 transition-colors">{doc.title}</p>
                         <p className="text-[11px] text-slate-500">{doc.documentType}</p>
                       </td>
-                      <td className="py-3.5 px-4 text-sm text-slate-700 dark:text-slate-300 font-medium">{doc.responsiblePerson}</td>
-                      <td className="py-3.5 px-4 text-sm text-slate-600 dark:text-slate-400">{doc.originDepartment}</td>
-                      <td className="py-3.5 px-4">
+                      <td className="py-3.5 px-5 text-sm text-slate-700 dark:text-slate-300 font-medium">{doc.responsiblePerson}</td>
+                      <td className="py-3.5 px-5 text-sm text-slate-600 dark:text-slate-400">{doc.originDepartment}</td>
+                      <td className="py-3.5 px-5">
                         <DocumentLifecycleProgress document={doc} variant="compact" />
                       </td>
-                      <td className="py-3.5 px-4 text-right">
+                      <td className="py-3.5 px-5 text-right">
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1618,13 +1868,28 @@ export default function App() {
                       </td>
                     </tr>
                   ))}
-                  {documents.filter(d => activeFocalPersonNames.includes(d.responsiblePerson)).length === 0 && (
+                  {documents.filter(d => activeFocalPersonNames.includes(d.responsiblePerson) && d.currentStatus === 'Incoming Logged').length === 0 && (
                      <tr>
-                        <td colSpan={6} className="text-center py-12 text-slate-500">No documents pending distribution for focal persons.</td>
+                        <td colSpan={6} className="text-center py-12 text-slate-500 bg-white dark:bg-slate-900">
+                          <div className="flex flex-col items-center justify-center gap-2">
+                             <Users className="w-8 h-8 text-slate-300 dark:text-slate-600" />
+                             <span>No documents pending distribution for focal persons.</span>
+                          </div>
+                        </td>
                      </tr>
                   )}
                 </tbody>
               </table>
+            </div>
+
+            {/* Footer - Fixed */}
+            <div className="p-4 border-t border-slate-200 dark:border-slate-800 shrink-0 bg-slate-50 dark:bg-slate-900 rounded-b-2xl flex items-center justify-between">
+               <span className="text-xs text-slate-500 dark:text-slate-400">
+                 Showing {documents.filter(d => activeFocalPersonNames.includes(d.responsiblePerson) && d.currentStatus === 'Incoming Logged').length} pending distributions
+               </span>
+               <span className="text-[11px] text-slate-400">
+                 End of List
+               </span>
             </div>
           </div>
         ) : activeTab === 'analytics' ? (
@@ -1654,7 +1919,6 @@ export default function App() {
             onOpenRolesModal={() => setIsRolesModalOpen(true)}
             availableDivisions={dropdownOptions.departments}
             currentUser={currentUser}
-            dropdownOptions={dropdownOptions}
             onUpdateDropdownOptions={handleUpdateDropdownOptions}
           />
         ) : (
@@ -1677,7 +1941,7 @@ export default function App() {
                 <FileText className="w-4 h-4" />
               </div>
             </div>
-            <p className="text-2xl font-black text-slate-900 dark:text-white mt-2 tracking-tight group-hover:text-blue-500 dark:group-hover:text-blue-300 transition-colors">{totalCount}</p>
+            <p className="text-2xl font-black text-slate-900 dark:text-white mt-2 tracking-tight group-hover:text-blue-500 dark:group-hover:text-blue-300 transition-colors">{totalMonitoredCount}</p>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Dashboard document archive</p>
           </div>
 
@@ -1811,6 +2075,7 @@ export default function App() {
               {[
                 { id: 'ALL', label: 'All Status', activeClass: 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 border-slate-900 dark:border-slate-100' },
                 { id: 'Incoming Logged', label: 'Incoming', activeClass: 'bg-slate-800 text-white border-slate-800' },
+                { id: 'Assigned', label: 'Assigned', activeClass: 'bg-slate-700 text-white border-slate-700' },
                 { id: 'Under Review', label: 'In Review', activeClass: 'bg-slate-700 text-white border-slate-700' },
                 { id: 'Supervisor Comment Needed', label: 'Remarks', activeClass: 'bg-slate-800 text-white border-slate-800 font-bold' },
                 { id: 'Cleared for Out', label: 'Cleared Out', activeClass: 'bg-slate-800 text-white border-slate-800' },
@@ -1976,6 +2241,65 @@ export default function App() {
 
             {/* Batch Action Select Dropdown & Bulk Execute Button & Print Button */}
             <div className="flex flex-wrap items-center gap-2">
+              {/* Actions: View Columns, Download CSV, Refresh */}
+              <div className="flex items-center gap-2 mr-2 border-r border-slate-200 dark:border-slate-700 pr-2">
+                {/* Column Visibility Toggle */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setIsColumnPickerOpen(!isColumnPickerOpen)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px] font-bold border border-slate-700 transition-all cursor-pointer shadow-2xs"
+                  >
+                    <Sliders className="w-3.5 h-3.5 text-slate-400" />
+                    <span>View Columns</span>
+                  </button>
+
+                  {isColumnPickerOpen && (
+                    <>
+                      <div className="fixed inset-0 z-40" onClick={() => setIsColumnPickerOpen(false)} />
+                      <div className="absolute right-0 top-full mt-1.5 w-56 p-2 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl z-50 animate-in fade-in zoom-in-95 duration-150">
+                        <p className="px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-800 mb-1">
+                          Display Table Columns
+                        </p>
+                        {[
+                          { id: 'tracking', label: 'Tracking #' },
+                          { id: 'title', label: 'Title & Classification' },
+                          { id: 'date', label: 'Date Received' },
+                          { id: 'origin', label: 'Origin Agency' },
+                          { id: 'division', label: 'Target Division' },
+                          { id: 'custodian', label: 'In-charge' },
+                          { id: 'lifecycle', label: 'Lifecycle Progress' },
+                        ].map((col) => (
+                          <label
+                            key={col.id}
+                            className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-800 cursor-pointer transition-colors"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={visibleColumns.has(col.id)}
+                              onChange={() => toggleColumn(col.id)}
+                              className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-900 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="text-[11px] font-medium text-slate-300">{col.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* Download CSV Button */}
+                <button
+                  type="button"
+                  onClick={handleDownloadCSV}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-900/30 hover:bg-emerald-900/50 text-emerald-400 rounded-lg text-[11px] font-bold border border-emerald-900/50 transition-all cursor-pointer shadow-2xs"
+                  title="Export current registry view to CSV (Excel compatible)"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Download CSV</span>
+                </button>
+              </div>
+
               <div className="flex items-center gap-1.5">
                 <label
                   htmlFor="batch-action-select"
@@ -2000,6 +2324,13 @@ export default function App() {
                       </option>
                     ))}
                   </optgroup>
+                  <optgroup label="Assign to Focal Person...">
+                    {(dropdownOptions.focalPersons?.length > 0 ? dropdownOptions.focalPersons : []).map((person) => (
+                      <option key={`assign-${person}`} value={`assign:${person}`}>
+                        &#128100; Assign to: {person}
+                      </option>
+                    ))}
+                  </optgroup>
 
                   <optgroup label="Change Priority...">
                     {(dropdownOptions.priorities && dropdownOptions.priorities.length > 0 
@@ -2010,6 +2341,7 @@ export default function App() {
                   </optgroup>
 
                   <optgroup label="Update Lifecycle Status...">
+                    <option value="status:Assigned">Set Status: Assigned</option>
                     <option value="status:Under Review">Set Status: Under Review</option>
                     <option value="status:Supervisor Comment Needed">Set Status: Supervisor Comment Needed</option>
                     <option value="status:Complied / Ready for Clearance">Set Status: Complied / Ready for Clearance</option>
@@ -2110,7 +2442,7 @@ export default function App() {
           </div>
 
           <div className="overflow-x-auto print:overflow-visible">
-            <table className="w-full text-left text-xs border-collapse">
+            <table className="w-full text-left text-xs border-collapse registry-table registry-table-print">
               <thead>
                 <tr className="bg-slate-900 dark:bg-slate-950 text-white font-bold uppercase tracking-wider text-[11px] border-b border-slate-800 print:bg-slate-200 print:text-black print:border-slate-400">
                   {/* Selection Checkbox Column */}
@@ -2130,189 +2462,132 @@ export default function App() {
                   </th>
 
                   {/* Tracking Code */}
-                  <th
-                    scope="col"
-                    aria-sort={sortField === 'trackingNumber' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    onClick={() => handleSort('trackingNumber')}
-                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
-                      sortField === 'trackingNumber'
-                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
-                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
-                    }`}
-                    title={sortField === 'trackingNumber' ? `Sorted by Tracking Code (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Tracking Code'}
-                  >
-                    <div className="inline-flex items-center gap-1.5">
-                      <span>Tracking Code</span>
-                      {sortField === 'trackingNumber' ? (
-                        sortDirection === 'asc' ? (
-                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        ) : (
-                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
-                      )}
-                    </div>
-                  </th>
+                  {visibleColumns.has('tracking') && (
+                    <th
+                      scope="col"
+                      className={`col-tracking py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                        sortField === 'trackingNumber'
+                          ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                          : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                      }`}
+                      onClick={() => handleSort('trackingNumber')}
+                    >
+                      <div className="inline-flex items-center gap-1.5">
+                        <span>Tracking Code</span>
+                        {sortField === 'trackingNumber' && (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />
+                        )}
+                      </div>
+                    </th>
+                  )}
 
                   {/* Title & Classification */}
-                  <th
-                    scope="col"
-                    aria-sort={sortField === 'title' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    onClick={() => handleSort('title')}
-                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
-                      sortField === 'title'
-                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
-                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
-                    }`}
-                    title={sortField === 'title' ? `Sorted by Title (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Title & Classification'}
-                  >
-                    <div className="inline-flex items-center gap-1.5">
-                      <span>Title &amp; Classification</span>
-                      {sortField === 'title' ? (
-                        sortDirection === 'asc' ? (
-                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        ) : (
-                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
-                      )}
-                    </div>
-                  </th>
+                  {visibleColumns.has('title') && (
+                    <th
+                      scope="col"
+                      className={`col-title py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                        sortField === 'title'
+                          ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                          : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                      }`}
+                      onClick={() => handleSort('title')}
+                    >
+                      <div className="inline-flex items-center gap-1.5">
+                        <span>Title &amp; Classification</span>
+                        {sortField === 'title' && (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />
+                        )}
+                      </div>
+                    </th>
+                  )}
 
                   {/* Origin & Time Inflow */}
-                  <th
-                    scope="col"
-                    aria-sort={sortField === 'dateReceived' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    onClick={() => handleSort('dateReceived')}
-                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
-                      sortField === 'dateReceived'
-                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
-                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
-                    }`}
-                    title={sortField === 'dateReceived' ? `Sorted by Date Received (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Origin & Date Inflow'}
-                  >
-                    <div className="inline-flex items-center gap-1.5">
-                      <span>Origin &amp; Time Inflow</span>
-                      {sortField === 'dateReceived' ? (
-                        sortDirection === 'asc' ? (
-                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        ) : (
-                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
-                      )}
-                    </div>
-                  </th>
+                  {visibleColumns.has('origin') && (
+                    <th
+                      scope="col"
+                      className={`col-origin py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                        sortField === 'dateReceived'
+                          ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                          : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                      }`}
+                      onClick={() => handleSort('dateReceived')}
+                    >
+                      <div className="inline-flex items-center gap-1.5">
+                        <span>Origin &amp; Time Inflow</span>
+                        {sortField === 'dateReceived' && (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />
+                        )}
+                      </div>
+                    </th>
+                  )}
+
+                  {/* Date Received */}
+                  {visibleColumns.has('date') && (
+                    <th scope="col" className="col-date py-3.5 px-4">Date Received</th>
+                  )}
 
                   {/* Forwarded To & Officer */}
-                  <th
-                    scope="col"
-                    aria-sort={sortField === 'targetDivision' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    onClick={() => handleSort('targetDivision')}
-                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
-                      sortField === 'targetDivision'
-                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
-                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
-                    }`}
-                    title={sortField === 'targetDivision' ? `Sorted by Forwarded Division (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Forwarded Division & Officer'}
-                  >
-                    <div className="inline-flex items-center gap-1.5">
-                      <span>Forwarded To &amp; Officer</span>
-                      {sortField === 'targetDivision' ? (
-                        sortDirection === 'asc' ? (
-                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        ) : (
-                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
-                      )}
-                    </div>
-                  </th>
+                  {visibleColumns.has('division') && (
+                    <th
+                      scope="col"
+                      className={`col-division py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                        sortField === 'targetDivision'
+                          ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                          : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                      }`}
+                      onClick={() => handleSort('targetDivision')}
+                    >
+                      <div className="inline-flex items-center gap-1.5">
+                        <span>Forwarded To &amp; Officer</span>
+                        {sortField === 'targetDivision' && (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />
+                        )}
+                      </div>
+                    </th>
+                  )}
 
                   {/* Current Custodian */}
-                  <th
-                    scope="col"
-                    aria-sort={sortField === 'currentCustodian' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    onClick={() => handleSort('currentCustodian')}
-                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
-                      sortField === 'currentCustodian'
-                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
-                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
-                    }`}
-                    title={sortField === 'currentCustodian' ? `Sorted by Current Custodian (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Current Custodian'}
-                  >
-                    <div className="inline-flex items-center gap-1.5">
-                      <span>Current Custodian</span>
-                      {sortField === 'currentCustodian' ? (
-                        sortDirection === 'asc' ? (
-                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        ) : (
-                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
-                      )}
-                    </div>
-                  </th>
-
-                  {/* Time in Desk */}
-                  <th
-                    scope="col"
-                    aria-sort={sortField === 'timeInDesk' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    onClick={() => handleSort('timeInDesk')}
-                    className={`py-3.5 px-4 cursor-pointer select-none group transition-colors ${
-                      sortField === 'timeInDesk'
-                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
-                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
-                    }`}
-                    title={sortField === 'timeInDesk' ? `Sorted by Time in Desk (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Time in Desk'}
-                  >
-                    <div className="inline-flex items-center gap-1.5">
-                      <span>Time in Desk</span>
-                      {sortField === 'timeInDesk' ? (
-                        sortDirection === 'asc' ? (
-                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        ) : (
-                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
-                      )}
-                    </div>
-                  </th>
+                  {visibleColumns.has('custodian') && (
+                    <th
+                      scope="col"
+                      className={`col-custodian py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                        sortField === 'currentCustodian'
+                          ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                          : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                      }`}
+                      onClick={() => handleSort('currentCustodian')}
+                    >
+                      <div className="inline-flex items-center gap-1.5">
+                        <span>Current Custodian</span>
+                        {sortField === 'currentCustodian' && (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />
+                        )}
+                      </div>
+                    </th>
+                  )}
 
                   {/* Lifecycle Progress */}
-                  <th
-                    scope="col"
-                    aria-sort={sortField === 'lifecycle' ? (sortDirection === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    onClick={() => handleSort('lifecycle')}
-                    className={`py-3.5 px-4 min-w-[210px] cursor-pointer select-none group transition-colors ${
-                      sortField === 'lifecycle'
-                        ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
-                        : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
-                    }`}
-                    title={sortField === 'lifecycle' ? `Sorted by Lifecycle Progress (${sortDirection === 'asc' ? 'Ascending' : 'Descending'}). Click to invert.` : 'Click to sort by Lifecycle Progress'}
-                  >
-                    <div className="inline-flex items-center gap-1.5">
-                      <span>Lifecycle Progress</span>
-                      {sortField === 'lifecycle' ? (
-                        sortDirection === 'asc' ? (
-                          <ArrowUp className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        ) : (
-                          <ArrowDown className="w-3.5 h-3.5 text-slate-200 stroke-[2.5]" />
-                        )
-                      ) : (
-                        <ArrowUpDown className="w-3.5 h-3.5 text-slate-400/50 group-hover:text-slate-300 transition-colors" />
-                      )}
-                    </div>
-                  </th>
+                  {visibleColumns.has('lifecycle') && (
+                    <th
+                      scope="col"
+                      className={`col-lifecycle py-3.5 px-4 cursor-pointer select-none group transition-colors ${
+                        sortField === 'lifecycle'
+                          ? 'bg-slate-800 dark:bg-slate-900 text-slate-100'
+                          : 'hover:bg-slate-800/80 dark:hover:bg-slate-900/80'
+                      }`}
+                      onClick={() => handleSort('lifecycle')}
+                    >
+                      <div className="inline-flex items-center gap-1.5">
+                        <span>Lifecycle Progress</span>
+                        {sortField === 'lifecycle' && (
+                          sortDirection === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />
+                        )}
+                      </div>
+                    </th>
+                  )}
 
                   {/* Actions Column (Non-sortable) */}
-                  <th scope="col" className="py-3.5 px-4 text-right no-print print:hidden">Actions</th>
+                  <th scope="col" className="col-actions py-3.5 px-4 text-right no-print print:hidden">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -2339,13 +2614,10 @@ export default function App() {
                     const isSelected = selectedDocIds.has(doc.id);
 
                     return (
-                      <motion.tr
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.2, delay: (_idx_doc % 20) * 0.05 }}
+                      <tr
                         key={`${doc.id}-${_idx_doc}`}
                         onClick={() => setSelectedDoc(doc)}
-                        className={`transition-all duration-150 cursor-pointer group border-l-4 ${
+                        className={`transition-colors duration-150 cursor-pointer group border-l-4 ${
                           isSelected
                             ? 'bg-blue-50/80 dark:bg-blue-950/50 hover:bg-blue-100/90 dark:hover:bg-blue-900/60 border-l-blue-600 shadow-2xs'
                             : shouldHighlightOverdue
@@ -2369,121 +2641,108 @@ export default function App() {
                         </td>
 
                         {/* Tracking # & Priority */}
-                        <td className="py-3.5 px-4 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
-                          <span className="group-hover:text-blue-600 dark:group-hover:text-blue-400 group-hover:translate-x-0.5 inline-block transition-all duration-150">
-                            {doc.trackingNumber}
-                          </span>
-                          <span
-                            className={`inline-block ml-2 px-1.5 py-0.2 rounded text-[10px] font-bold transition-transform duration-150 group-hover:scale-105 ${
-                              doc.priority === 'Rush'
-                                ? 'bg-rose-100 dark:bg-rose-950/80 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
-                                : doc.priority === 'Urgent'
-                                ? 'bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
-                                : 'bg-blue-50 dark:bg-blue-950/80 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800'
-                            }`}
-                          >
-                            {doc.priority}
-                          </span>
-                        </td>
+                        {visibleColumns.has('tracking') && (
+                          <td className="col-tracking py-3.5 px-4 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
+                            <span className="group-hover:text-blue-600 dark:group-hover:text-blue-400 group-hover:translate-x-0.5 inline-block transition-all duration-150">
+                              {doc.trackingNumber}
+                            </span>
+                            <span
+                              className={`inline-block ml-2 px-1.5 py-0.2 rounded text-[10px] font-bold transition-transform duration-150 group-hover:scale-105 ${
+                                doc.priority === 'Rush'
+                                  ? 'bg-rose-100 dark:bg-rose-950/80 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
+                                  : doc.priority === 'Urgent'
+                                  ? 'bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-800'
+                                  : 'bg-blue-50 dark:bg-blue-950/80 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800'
+                              }`}
+                            >
+                              {doc.priority}
+                            </span>
+                          </td>
+                        )}
 
                         {/* Title & Type */}
-                        <td className="py-3.5 px-4 max-w-xs">
-                          <div className="flex items-center gap-1.5">
-                            <p className="font-bold text-slate-900 dark:text-white line-clamp-1 group-hover:text-blue-700 dark:group-hover:text-blue-300 transition-colors">
-                              {doc.title}
-                            </p>
-                            {doc.fileLink && (
-                              <a
-                                href={doc.fileLink}
-                                target="_blank"
-                                rel="noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="inline-flex items-center gap-0.5 p-1 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 bg-blue-50 dark:bg-blue-950/80 hover:bg-blue-100 dark:hover:bg-blue-900 rounded-md shrink-0 transition-all hover:scale-115 active:scale-95 shadow-2xs hover:shadow-xs"
-                                title="Open attached cloud file / link"
-                              >
-                                <Link2 className="w-3.5 h-3.5" />
-                              </a>
-                            )}
-                          </div>
-                          <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 block max-w-xs truncate" title={`${doc.communicationType} | ${doc.reportType} | ${doc.documentType}`}>
-                            {doc.communicationType} &bull; {doc.reportType} &bull; {doc.documentType}
-                          </span>
-                        </td>
-
-                        {/* Origin Department & Auto Timestamp */}
-                        <td className="py-3.5 px-4">
-                          <p className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[180px]">
-                            {doc.originDepartment}
-                          </p>
-                          <div className="flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                            <Clock className="w-3 h-3 text-slate-400 dark:text-slate-500" />
-                            <span>
-                              {doc.dateReceived} • {doc.timeReceived}
+                        {visibleColumns.has('title') && (
+                          <td className="col-title py-3.5 px-4">
+                            <div className="flex items-center gap-1.5">
+                              <p className="font-bold text-slate-900 dark:text-white line-clamp-1 group-hover:text-blue-700 dark:group-hover:text-blue-300 transition-colors">
+                                {doc.title}
+                              </p>
+                              {doc.fileLink && (
+                                <a
+                                  href={doc.fileLink}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="inline-flex items-center gap-0.5 p-1 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 bg-blue-50 dark:bg-blue-950/80 hover:bg-blue-100 dark:hover:bg-blue-900 rounded-md shrink-0 transition-all hover:scale-115 active:scale-95 shadow-2xs hover:shadow-xs"
+                                  title="Open attached cloud file / link"
+                                >
+                                  <Link2 className="w-3.5 h-3.5" />
+                                </a>
+                              )}
+                            </div>
+                            <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 block truncate" title={`${doc.communicationType} | ${doc.reportType} | ${doc.documentType}`}>
+                              {doc.communicationType} &bull; {doc.reportType} &bull; {doc.documentType}
                             </span>
-                          </div>
-                        </td>
+                          </td>
+                        )}
 
-                        {/* Target Division & Responsible Person */}
-                        <td className="py-3.5 px-4">
-                          <p className="font-semibold text-slate-900 dark:text-white truncate max-w-[180px]">
-                            {doc.targetDivision}
-                          </p>
-                          <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5 flex items-center gap-1">
-                            <UserCheck className="w-3 h-3 text-blue-600 dark:text-blue-400" />
-                            <span className="truncate">{doc.responsiblePerson}</span>
-                          </p>
-                        </td>
+                        {/* Origin Agency & Timestamp */}
+                        {visibleColumns.has('origin') && (
+                          <td className="col-origin py-3.5 px-4">
+                            <p className="font-semibold text-slate-800 dark:text-slate-200 truncate">
+                              {doc.originDepartment}
+                            </p>
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                              Auto Log: {doc.timeReceived}
+                            </p>
+                          </td>
+                        )}
 
-                        {/* Current Location & Custodian */}
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center gap-1 text-slate-800 dark:text-slate-200 font-semibold">
-  <Users className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-  <span className="truncate max-w-[160px]">{doc.currentCustodian}</span>
-</div>
-                        </td>
+                        {/* Date Received */}
+                        {visibleColumns.has('date') && (
+                          <td className="col-date py-3.5 px-4">
+                            <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
+                              <Calendar className="w-3 h-3 text-slate-400" />
+                              <span className="font-medium">{formatDateToMDY(doc.dateReceived)}</span>
+                            </div>
+                          </td>
+                        )}
 
-                        {/* Time in Desk / Dwell SLA */}
-                        <td className="py-3.5 px-4 whitespace-nowrap">
-                          {isCleared ? (
-                            <div className="flex flex-col">
-                              <span className="inline-flex items-center gap-1 font-mono text-xs font-semibold text-emerald-700 dark:text-emerald-400">
-                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                {timeMetrics.elapsedFormatted}
-                              </span>
-                              <span className="text-[10px] text-emerald-700 dark:text-emerald-400 font-medium mt-0.5">
-                                Cleared out
+                        {/* Target Division */}
+                        {visibleColumns.has('division') && (
+                          <td className="col-division py-3.5 px-4">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 font-medium whitespace-nowrap">
+                              {doc.targetDivision}
+                            </span>
+                            <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 truncate">
+                              {doc.responsiblePerson}
+                            </p>
+                          </td>
+                        )}
+
+                        {/* Current Custodian */}
+                        {visibleColumns.has('custodian') && (
+                          <td className="col-custodian py-3.5 px-4">
+                            <div className="flex items-center gap-2">
+                              <div className="w-5 h-5 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center border border-slate-200 dark:border-slate-700">
+                                <Users className="w-2.5 h-2.5 text-slate-500" />
+                              </div>
+                              <span className="font-medium text-slate-800 dark:text-slate-200 truncate">
+                                {doc.currentCustodian}
                               </span>
                             </div>
-                          ) : isOverdue ? (
-                            <div className="flex flex-col">
-                              <span className="inline-flex items-center gap-1 font-mono text-xs font-bold text-rose-700 dark:text-rose-400">
-                                <AlertTriangle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0" />
-                                {timeMetrics.elapsedFormatted}
-                              </span>
-                              <span className="text-[10px] text-rose-600 dark:text-rose-400 font-semibold mt-0.5">
-                                +{timeMetrics.overdueFormatted} overdue (max {timeMetrics.thresholdHours}h)
-                              </span>
-                            </div>
-                          ) : (
-                            <div className="flex flex-col">
-                              <span className="inline-flex items-center gap-1 font-mono text-xs font-medium text-slate-700 dark:text-slate-300">
-                                <Clock className="w-3 h-3 text-slate-400 dark:text-slate-500 shrink-0" />
-                                {timeMetrics.elapsedFormatted}
-                              </span>
-                              <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
-                                {timeMetrics.remainingFormatted} left (max {timeMetrics.thresholdHours}h)
-                              </span>
-                            </div>
-                          )}
-                        </td>
+                          </td>
+                        )}
 
-                        {/* Status & Lifecycle Progress Bar */}
-                        <td className="py-3.5 px-4">
-                          <DocumentLifecycleProgress document={doc} variant="compact" />
-                        </td>
+                        {/* Lifecycle Progress Cell */}
+                        {visibleColumns.has('lifecycle') && (
+                          <td className="col-lifecycle py-3.5 px-4">
+                            <DocumentLifecycleProgress document={doc} variant="compact" />
+                          </td>
+                        )}
 
-                        {/* Action Link & Deletion */}
-                        <td className="py-3.5 px-4 text-right no-print print:hidden">
+                        {/* Actions Cell */}
+                        <td className="col-actions py-3.5 px-4 text-right whitespace-nowrap no-print print:hidden">
                           <div className="flex items-center justify-end gap-1.5">
                             {canDeleteLogs ? (
                               <button
@@ -2520,7 +2779,7 @@ export default function App() {
                             </button>
                           </div>
                         </td>
-                      </motion.tr>
+                      </tr>
                     );
                   })
                 )}
@@ -2736,6 +2995,9 @@ export default function App() {
         onSwitchRole={handleQuickSwitchRole}
         onDeleteDocument={(doc) => setDocToDelete(doc)}
         timeInDeskConfig={timeInDeskConfig}
+        isDistributionDesk={activeTab === 'distribution'}
+        dropdownOptions={dropdownOptions}
+        staffList={staffList}
         onConfigureThreshold={() => setIsThresholdModalOpen(true)}
       />
 
@@ -3015,7 +3277,7 @@ export default function App() {
                   </div>
                   <div>
                     <span className="text-slate-400 dark:text-slate-500 block">Received Timestamp:</span>
-                    <span className="text-slate-700 dark:text-slate-200 font-medium">{docToDelete.dateReceived} • {docToDelete.timeReceived}</span>
+                    <span className="text-slate-700 dark:text-slate-200 font-medium">{formatDateToMDY(docToDelete.dateReceived)} • {docToDelete.timeReceived}</span>
                   </div>
                   <div>
                     <span className="text-slate-400 dark:text-slate-500 block">Current Status:</span>

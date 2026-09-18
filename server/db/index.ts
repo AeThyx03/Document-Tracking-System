@@ -8,32 +8,32 @@ declare global {
 
 /**
  * Resolves PostgreSQL pool configuration based on available environment variables.
- * Supports ONLY DATABASE_URL (Standard connection string)
+ * Prioritizes Cloud SQL environment variables (SQL_HOST, SQL_USER, SQL_PASSWORD, SQL_DB_NAME)
+ * using the Object Method, and falls back to DATABASE_URL if explicitly provided.
  */
 export function getPoolConfig(): PoolConfig {
-  if (!process.env.DATABASE_URL) {
-    if (process.env.SQL_HOST && process.env.SQL_USER && process.env.SQL_DB_NAME) {
-      const host = process.env.SQL_HOST;
-      const user = process.env.SQL_USER;
-      const pass = process.env.SQL_PASSWORD || '';
-      const dbName = process.env.SQL_DB_NAME;
-      if (host.startsWith('/')) {
-        process.env.DATABASE_URL = `postgresql://${user}:${pass}@localhost/${dbName}?host=${host}`;
-      } else {
-        process.env.DATABASE_URL = `postgresql://${user}:${pass}@${host}/${dbName}`;
-      }
-      console.log('[POSSD] Automatically configured DATABASE_URL from SQL_* environment variables.');
-    } else {
-      throw new Error('FATAL: DATABASE_URL environment variable is required.');
-    }
+  if (process.env.SQL_HOST && process.env.SQL_USER && process.env.SQL_DB_NAME) {
+    return {
+      host: process.env.SQL_HOST,
+      user: process.env.SQL_USER,
+      password: process.env.SQL_PASSWORD || '',
+      database: process.env.SQL_DB_NAME,
+      max: 15,
+      connectionTimeoutMillis: 15000,
+      idleTimeoutMillis: 30000,
+    };
   }
 
-  return {
-    connectionString: process.env.DATABASE_URL,
-    max: 15,
-    connectionTimeoutMillis: 15000,
-    idleTimeoutMillis: 30000,
-  };
+  if (process.env.DATABASE_URL) {
+    return {
+      connectionString: process.env.DATABASE_URL,
+      max: 15,
+      connectionTimeoutMillis: 15000,
+      idleTimeoutMillis: 30000,
+    };
+  }
+
+  throw new Error('FATAL: Database configuration missing (SQL_HOST/SQL_USER/SQL_DB_NAME or DATABASE_URL).');
 }
 
 export const createPool = (): Pool => {

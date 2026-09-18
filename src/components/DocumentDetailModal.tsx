@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { DocumentItem, InternalMovement, SupervisorRemark, ManagerClearance, AppUserRole, UserRoleType, getSortedMovements } from '../types';
+import { DocumentItem, InternalMovement, SupervisorRemark, ManagerClearance, AppUserRole, UserRoleType, getSortedMovements, formatDateToMDY } from '../types';
 import {
   WorkflowActor,
   recordDocumentMovement,
@@ -37,6 +37,8 @@ import {
   ExternalLink,
   Edit3,
   Printer,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { canUserDeleteDocuments } from '../mockData';
 import { TimeInDeskConfig } from '../types';
@@ -54,9 +56,11 @@ interface DocumentDetailModalProps {
   onDeleteDocument?: (doc: DocumentItem) => void;
   timeInDeskConfig?: TimeInDeskConfig;
   onConfigureThreshold?: () => void;
+  dropdownOptions?: any;
+  staffList?: AppUserRole[];
 }
 
-export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
+export const DocumentDetailModal: React.FC<DocumentDetailModalProps & { isDistributionDesk?: boolean }> = ({
   document,
   onClose,
   currentUser,
@@ -65,36 +69,64 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
   onDeleteDocument,
   timeInDeskConfig,
   onConfigureThreshold,
+  isDistributionDesk,
+  dropdownOptions,
+  staffList,
 }) => {
   if (!document) return null;
 
   const canDelete = currentUser ? canUserDeleteDocuments(currentUser) : false;
   const timeMetrics = calculateDocumentTimeInDesk(document, timeInDeskConfig || DEFAULT_TIME_IN_DESK_CONFIG);
 
-  const [activeTab, setActiveTab] = useState<'audit' | 'movements' | 'remarks' | 'clearance'>('audit');
   const [printTarget, setPrintTarget] = useState<'routing-slip' | 'audit-trail'>('audit-trail');
+  const [pendingPrintTarget, setPendingPrintTarget] = useState<'routing-slip' | 'audit-trail' | null>(null);
 
-  // Synchronize printTarget with active tab
+
+  // Execute print after React commits printable target DOM element
   React.useEffect(() => {
-    if (activeTab === 'audit') {
-      setPrintTarget('audit-trail');
-    } else {
-      setPrintTarget('routing-slip');
-    }
-  }, [activeTab]);
+    if (!pendingPrintTarget) return;
+
+    const targetId = pendingPrintTarget === 'routing-slip' ? 'printable-routing-slip' : 'printable-audit-trail';
+
+    const timer = setTimeout(() => {
+      const el = window.document.getElementById(targetId);
+      if (!el) {
+        console.error(`[Print Controller] Target printable element #${targetId} was not found in the DOM. Aborting print.`);
+        setPendingPrintTarget(null);
+        return;
+      }
+
+      const handleAfterPrint = () => {
+        window.removeEventListener('afterprint', handleAfterPrint);
+        setPendingPrintTarget(null);
+      };
+      window.addEventListener('afterprint', handleAfterPrint, { once: true });
+
+      try {
+        window.print();
+      } catch (err) {
+        console.error('[Print Controller] window.print() failed:', err);
+        setPendingPrintTarget(null);
+      }
+    }, 100);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [pendingPrintTarget]);
+
+  const executePrint = (target: 'routing-slip' | 'audit-trail') => {
+    if (pendingPrintTarget) return;
+    setPrintTarget(target);
+    setPendingPrintTarget(target);
+  };
 
   const handlePrintSlip = () => {
-    setPrintTarget('routing-slip');
-    setTimeout(() => {
-      window.print();
-    }, 40);
+    executePrint('routing-slip');
   };
 
   const handlePrintAuditTrail = () => {
-    setPrintTarget('audit-trail');
-    setTimeout(() => {
-      window.print();
-    }, 40);
+    executePrint('audit-trail');
   };
 
   const totalAuditEvents =
@@ -116,13 +148,11 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
   const [complianceInputNotes, setComplianceInputNotes] = useState<{ [remarkId: string]: string }>({});
 
   // --- 3. Manager Clearance form state ---
+  const [showClearanceForm, setShowClearanceForm] = useState(false);
+  const [showMovementForm, setShowMovementForm] = useState(false);
+  const [showRemarkForm, setShowRemarkForm] = useState(false);
+  const [isTrailCollapsed, setIsTrailCollapsed] = useState(true);
   const [clearanceType, setClearanceType] = useState<NonNullable<ManagerClearance['clearanceType']>>('approved_for_dispatch');
-  const [exitTrackingNumber, setExitTrackingNumber] = useState(
-    document.managerClearance?.exitTrackingNumber || `OUT-${document.trackingNumber.replace('TRK-', '')}`
-  );
-  const [forwardedToExternal, setForwardedToExternal] = useState(
-    document.managerClearance?.forwardedToExternal || document.originDepartment
-  );
   const [clearanceRemarks, setClearanceRemarks] = useState(
     document.managerClearance?.clearanceRemarks || ''
   );
@@ -159,25 +189,30 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
   };
 
   // Double-submission protection and inline validation states
+  const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(true); // Collapsed by default to save space and remove scrollbars
   const [isSubmittingMovement, setIsSubmittingMovement] = useState(false);
   const [isSubmittingRemark, setIsSubmittingRemark] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [movementError, setMovementError] = useState<string | null>(null);
   const [remarkError, setRemarkError] = useState<string | null>(null);
   const [clearanceError, setClearanceError] = useState<string | null>(null);
+  const [complianceError, setComplianceError] = useState<string | null>(null);
 
   // HANDLER: Record new internal movement
   const handleAddMovement = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmittingMovement) return;
+
     if (!currentDeskInput.trim()) {
-      setMovementError('Current desk location is required.');
+      setMovementError('In-charge person is required.');
       return;
     }
-    if (!forwardToInput.trim()) {
-      setMovementError('Forward destination desk is required.');
+    
+    // Check if the user really wants to assign
+    if (!window.confirm(`Are you sure you want to assign this document to ${currentDeskInput.trim()}?`)) {
       return;
     }
+
     setMovementError(null);
     setIsSubmittingMovement(true);
 
@@ -187,15 +222,14 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
         name: currentUser?.name || 'Authorized Custodian',
         role: currentUser?.role || 'Staff',
         division: currentUser?.division || 'General',
-        assignedDesk: currentUser?.assignedDesk,
       };
 
       const result = recordDocumentMovement(
         document,
         {
-          fromDesk: currentDeskInput.trim(),
-          toDesk: forwardToInput.trim(),
-          statusUpdate: movementAction,
+          fromDesk: document.currentLocation,
+          toDesk: currentDeskInput.trim(),
+          statusUpdate: 'forwarded',
           notes: movementNotes.trim(),
         },
         actor
@@ -206,12 +240,10 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
         return;
       }
 
-      onUpdateDocument(result.document, result.notificationMessage || `Moved to ${forwardToInput.trim()}`);
-
-      // Reset movement inputs
-      setCurrentDeskInput(forwardToInput.trim());
-      setForwardToInput('');
+      onUpdateDocument(result.document, result.notificationMessage || `Assigned to ${currentDeskInput.trim()}`);
       setMovementNotes('');
+    } catch (err: any) {
+      setMovementError(err.message || 'An unexpected error occurred.');
     } finally {
       setIsSubmittingMovement(false);
     }
@@ -269,10 +301,11 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
 
     const result = fulfillSupervisorCompliance(document, remarkId, note, actor);
     if (!result.success) {
-      alert(result.error || 'Failed to record compliance.');
+      setComplianceError(result.error || 'Failed to record compliance.');
       return;
     }
 
+    setComplianceError(null);
     onUpdateDocument(result.document, result.notificationMessage || 'Compliance fulfilled.');
   };
 
@@ -299,8 +332,6 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
         document,
         {
           clearanceType,
-          exitTrackingNumber: exitTrackingNumber.trim(),
-          forwardedToExternal: forwardedToExternal.trim(),
           clearanceRemarks: clearanceRemarks.trim(),
         },
         actor
@@ -369,7 +400,26 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0 ml-2">
-              {activeTab === 'audit' ? (
+              <button
+                type="button"
+                onClick={() => setIsHeaderCollapsed(!isHeaderCollapsed)}
+                className="no-print inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 rounded-lg text-[11px] font-semibold border border-slate-700 transition-colors cursor-pointer shadow-xs"
+                title={isHeaderCollapsed ? "Expand Document Details" : "Collapse Document Details"}
+              >
+                {isHeaderCollapsed ? (
+                  <>
+                    <ChevronDown className="w-3.5 h-3.5" />
+                    <span>Expand Info</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronUp className="w-3.5 h-3.5" />
+                    <span>Collapse Info</span>
+                  </>
+                )}
+              </button>
+              
+              {!isTrailCollapsed ? (
                 <button
                   type="button"
                   onClick={handlePrintAuditTrail}
@@ -401,114 +451,119 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
             </div>
           </div>
 
-        {/* Metadata Strip */}
-        <div className="px-6 py-3 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-          <div>
-            <span className="text-slate-500 dark:text-slate-400 block font-medium">From (Origin):</span>
-            <span className="font-semibold text-slate-900 dark:text-white truncate block" title={document.originDepartment}>
-              {document.originDepartment}
-            </span>
-          </div>
-          <div>
-            <span className="text-slate-500 dark:text-slate-400 block font-medium">Received Time:</span>
-            <span className="font-semibold text-slate-900 dark:text-white">
-              {document.dateReceived} @ {document.timeReceived}
-            </span>
-          </div>
-          <div>
-            <span className="text-slate-500 dark:text-slate-400 block font-medium">Target Division:</span>
-            <span className="font-semibold text-slate-900 dark:text-white truncate block">
-              {document.targetDivision}
-            </span>
-          </div>
-          <div>
-            <span className="text-slate-500 dark:text-slate-400 block font-medium">Focal Person:</span>
-            <span className="font-semibold text-slate-900 dark:text-white truncate block">
-              {document.responsiblePerson}
-            </span>
-          </div>
-        </div>
-
-        {/* Visual Progress Steps Indicator */}
-        <div className="px-6 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
-          <DocumentLifecycleProgress document={document} variant="detailed" />
-        </div>
-
-        {/* Attached File Link Ribbon - Blue & Green Accent */}
-        <div className="px-6 py-2.5 bg-blue-50/70 dark:bg-blue-950/30 border-b border-blue-100 dark:border-blue-900/50 flex flex-wrap items-center justify-between gap-2 text-xs">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            <div className="w-6 h-6 rounded-md bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
-              <Link2 className="w-3.5 h-3.5" />
-            </div>
-            <span className="font-semibold text-slate-800 dark:text-slate-200 shrink-0">Attached Digital File:</span>
-            {isEditingFileLink ? (
-              <div className="flex items-center gap-1.5 flex-1 max-w-xl">
-                <input
-                  type="url"
-                  value={fileLinkInput}
-                  onChange={(e) => setFileLinkInput(e.target.value)}
-                  placeholder="Paste URL (e.g., https://storage.agency.gov/file/...)"
-                  className="text-xs bg-white dark:bg-slate-800 text-slate-900 dark:text-white border border-blue-300 dark:border-blue-700 rounded-lg px-2.5 py-1 w-full focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-                <button
-                  onClick={handleSaveFileLink}
-                  className="px-2.5 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-[11px] font-semibold shrink-0 cursor-pointer"
-                >
-                  Save
-                </button>
-                <button
-                  onClick={() => {
-                    setIsEditingFileLink(false);
-                    setFileLinkInput(document.fileLink || '');
-                  }}
-                  className="px-2 py-1 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-lg text-[11px] shrink-0 cursor-pointer"
-                >
-                  Cancel
-                </button>
+        {/* Collapsible Info Section */}
+        {!isHeaderCollapsed && (
+          <div className="flex flex-col">
+            {/* Metadata Strip */}
+            <div className="px-6 py-3 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div>
+                <span className="text-slate-500 dark:text-slate-400 block font-medium">From (Origin):</span>
+                <span className="font-semibold text-slate-900 dark:text-white truncate block" title={document.originDepartment}>
+                  {document.originDepartment}
+                </span>
               </div>
-            ) : document.fileLink ? (
-              <div className="flex items-center gap-2 min-w-0">
+              <div>
+                <span className="text-slate-500 dark:text-slate-400 block font-medium">Received Time:</span>
+                <span className="font-semibold text-slate-900 dark:text-white">
+                  {formatDateToMDY(document.dateReceived)} @ {document.timeReceived}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500 dark:text-slate-400 block font-medium">Target Division:</span>
+                <span className="font-semibold text-slate-900 dark:text-white truncate block">
+                  {document.targetDivision}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500 dark:text-slate-400 block font-medium">Focal Person:</span>
+                <span className="font-semibold text-slate-900 dark:text-white truncate block">
+                  {document.responsiblePerson}
+                </span>
+              </div>
+            </div>
+
+            {/* Visual Progress Steps Indicator */}
+            <div className="px-6 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
+              <DocumentLifecycleProgress document={document} variant="detailed" onExpandHistory={() => setIsTrailCollapsed(false)} />
+            </div>
+
+            {/* Attached File Link Ribbon - Blue & Green Accent */}
+            <div className="px-6 py-2.5 bg-blue-50/70 dark:bg-blue-950/30 border-b border-blue-100 dark:border-blue-900/50 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <div className="w-6 h-6 rounded-md bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
+                  <Link2 className="w-3.5 h-3.5" />
+                </div>
+                <span className="font-semibold text-slate-800 dark:text-slate-200 shrink-0">Attached Digital File:</span>
+                {isEditingFileLink ? (
+                  <div className="flex items-center gap-1.5 flex-1 max-w-xl">
+                    <input
+                      type="url"
+                      value={fileLinkInput}
+                      onChange={(e) => setFileLinkInput(e.target.value)}
+                      placeholder="Paste URL (e.g., https://storage.agency.gov/file/...)"
+                      className="text-xs bg-white dark:bg-slate-800 text-slate-900 dark:text-white border border-blue-300 dark:border-blue-700 rounded-lg px-2.5 py-1 w-full focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                    <button
+                      onClick={handleSaveFileLink}
+                      className="px-2.5 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-[11px] font-semibold shrink-0 cursor-pointer"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => {
+                        setIsEditingFileLink(false);
+                        setFileLinkInput(document.fileLink || '');
+                      }}
+                      className="px-2 py-1 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-lg text-[11px] shrink-0 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : document.fileLink ? (
+                  <div className="flex items-center gap-2 min-w-0">
+                    <a
+                      href={document.fileLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-mono text-blue-700 dark:text-blue-400 hover:text-blue-900 dark:hover:text-blue-300 underline truncate max-w-xs sm:max-w-md flex items-center gap-1 font-medium"
+                    >
+                      <span>{document.fileLink}</span>
+                      <ExternalLink className="w-3 h-3 shrink-0" />
+                    </a>
+                    <button
+                      onClick={() => setIsEditingFileLink(true)}
+                      className="text-slate-400 hover:text-blue-700 dark:hover:text-blue-400 p-0.5 rounded hover:bg-blue-100/60 dark:hover:bg-blue-900/60 cursor-pointer"
+                      title="Edit link"
+                    >
+                      <Edit3 className="w-3 h-3" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400 dark:text-slate-500 italic">No cloud file link attached</span>
+                    <button
+                      onClick={() => setIsEditingFileLink(true)}
+                      className="text-blue-700 dark:text-blue-400 hover:text-blue-900 dark:hover:text-blue-300 font-semibold underline text-[11px] cursor-pointer"
+                    >
+                      + Add File Link
+                    </button>
+                  </div>
+                )}
+              </div>
+              {document.fileLink && !isEditingFileLink && (
                 <a
                   href={document.fileLink}
                   target="_blank"
                   rel="noreferrer"
-                  className="font-mono text-blue-700 dark:text-blue-400 hover:text-blue-900 dark:hover:text-blue-300 underline truncate max-w-xs sm:max-w-md flex items-center gap-1 font-medium"
+                  className="inline-flex items-center gap-1 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors shrink-0"
                 >
-                  <span>{document.fileLink}</span>
-                  <ExternalLink className="w-3 h-3 shrink-0" />
+                  <span>Open File</span>
+                  <ExternalLink className="w-3 h-3" />
                 </a>
-                <button
-                  onClick={() => setIsEditingFileLink(true)}
-                  className="text-slate-400 hover:text-blue-700 dark:hover:text-blue-400 p-0.5 rounded hover:bg-blue-100/60 dark:hover:bg-blue-900/60 cursor-pointer"
-                  title="Edit link"
-                >
-                  <Edit3 className="w-3 h-3" />
-                </button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="text-slate-400 dark:text-slate-500 italic">No cloud file link attached</span>
-                <button
-                  onClick={() => setIsEditingFileLink(true)}
-                  className="text-blue-700 dark:text-blue-400 hover:text-blue-900 dark:hover:text-blue-300 font-semibold underline text-[11px] cursor-pointer"
-                >
-                  + Add File Link
-                </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
-          {document.fileLink && !isEditingFileLink && (
-            <a
-              href={document.fileLink}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-2xs transition-colors shrink-0"
-            >
-              <span>Open File</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
-          )}
-        </div>
+        )}
 
         {/* Active Role Indicator Banner */}
         <div className="px-6 py-2.5 bg-slate-50 dark:bg-slate-800/80 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -519,13 +574,13 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               {currentUser?.role || 'Staff'}
             </span>
           </div>
-          {onSwitchRole && (
+          {onSwitchRole && currentUser?.role === 'System Admin' && (
             <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
               <span className="hidden sm:inline">Switch Role perspective:</span>
               <button
                 type="button"
                 onClick={() => onSwitchRole('Receiving')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Receiving' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${(currentUser?.role as string) === 'Receiving' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Admin Staff
               </button>
@@ -533,7 +588,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Staff')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Staff' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${(currentUser?.role as string) === 'Staff' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Staff
               </button>
@@ -541,7 +596,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Supervisor')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Supervisor' ? 'text-amber-700 dark:text-amber-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${(currentUser?.role as string) === 'Supervisor' ? 'text-amber-700 dark:text-amber-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Supervisor
               </button>
@@ -549,23 +604,15 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               <button
                 type="button"
                 onClick={() => onSwitchRole('Division Manager')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Division Manager' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${(currentUser?.role as string) === 'Division Manager' ? 'text-blue-700 dark:text-blue-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 Division Mgr
               </button>
               <span>•</span>
               <button
                 type="button"
-                onClick={() => onSwitchRole('Department Manager')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'Department Manager' ? 'text-emerald-700 dark:text-emerald-400 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
-              >
-                Dept Mgr
-              </button>
-              <span>•</span>
-              <button
-                type="button"
                 onClick={() => onSwitchRole('System Admin')}
-                className={`hover:underline font-semibold cursor-pointer ${currentUser?.role === 'System Admin' ? 'text-blue-900 dark:text-blue-300 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
+                className={`hover:underline font-semibold cursor-pointer ${(currentUser?.role as string) === 'System Admin' ? 'text-blue-900 dark:text-blue-300 underline font-bold' : 'text-slate-600 dark:text-slate-400'}`}
               >
                 System Admin
               </button>
@@ -661,97 +708,74 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                 )}
               </p>
             </div>
+        </div>
           </div>
 
-          {onConfigureThreshold && (
+
+                        {/* Action Bar */}
+        <div className="flex flex-wrap gap-2 border-b border-slate-200 dark:border-slate-800 px-6 py-3 bg-slate-50 dark:bg-slate-900 shrink-0">
+          <button
+            onClick={() => {
+               setShowMovementForm(!showMovementForm);
+               setShowRemarkForm(false);
+               setShowClearanceForm(false);
+            }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer ${showMovementForm ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-900/60 hover:bg-blue-50 dark:hover:bg-slate-700'}`}
+          >
+            <MapPin className="w-3.5 h-3.5" />
+            Log New Movement
+          </button>
+
+          <button
+            onClick={() => {
+               setShowRemarkForm(!showRemarkForm);
+               setShowMovementForm(false);
+               setShowClearanceForm(false);
+            }}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer ${showRemarkForm ? 'bg-amber-600 text-white' : 'bg-white dark:bg-slate-800 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900/60 hover:bg-amber-50 dark:hover:bg-slate-700'}`}
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+            Add Directive
+          </button>
+          
+          {(currentUser?.role === 'Department Manager' || currentUser?.role === 'System Admin') && !document.managerClearance?.isCleared && (
             <button
               type="button"
-              onClick={onConfigureThreshold}
-              className={`shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
-                timeMetrics.isOverdue
-                  ? 'border-rose-300 dark:border-rose-800 bg-white dark:bg-slate-800 hover:bg-rose-100 dark:hover:bg-rose-950 text-rose-800 dark:text-rose-300 shadow-2xs'
-                  : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 shadow-2xs'
-              }`}
+              onClick={() => {
+                setShowClearanceForm(!showClearanceForm);
+                setShowMovementForm(false);
+                setShowRemarkForm(false);
+              }}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer ${showClearanceForm ? 'bg-emerald-600 text-white' : 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-900/60 hover:bg-emerald-50 dark:hover:bg-slate-700'}`}
             >
-              <Sliders className="w-3.5 h-3.5" />
-              <span>Configure Threshold</span>
+              <ShieldCheck className="w-3.5 h-3.5" />
+              Clearance Action
             </button>
           )}
-        </div>
 
-        {/* Navigation Tabs - Clean Blue/Yellow/Green Palette */}
-        <div className="flex border-b border-slate-200 dark:border-slate-800 px-6 bg-white dark:bg-slate-900 shrink-0 overflow-x-auto">
           <button
-            onClick={() => setActiveTab('audit')}
-            id="tab-audit-trail"
-            className={`py-3 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-              activeTab === 'audit'
-                ? 'border-blue-700 dark:border-blue-500 text-blue-900 dark:text-blue-300 bg-blue-50/50 dark:bg-blue-950/40 font-bold'
-                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-            }`}
+            onClick={() => setIsTrailCollapsed(!isTrailCollapsed)}
+            className="ml-auto px-3 py-1.5 rounded-lg text-xs font-semibold bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
           >
-            <History className="w-4 h-4 text-blue-700 dark:text-blue-400" />
-            Chronological Audit Trail
-            <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-blue-100 dark:bg-blue-900/60 text-blue-800 dark:text-blue-200">
-              {totalAuditEvents}
-            </span>
+            <History className="w-3.5 h-3.5" />
+            {isTrailCollapsed ? 'Show Document Trail' : 'Hide Document Trail'}
           </button>
-          <button
-            onClick={() => setActiveTab('movements')}
-            id="tab-movements"
-            className={`py-3 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-              activeTab === 'movements'
-                ? 'border-blue-700 dark:border-blue-500 text-blue-800 dark:text-blue-300 bg-blue-50/40 dark:bg-blue-950/40 font-bold'
-                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-            }`}
-          >
-            <MapPin className="w-4 h-4 text-blue-700 dark:text-blue-400" />
-            Internal Tracking & Forwarding ({document.movements?.length || 0})
-          </button>
-          <button
-            onClick={() => setActiveTab('remarks')}
-            id="tab-remarks"
-            className={`py-3 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-              activeTab === 'remarks'
-                ? 'border-amber-500 dark:border-amber-400 text-amber-900 dark:text-amber-300 bg-amber-50/50 dark:bg-amber-950/40 font-bold'
-                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-            }`}
-          >
-            <MessageSquare className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-            Supervisor Remarks & Compliance ({document.supervisorRemarks?.length || 0})
-          </button>
-          <button
-            onClick={() => setActiveTab('clearance')}
-            id="tab-clearance"
-            className={`py-3 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-2 cursor-pointer whitespace-nowrap ${
-              activeTab === 'clearance'
-                ? 'border-emerald-600 dark:border-emerald-500 text-emerald-900 dark:text-emerald-300 bg-emerald-50/50 dark:bg-emerald-950/40 font-bold'
-                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-            }`}
-          >
-            <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-            Department Manager Clearance
-            {document.managerClearance?.isCleared && (
-              <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-            )}
-          </button>
-        </div>
-
-        {/* Tab Body Content (Scrollable) */}
+        </div>        {/* Tab Body Content (Scrollable) */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        {!showClearanceForm && (
+          <>
           
-          {/* TAB 0: CHRONOLOGICAL AUDIT TRAIL */}
-          {activeTab === 'audit' && (
+          {/* CHRONOLOGICAL AUDIT TRAIL */}
+          {!isTrailCollapsed && (
             <DocumentAuditTrail
               document={document}
               currentUser={currentUser}
-              onNavigateToTab={(tab) => setActiveTab(tab)}
               onPrintAudit={handlePrintAuditTrail}
             />
           )}
 
-          {/* TAB 1: INTERNAL MOVEMENTS & FORWARDING */}
-          {activeTab === 'movements' && (
+          {/* INTERNAL MOVEMENTS & FORWARDING */}
+          {showMovementForm && (
             <div className="space-y-6">
               
               {/* Add New Movement Form (Accessible to all handling personnel) */}
@@ -766,7 +790,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   Any office personnel handling this physical document can update where it is currently and specify which desk or officer it will be forwarded to next.
                 </p>
 
-                <form onSubmit={handleAddMovement} className="space-y-3">
+                                <form onSubmit={handleAddMovement} className="space-y-3">
                   {movementError && (
                     <div className="p-2.5 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 rounded-xl text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
                       <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600" />
@@ -776,82 +800,63 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Where is the document CURRENTLY?
+                        In-charge
                       </label>
-                      <input
-                        type="text"
+                      <select
                         required
                         value={currentDeskInput}
                         onChange={(e) => setCurrentDeskInput(e.target.value)}
-                        placeholder="e.g. Desk 4 - Accounting Evaluation"
-                        className="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 px-3 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Where to NEXT? (Forward Destination)
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={forwardToInput}
-                        onChange={(e) => setForwardToInput(e.target.value)}
-                        placeholder="e.g. Legal Counsel Desk / Room 304"
-                        className="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 px-3 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Action Taken
-                      </label>
-                      <select
-                        value={movementAction}
-                        onChange={(e) => setMovementAction(e.target.value as any)}
                         className="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 px-3 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
                       >
-                        <option value="forwarded">Forwarded to next desk</option>
-                        <option value="in_review">Currently examining / in review</option>
-                        <option value="acted">Action endorsed / processed</option>
-                        <option value="received">Handed over & received</option>
+                        <option value="">Select Staff...</option>
+                        {staffList?.filter(s => s.role === 'Staff').map(staff => (
+                          <option key={staff.id} value={staff.name}>{staff.name}</option>
+                        ))}
                       </select>
                     </div>
-
-                    <div className="sm:col-span-2">
+                    <div>
                       <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        Movement Remarks / Routing Instructions
+                        Remarks / Handover Instructions
                       </label>
-                      <input
-                        type="text"
+                      <select
+                        required
                         value={movementNotes}
                         onChange={(e) => setMovementNotes(e.target.value)}
-                        placeholder="e.g. Attached voucher summary; for signature by Atty. Torres"
                         className="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 px-3 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                      />
+                      >
+                        <option value="">Select instructions...</option>
+                        {(dropdownOptions?.handoverInstructions?.length ? dropdownOptions.handoverInstructions : [
+                          'For your information and reference',
+                          'For your appropriate action',
+                          'For review and recommendation',
+                          'For compliance',
+                          'For signature / approval',
+                          'For filing / archiving'
+                        ]).map(opt => (
+                          <option key={opt} value={opt}>{opt}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
-
                   <div className="flex items-center justify-between pt-2">
                     <span className="text-[11px] text-slate-500 dark:text-slate-400">
                       Logging as: <strong>{currentUser?.name || 'Authorized Custodian'}</strong> ({currentUser?.role || 'Staff'})
                     </span>
                     <button
                       type="submit"
-                      id="log-movement-btn"
-                      disabled={isSubmittingMovement}
-                      className="px-4 py-2 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 shadow-xs cursor-pointer"
+                      id="log-movement-transfer-btn"
+                      disabled={isSubmittingMovement || !currentDeskInput || !movementNotes}
+                      className="px-5 py-2.5 bg-blue-700 hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
                     >
                       {isSubmittingMovement ? (
                         <>
                           <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>Routing...</span>
+                          <span>Assigning...</span>
                         </>
                       ) : (
                         <>
                           <Send className="w-3.5 h-3.5" />
-                          <span>Log Movement & Transfer</span>
+                          <span>Assign</span>
                         </>
                       )}
                     </button>
@@ -867,7 +872,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                   </h4>
                   <button
                     type="button"
-                    onClick={() => setActiveTab('audit')}
+                    onClick={() => setIsTrailCollapsed(false)}
                     className="text-xs font-semibold text-blue-700 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
                   >
                     <History className="w-3.5 h-3.5" />
@@ -920,8 +925,8 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
             </div>
           )}
 
-          {/* TAB 2: SUPERVISOR REMARKS & COMPLIANCE */}
-          {activeTab === 'remarks' && (
+          {/* SUPERVISOR REMARKS & COMPLIANCE */}
+          {showRemarkForm && (
             <div className="space-y-6">
               
               {/* Role Awareness Banner for Supervisor Remarks */}
@@ -933,24 +938,6 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                       Notice: Official directives and compliance instructions are issued by <strong>Supervisors</strong> and <strong>Division Managers</strong>. You are currently logged in as <strong>{currentUser?.name || 'Guest User'}</strong> ({currentUser?.role || 'Staff'}).
                     </span>
                   </div>
-                  {onSwitchRole && (
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => onSwitchRole('Supervisor')}
-                        className="px-3 py-1 bg-amber-700 hover:bg-amber-800 text-white font-semibold text-xs rounded-lg transition-colors cursor-pointer"
-                      >
-                        Switch to Supervisor
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onSwitchRole('Division Manager')}
-                        className="px-3 py-1 bg-violet-700 hover:bg-violet-800 text-white font-semibold text-xs rounded-lg transition-colors cursor-pointer"
-                      >
-                        Switch to Division Mgr
-                      </button>
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -1023,6 +1010,13 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                 <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 uppercase tracking-wider">
                   Compliance Tracking Log
                 </h4>
+
+                {complianceError && (
+                  <div className="p-3 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 rounded-xl text-xs font-semibold flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0" />
+                    <span>{complianceError}</span>
+                  </div>
+                )}
 
                 {(!document.supervisorRemarks || document.supervisorRemarks.length === 0) ? (
                   <div className="text-center py-6 border border-dashed border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-500 dark:text-slate-400">
@@ -1117,8 +1111,11 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
             </div>
           )}
 
-          {/* TAB 3: DEPARTMENT MANAGER CLEARANCE */}
-          {activeTab === 'clearance' && (
+                    </>
+        )}
+
+        {/* CLEARANCE ACTION VIEW */}
+        {showClearanceForm && (
             <div className="space-y-6">
               
               {/* Clearance Status Card */}
@@ -1148,18 +1145,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                         {document.managerClearance.clearanceType?.replace(/_/g, ' ')}
                       </span>
                     </div>
-                    <div className="bg-white/80 dark:bg-slate-800 p-3 rounded-xl border border-emerald-200 dark:border-emerald-800/80">
-                      <span className="text-slate-500 dark:text-slate-400 block font-medium">Outgoing Tracking Ref</span>
-                      <span className="font-mono font-bold text-slate-800 dark:text-white">
-                        {document.managerClearance.exitTrackingNumber || 'N/A'}
-                      </span>
-                    </div>
-                    <div className="bg-white/80 dark:bg-slate-800 p-3 rounded-xl border border-emerald-200 dark:border-emerald-800/80">
-                      <span className="text-slate-500 dark:text-slate-400 block font-medium">Forwarded to External Entity</span>
-                      <span className="font-bold text-slate-800 dark:text-white">
-                        {document.managerClearance.forwardedToExternal || 'Central Archives'}
-                      </span>
-                    </div>
+
                   </div>
 
                   {document.managerClearance.clearanceRemarks && (
@@ -1193,16 +1179,6 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                           </p>
                         </div>
                       </div>
-                      {onSwitchRole && (
-                        <button
-                          type="button"
-                          onClick={() => onSwitchRole('Department Manager')}
-                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs rounded-xl shrink-0 transition-colors shadow-xs flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <ShieldCheck className="w-3.5 h-3.5" />
-                          Switch to Department Manager
-                        </button>
-                      )}
                     </div>
                   )}
 
@@ -1223,7 +1199,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                         <span>{clearanceError}</span>
                       </div>
                     )}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-1 gap-4">
                       <div>
                         <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
                           Clearance Decision
@@ -1239,34 +1215,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                         </select>
                       </div>
 
-                      <div>
-                        <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                          Outgoing Tracking / Dispatch Number
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          value={exitTrackingNumber}
-                          onChange={(e) => setExitTrackingNumber(e.target.value)}
-                          placeholder="e.g. OUT-DISPATCH-2026-092"
-                          className="w-full font-mono text-xs rounded-xl border border-slate-300 dark:border-slate-700 px-3 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                        External Entity / Destination Office Forwarded To
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={forwardedToExternal}
-                        onChange={(e) => setForwardedToExternal(e.target.value)}
-                        placeholder="e.g. Regional Director Office / Central Courier Service"
-                        className="w-full text-xs rounded-xl border border-slate-300 dark:border-slate-700 px-3 py-2 bg-white dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                      />
-                    </div>
+</div>
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
@@ -1282,9 +1231,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                     </div>
 
                     <div className="pt-2 flex items-center justify-between">
-                      <span className="text-xs text-slate-500 dark:text-slate-400">
-                        Signatory: <strong>{currentUser?.name || 'Authorized Signatory'}</strong> ({currentUser?.role || 'Department Manager'})
-                      </span>
+                      
                       <button
                         type="submit"
                         id="authorize-clearance-btn"
@@ -1425,7 +1372,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               </div>
               <div>
                 <span className="text-[10px] uppercase font-bold text-slate-500 block">Date &amp; Time Received:</span>
-                <span className="font-semibold text-black">{document.dateReceived} at {document.timeReceived}</span>
+                <span className="font-semibold text-black">{formatDateToMDY(document.dateReceived)} at {document.timeReceived}</span>
               </div>
               <div>
                 <span className="text-[10px] uppercase font-bold text-slate-500 block">Target Division:</span>
@@ -1589,16 +1536,8 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
                 </span>
               </div>
               <div>
-                <span className="text-[10px] uppercase font-bold text-slate-500 block">Exit Tracking / Outflow Ref:</span>
-                <span className="font-mono font-bold text-black">{document.managerClearance?.exitTrackingNumber || '—'}</span>
-              </div>
-              <div>
                 <span className="text-[10px] uppercase font-bold text-slate-500 block">Cleared / Authorized By:</span>
                 <span className="font-bold text-black">{document.managerClearance?.clearedBy || '—'}</span>
-              </div>
-              <div>
-                <span className="text-[10px] uppercase font-bold text-slate-500 block">External Destination / Transmitted To:</span>
-                <span className="font-semibold text-black">{document.managerClearance?.forwardedToExternal || '—'}</span>
               </div>
               <div>
                 <span className="text-[10px] uppercase font-bold text-slate-500 block">Date &amp; Time Cleared:</span>
@@ -1723,7 +1662,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
               </div>
               <div>
                 <span className="text-[10px] uppercase font-bold text-slate-500 block">Date &amp; Time Received:</span>
-                <span className="font-semibold text-black">{document.dateReceived} at {document.timeReceived}</span>
+                <span className="font-semibold text-black">{formatDateToMDY(document.dateReceived)} at {document.timeReceived}</span>
               </div>
               <div>
                 <span className="text-[10px] uppercase font-bold text-slate-500 block">Current Location:</span>
@@ -1739,7 +1678,7 @@ export const DocumentDetailModal: React.FC<DocumentDetailModalProps> = ({
           {/* Section II: Chronological Audit Ledger Table */}
           <div className="mb-3 border border-slate-400 rounded overflow-hidden">
             <div className="bg-slate-200 px-3 py-1 font-bold text-[11px] uppercase border-b border-slate-400 flex justify-between items-center">
-              <span>II. Chronological Lifecycle Audit Ledger (Immutable Historical Record)</span>
+              <span>II. Chronological Lifecycle Audit Ledger (Authoritative Historical Record)</span>
               <span className="text-[10px] text-slate-600 font-normal">
                 ({compileDocumentAuditTrail(document, 'asc').length} Verified Audit Events)
               </span>

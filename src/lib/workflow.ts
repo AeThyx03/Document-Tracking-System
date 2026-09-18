@@ -13,6 +13,7 @@ import { getRolePermissions, normalizeRole } from './permissions';
  */
 export type DocumentStatus =
   | 'Incoming Logged'
+  | 'Assigned'
   | 'Under Review'
   | 'Supervisor Comment Needed'
   | 'Complied / Ready for Clearance'
@@ -21,6 +22,7 @@ export type DocumentStatus =
 
 export const ALL_DOCUMENT_STATUSES: readonly DocumentStatus[] = [
   'Incoming Logged',
+  'Assigned',
   'Under Review',
   'Supervisor Comment Needed',
   'Complied / Ready for Clearance',
@@ -36,7 +38,6 @@ export interface WorkflowActor {
   name: string;
   role?: string;
   division?: string;
-  assignedDesk?: string;
 }
 
 export interface WorkflowResult<T = DocumentItem> {
@@ -265,7 +266,7 @@ export function recordDocumentMovement(
   // Determine next status
   let nextStatus = cleanDoc.currentStatus;
   if (cleanDoc.currentStatus === 'Incoming Logged') {
-    nextStatus = 'Under Review';
+    nextStatus = 'Assigned';
   }
 
   const { movement, nowIso } = createMovementRecord(cleanDoc, {
@@ -563,7 +564,7 @@ export function forwardDocumentToDivision(
 
   let nextStatus = cleanDoc.currentStatus;
   if (cleanDoc.currentStatus === 'Incoming Logged') {
-    nextStatus = 'Under Review';
+    nextStatus = 'Assigned';
   }
 
   const { movement, nowIso } = createMovementRecord(cleanDoc, {
@@ -683,6 +684,24 @@ export function executeBatchAction(
         actor,
         `Batch routed to ${targetDept}`
       );
+    } else if (actionCode.startsWith('assign:')) {
+      const focalPerson = actionCode.replace('assign:', '').trim();
+      
+      const { movement, nowIso } = createMovementRecord(doc, {
+        actor,
+        fromDesk: doc.currentLocation,
+        toDesk: doc.currentLocation,
+        statusUpdate: 'forwarded',
+        notes: `Assigned focal person: ${focalPerson} via Batch Action`,
+      });
+      const updated: DocumentItem = {
+        ...doc,
+        responsiblePerson: focalPerson,
+        movements: [movement, ...(doc.movements || [])],
+        version: (doc.version || 1) + 1,
+        updatedAt: nowIso,
+      };
+      res = { success: true, document: updated, movement };
     } else if (actionCode.startsWith('priority:')) {
       const newPriority = actionCode.replace('priority:', '').trim() as 'Routine' | 'Urgent' | 'Rush';
       res = updateDocumentPriority(doc, newPriority, actor, 'Batch priority adjustment');

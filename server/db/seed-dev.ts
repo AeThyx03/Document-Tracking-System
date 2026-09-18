@@ -52,7 +52,6 @@ async function seedDev() {
         email,
         role: 'System Admin',
         division: 'Development',
-        assignedDesk: 'Dev Desk',
         status: 'active'
       })
       .onConflictDoUpdate({
@@ -63,7 +62,6 @@ async function seedDev() {
           email,
           role: 'System Admin',
           division: 'Development',
-          assignedDesk: 'Dev Desk',
           status: 'active'
         }
       });

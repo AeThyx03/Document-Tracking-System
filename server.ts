@@ -17,8 +17,9 @@ import { codebaseRouter } from "./server/routes/codebase.ts";
 import { dropdownsRouter } from "./server/routes/dropdowns.ts";
 import { createAuditLog } from "./server/services/auditService.ts";
 import { validateJwtConfiguration } from "./server/config/jwt.ts";
+import { bootstrapSystemAdmin } from "./server/services/bootstrap.ts";
 
-const app = express();
+export const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "20mb" }));
@@ -56,9 +57,14 @@ app.use(errorHandler);
 // -------------------------------------------------------------
 // 3. VITE SPA / STATIC ASSET SERVING
 // -------------------------------------------------------------
-async function startServer() {
+export async function startServer() {
   // Fail fast immediately if authentication configuration is invalid
   validateJwtConfiguration();
+
+  // Asynchronously ensure default system administrator is initialized
+  bootstrapSystemAdmin().catch((e) => {
+    console.warn('[SERVER] Non-fatal admin bootstrap notice:', e);
+  });
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -74,9 +80,12 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`POSSD Tracker backend running on http://0.0.0.0:${PORT}`);
   });
+  return server;
 }
 
-startServer();
+if (process.argv[1]?.includes("server.ts") || process.argv[1]?.includes("server.cjs") || process.env.NODE_ENV === "production") {
+  startServer();
+}

@@ -41,7 +41,8 @@ type DropdownCategoryKey =
   | 'report_type'
   | 'originating_agency'
   | 'target_division'
-  | 'priority_level';
+  | 'priority_level'
+  | 'handover_instructions';
 
 interface CategoryMeta {
   key: DropdownCategoryKey;
@@ -100,6 +101,13 @@ const CATEGORIES: CategoryMeta[] = [
     description: 'Routing priorities (e.g. Normal, Urgent).',
     placeholder: 'e.g. High Priority',
     icon: Sparkles,
+  },
+  {
+    key: 'handover_instructions',
+    label: 'Remarks / Handover Instructions',
+    description: 'Instructions available when forwarding a document.',
+    placeholder: 'e.g. For Your Information, For Signature',
+    icon: HelpCircle,
   }
 ];
 
@@ -150,6 +158,23 @@ export const AdminDropdownsConfig: React.FC<AdminDropdownsConfigProps> = ({
     try {
       const data = await apiRequest<{ dropdownOptions: Record<string, DropdownOptionRecord[]> }>('/api/dropdown-options/grouped?includeInactive=true');
       setDbOptionsGrouped(data.dropdownOptions || {});
+      
+      // Also map and call onUpdateDropdownOptions so App.tsx state syncs
+      const dropdowns = data.dropdownOptions || {};
+      onUpdateDropdownOptions({
+        roles: ["Receiving", "Staff", "Supervisor", "Division Manager", "Department Manager", "System Admin"],
+        departments: (dropdowns.target_division || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+        documentTypes: (dropdowns.transaction_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+        communicationTypes: (dropdowns.communication_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+        reportTypes: (dropdowns.report_type || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+        originatingAgencies: (dropdowns.originating_agency || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+        targetDivisions: (dropdowns.target_division || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+        priorities: (dropdowns.priority_level || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+        handoverInstructions: (dropdowns.handover_instructions || []).filter((o: any) => o.isActive).map((o: any) => o.value),
+        personnel: [],
+        focalPersons: [],
+      });
+      
       setErrorMsg(null);
     } catch (err: any) {
       setErrorMsg(err.message || 'Error fetching dropdowns');

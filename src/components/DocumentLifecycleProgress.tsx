@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { DocumentItem, getLatestMovement } from '../types';
+import { DocumentItem, getLatestMovement, formatDateToMDY } from '../types';
 import {
   Inbox,
   Clock,
@@ -19,6 +19,7 @@ interface DocumentLifecycleProgressProps {
   document: DocumentItem;
   variant?: 'compact' | 'detailed';
   showLabels?: boolean;
+  onExpandHistory?: () => void;
 }
 
 export function getLifecycleStage(document: DocumentItem) {
@@ -28,16 +29,12 @@ export function getLifecycleStage(document: DocumentItem) {
     (r) => r.complianceRequired && !r.complied
   );
 
-  // Stage 3: Cleared / Dispatched (100%)
-  if (isCleared || status === 'Cleared for Out' || status === 'Dispatched / Completed') {
+  // Exact Canonical Status mappings
+  if (status === 'Dispatched / Completed') {
     return {
-      stageIndex: 3,
-      stageKey: 'cleared' as const,
-      stageTitle: isCleared && document.managerClearance?.clearanceType === 'archived_completed'
-        ? 'Cleared (Archived)'
-        : status === 'Dispatched / Completed'
-        ? 'Dispatched'
-        : 'Cleared for Out',
+      stageIndex: 6,
+      stageKey: 'dispatched' as const,
+      stageTitle: 'Dispatched / Completed',
       progressPercent: 100,
       isPendingRemarks: false,
       isCleared: true,
@@ -45,63 +42,99 @@ export function getLifecycleStage(document: DocumentItem) {
     };
   }
 
-  // Stage 2: Complied / Ready for Clearance (75%)
+  if (status === 'Cleared for Out' || isCleared) {
+    return {
+      stageIndex: 5,
+      stageKey: 'cleared_out' as const,
+      stageTitle: 'Cleared for Out',
+      progressPercent: 83,
+      isPendingRemarks: false,
+      isCleared: true,
+      color: 'emerald',
+    };
+  }
+
   if (status === 'Complied / Ready for Clearance') {
     return {
-      stageIndex: 2,
+      stageIndex: 4,
       stageKey: 'complied' as const,
-      stageTitle: 'Complied / Ready',
-      progressPercent: 75,
+      stageTitle: 'Complied / Ready for Clearance',
+      progressPercent: 67,
       isPendingRemarks: false,
       isCleared: false,
       color: 'teal',
     };
   }
 
-  // Stage 1: Under Review / Supervisor Action (50%)
-  if (status === 'Under Review' || status === 'Supervisor Comment Needed' || hasPendingRemarks) {
+  if (status === 'Supervisor Comment Needed' || hasPendingRemarks) {
     return {
-      stageIndex: 1,
-      stageKey: 'review' as const,
-      stageTitle: hasPendingRemarks || status === 'Supervisor Comment Needed'
-        ? 'Supervisor Action Needed'
-        : 'Under Review',
+      stageIndex: 3,
+      stageKey: 'supervisor_needed' as const,
+      stageTitle: 'Supervisor Comment Needed',
       progressPercent: 50,
-      isPendingRemarks: !!hasPendingRemarks,
+      isPendingRemarks: true,
       isCleared: false,
-      color: hasPendingRemarks || status === 'Supervisor Comment Needed' ? 'amber' : 'blue',
+      color: 'amber',
     };
   }
 
-  // Stage 0: Logged (25%)
+
+  if (status === 'Assigned') {
+    return {
+      stageIndex: 1,
+      stageKey: 'assigned' as const,
+      stageTitle: 'Assigned',
+      progressPercent: 25,
+      isPendingRemarks: false,
+      isCleared: false,
+      color: 'indigo',
+    };
+  }
+  if (status === 'Under Review') {
+    return {
+      stageIndex: 2,
+      stageKey: 'under_review' as const,
+      stageTitle: 'Under Review',
+      progressPercent: 33,
+      isPendingRemarks: false,
+      isCleared: false,
+      color: 'blue',
+    };
+  }
+
+  // Default: Incoming Logged
   return {
     stageIndex: 0,
     stageKey: 'logged' as const,
     stageTitle: 'Incoming Logged',
-    progressPercent: 25,
+    progressPercent: 17,
     isPendingRemarks: false,
     isCleared: false,
     color: 'indigo',
   };
 }
 
-const STAGES = [
-  { id: 'logged', label: 'Logged', short: 'Log' },
-  { id: 'review', label: 'Review', short: 'Rev' },
-  { id: 'complied', label: 'Complied', short: 'Comp' },
-  { id: 'cleared', label: 'Cleared', short: 'Clear' },
+const CANONICAL_STAGES = [
+  { id: 'logged', label: 'Incoming Logged', short: 'Logged' },
+  { id: 'assigned', label: 'Assigned', short: 'Assigned' },
+  { id: 'under_review', label: 'Under Review', short: 'Review' },
+  { id: 'supervisor_needed', label: 'Supervisor Comment', short: 'Supervisor' },
+  { id: 'complied', label: 'Complied / Ready', short: 'Complied' },
+  { id: 'cleared_out', label: 'Cleared for Out', short: 'Cleared' },
+  { id: 'dispatched', label: 'Dispatched / Completed', short: 'Dispatched' },
 ];
 
 export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps> = ({
   document,
   variant = 'compact',
   showLabels = true,
+  onExpandHistory,
 }) => {
   const stage = getLifecycleStage(document);
   const getStageTooltip = (s, isPassed, isCurrent) => {
     let text = `${s.label}: ${isPassed ? 'Completed' : isCurrent ? 'Current Stage' : 'Pending'}`;
     if (s.id === 'received' && document.dateReceived) {
-       text += ` on ${document.dateReceived} ${document.timeReceived || ''}`;
+       text += ` on ${formatDateToMDY(document.dateReceived)} ${document.timeReceived || ''}`;
     } else if (s.id === 'review' && document.movements?.length) {
        const lastMov = getLatestMovement(document);
        if (lastMov) {
@@ -119,10 +152,11 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
 
   if (variant === 'detailed') {
     return (
-      <div className="w-full bg-slate-50 dark:bg-slate-800/80 rounded-xl p-4 border border-slate-200 dark:border-slate-700/80">
+      <div className="w-full bg-slate-50 dark:bg-slate-800/80 rounded-xl p-4 border border-slate-200 dark:border-slate-700/80 relative overflow-hidden group">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-blue-500" />
               Document Lifecycle Journey
             </span>
             <span
@@ -165,58 +199,75 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
                 : 'bg-indigo-500'
             }`}
             style={{
-              width: `calc(${stage.stageIndex / (STAGES.length - 1)} * (100% - 3rem))`,
+              width: `calc(${stage.stageIndex / (CANONICAL_STAGES.length - 1)} * (100% - 3rem))`,
             }}
           />
 
-          <div className="grid grid-cols-4 gap-2 relative z-10">
-            {STAGES.map((s, idx) => {
+          <div className="grid grid-cols-6 gap-1 relative z-10">
+            {CANONICAL_STAGES.map((s, idx) => {
               const isPassed = idx < stage.stageIndex;
               const isCurrent = idx === stage.stageIndex;
-              const isUpcoming = idx > stage.stageIndex;
 
               return (
-                <div key={s.id} className="flex flex-col items-center text-center">
+                <div key={s.id} className="flex flex-col items-center text-center relative group/stage cursor-help">
                   <div
-                    className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all shadow-xs ${
+                    className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold transition-all shadow-xs ${
                       isPassed
                         ? 'bg-emerald-600 text-white ring-2 ring-emerald-200 dark:ring-emerald-900'
                         : isCurrent
                         ? stage.color === 'emerald'
-                          ? 'bg-emerald-600 text-white ring-4 ring-emerald-200 dark:ring-emerald-900 animate-pulse'
+                          ? 'bg-emerald-600 text-white ring-3 ring-emerald-200 dark:ring-emerald-900 animate-pulse'
                           : stage.color === 'amber'
-                          ? 'bg-amber-500 text-white ring-4 ring-amber-200 dark:ring-amber-900 animate-pulse'
+                          ? 'bg-amber-500 text-white ring-3 ring-amber-200 dark:ring-amber-900 animate-pulse'
                           : stage.color === 'teal'
-                          ? 'bg-teal-600 text-white ring-4 ring-teal-200 dark:ring-teal-900 animate-pulse'
-                          : 'bg-blue-600 text-white ring-4 ring-blue-200 dark:ring-blue-900 animate-pulse'
-                        : 'bg-white dark:bg-slate-800 text-slate-400 border-2 border-slate-300 dark:border-slate-600'
+                          ? 'bg-teal-600 text-white ring-3 ring-teal-200 dark:ring-teal-900 animate-pulse'
+                          : 'bg-blue-600 text-white ring-3 ring-blue-200 dark:ring-blue-900 animate-pulse'
+                        : 'bg-white dark:bg-slate-800 text-slate-400 border border-slate-300 dark:border-slate-600'
                     }`}
                   >
                     {isPassed ? (
-                      <CheckCircle2 className="w-4 h-4" />
-                    ) : isCurrent ? (
-                      <span>{idx + 1}</span>
+                      <Check className="w-3.5 h-3.5" />
                     ) : (
-                      <span className="text-[11px]">{idx + 1}</span>
+                      <span>{idx + 1}</span>
                     )}
                   </div>
 
                   <span
-                    className={`text-xs mt-1.5 font-semibold ${
+                    className={`text-[10px] mt-1 font-medium truncate max-w-[70px] ${
                       isCurrent
                         ? 'text-slate-900 dark:text-white font-bold'
                         : isPassed
                         ? 'text-slate-700 dark:text-slate-300'
                         : 'text-slate-400 dark:text-slate-500'
                     }`}
+                    title={s.label}
                   >
-                    {s.label}
+                    {s.short}
                   </span>
+                  
+                  {/* Tooltip for Detailed Stage */}
+                  <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-max max-w-[200px] bg-slate-900 text-white text-[10px] p-2 rounded-lg shadow-xl opacity-0 group-hover/stage:opacity-100 pointer-events-none transition-opacity z-50 whitespace-pre-wrap text-left hidden sm:block">
+                    {getStageTooltip(s, isPassed, isCurrent)}
+                    <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-900" />
+                  </div>
                 </div>
               );
             })}
           </div>
         </div>
+
+        {onExpandHistory && (
+          <button
+            onClick={onExpandHistory}
+            className="absolute inset-0 w-full h-full bg-slate-900/0 hover:bg-slate-900/5 dark:hover:bg-white/5 transition-colors z-20 flex items-center justify-center opacity-0 group-hover:opacity-100"
+            title="Expand Full Audit Trail Timeline"
+          >
+            <div className="bg-white dark:bg-slate-800 text-slate-900 dark:text-white px-3 py-1.5 rounded-full shadow-lg border border-slate-200 dark:border-slate-700 text-xs font-bold flex items-center gap-1.5 transform translate-y-4 group-hover:translate-y-0 transition-transform">
+              <Clock className="w-3.5 h-3.5 text-blue-500" />
+              View Full Audit Trail
+            </div>
+          </button>
+        )}
       </div>
     );
   }
@@ -298,7 +349,7 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
               <div>
                 <span className="text-slate-400">Logged Incoming:</span>{' '}
                 <span className="font-semibold text-slate-200">
-                  {document.dateReceived} at {document.timeReceived || '08:00:00'}
+                  {formatDateToMDY(document.dateReceived)} at {document.timeReceived || '08:00:00'}
                 </span>
               </div>
             </div>
@@ -418,7 +469,7 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
 
         {/* Micro Step Markers */}
         <div className="flex items-center justify-between -mt-1.5 px-0.5">
-          {STAGES.map((s, idx) => {
+          {CANONICAL_STAGES.map((s, idx) => {
             const isPassed = idx < stage.stageIndex;
             const isCurrent = idx === stage.stageIndex;
 
@@ -426,17 +477,17 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
               <div
                 key={s.id}
                 title={getStageTooltip(s, isPassed, isCurrent)}
-                className={`w-2.5 h-2.5 rounded-full transition-all duration-200 border cursor-pointer hover:scale-175 hover:z-20 hover:ring-2 hover:ring-offset-1 dark:hover:ring-offset-slate-900 ${
+                className={`w-2 h-2 rounded-full transition-all duration-200 border cursor-pointer hover:scale-175 hover:z-20 hover:ring-2 hover:ring-offset-1 dark:hover:ring-offset-slate-900 ${
                   isPassed
                     ? 'bg-emerald-500 border-emerald-600 ring-1 ring-emerald-200 dark:ring-emerald-900 hover:ring-emerald-400'
                     : isCurrent
                     ? stage.color === 'emerald'
-                      ? 'bg-emerald-500 border-white ring-2 ring-emerald-400'
+                      ? 'bg-emerald-500 border-white ring-2 ring-emerald-400 animate-pulse'
                       : stage.color === 'amber'
-                      ? 'bg-amber-500 border-white ring-2 ring-amber-400'
+                      ? 'bg-amber-500 border-white ring-2 ring-amber-400 animate-pulse'
                       : stage.color === 'teal'
-                      ? 'bg-teal-500 border-white ring-2 ring-teal-400'
-                      : 'bg-blue-600 border-white ring-2 ring-blue-400'
+                      ? 'bg-teal-500 border-white ring-2 ring-teal-400 animate-pulse'
+                      : 'bg-blue-600 border-white ring-2 ring-blue-400 animate-pulse'
                     : 'bg-slate-200 dark:bg-slate-700 border-slate-300 dark:border-slate-600 hover:border-slate-400 hover:ring-slate-400'
                 }`}
               />
@@ -447,12 +498,10 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
 
       {/* Step Sequence Labels */}
       {showLabels && (
-        <div className="flex items-center justify-between text-[9px] text-slate-400 dark:text-slate-500 font-medium px-0.5">
-          {STAGES.map((s, idx) => {
+        <div className="flex items-center justify-between text-[8px] text-slate-400 dark:text-slate-500 font-medium px-0.5">
+          {CANONICAL_STAGES.map((s, idx) => {
             const isCurrent = idx === stage.stageIndex;
             const isPassed = idx < stage.stageIndex;
-
-            
 
             return (
               <span
@@ -464,8 +513,9 @@ export const DocumentLifecycleProgress: React.FC<DocumentLifecycleProgressProps>
                     ? 'text-slate-600 dark:text-slate-300 font-medium'
                     : 'text-slate-400 dark:text-slate-500'
                 }
+                title={s.label}
               >
-                {s.label}
+                {s.short}
               </span>
             );
           })}

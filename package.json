@@ -5,14 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && (cp -r dist build 2>/dev/null || true)",
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "export:bundle": "node scripts/generate_bundle.cjs",
     "db:migrate": "tsx server/migrations/runner.ts",
     "db:seed:dev": "tsx server/db/seed-dev.ts",
     "clean": "rm -rf dist server.js",
-    "test": "tsx tests/phase7-final-verification.test.ts && tsx tests/phase6-routing-priority.test.ts && tsx src/lib/workflow.test.ts && tsx src/lib/audit.test.ts && tsx server/routes/codebase.test.ts && tsx server/config/jwt.test.ts && tsx server/middleware/authorize.test.ts && tsx tests/phase1-classification-transaction-type.test.ts && tsx tests/phase2-dropdown-configuration.test.ts && tsx tests/phase5-integrity.test.ts && tsx tests/phase6-seeds-integrity.test.ts",
+    "test": "tsx tests/phase1-lifecycle-authority.test.ts && tsx tests/phase7-final-verification.test.ts && tsx tests/phase6-routing-priority.test.ts && tsx src/lib/workflow.test.ts && tsx src/lib/audit.test.ts && tsx src/lib/batchOperations.test.ts && tsx server/routes/codebase.test.ts && tsx server/config/jwt.test.ts && tsx server/middleware/authorize.test.ts && tsx tests/phase1-classification-transaction-type.test.ts && tsx tests/phase2-dropdown-configuration.test.ts && tsx tests/phase5-integrity.test.ts && tsx tests/phase6-seeds-integrity.test.ts && tsx tests/phase6-integration-workflows.test.ts && tsx tests/phase8-audit-authority.test.ts && tsx tests/phase9-print-system.test.ts && tsx tests/phase10-logo-integrity.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
@@ -22,6 +22,7 @@
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
     "drizzle-orm": "^0.45.2",
+    "esbuild": "^0.25.0",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^0.546.0",
@@ -31,7 +32,8 @@
     "react-dom": "^19.0.1",
     "recharts": "^3.10.1",
     "tailwindcss": "^4.1.14",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vite-plugin-pwa": "^1.3.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^3.0.0",
@@ -42,11 +44,11 @@
     "@types/pg": "^8.23.1",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@types/supertest": "^7.2.1",
     "autoprefixer": "^10.4.21",
     "drizzle-kit": "^0.31.10",
-    "esbuild": "^0.25.0",
+    "supertest": "^7.2.2",
     "tsx": "^4.21.0",
-    "typescript": "~5.8.2",
-    "vite-plugin-pwa": "^1.3.0"
+    "typescript": "~5.8.2"
   }
 }

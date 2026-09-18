@@ -13,6 +13,7 @@ import {
 } from '../db/schema.ts';
 import { createAuditLog, AuditActor } from './auditService.ts';
 import { getDropdownOptionsGrouped } from './dropdownService.ts';
+import { getAuthoritativeSlaConfig, isDocumentOverdue } from './slaService.ts';
 
 
 export class DocumentConflictError extends Error {
@@ -34,6 +35,95 @@ export class DocumentValidationError extends Error {
     super(message);
     this.name = 'DocumentValidationError';
   }
+}
+
+export const CANONICAL_LIFECYCLE_STATUSES = [
+  'Incoming Logged',
+  'Assigned',
+  'Under Review',
+  'Supervisor Comment Needed',
+  'Complied / Ready for Clearance',
+  'Cleared for Out',
+  'Dispatched / Completed',
+] as const;
+
+export type CanonicalLifecycleStatus = typeof CANONICAL_LIFECYCLE_STATUSES[number];
+
+export function isCanonicalLifecycleStatus(status: any): status is CanonicalLifecycleStatus {
+  return typeof status === 'string' && CANONICAL_LIFECYCLE_STATUSES.includes(status as any);
+}
+
+export async function validateBackendLifecycleTransition(
+  tx: any,
+  docId: string,
+  currentStatus: string,
+  targetStatus: string,
+  actor?: AuditActor
+): Promise<{ valid: boolean; reason?: string }> {
+  if (currentStatus === targetStatus) {
+    return { valid: true };
+  }
+
+  if (!isCanonicalLifecycleStatus(targetStatus)) {
+    return {
+      valid: false,
+      reason: `Invalid status "${targetStatus}". Status must be one of the canonical POSSD lifecycle statuses: ${CANONICAL_LIFECYCLE_STATUSES.join(', ')}.`,
+    };
+  }
+
+  // Terminal State Guard: Once Dispatched / Completed, changes require explicit administrative re-opening
+  if (currentStatus === 'Dispatched / Completed') {
+    const isPrivileged = actor?.role && ['System Admin', 'Department Manager'].includes(actor.role);
+    if (!isPrivileged) {
+      return {
+        valid: false,
+        reason: `Document is already Dispatched / Completed and archived. Only Department Managers or System Admins can modify completed entries.`,
+      };
+    }
+  }
+
+  // Uncomplied Supervisor Remarks Guard:
+  if (
+    targetStatus === 'Cleared for Out' ||
+    targetStatus === 'Dispatched / Completed' ||
+    targetStatus === 'Complied / Ready for Clearance'
+  ) {
+    const unresolvedRemarks = await tx
+      .select()
+      .from(documentRemarks)
+      .where(and(
+        eq(documentRemarks.documentId, docId),
+        eq(documentRemarks.complianceRequired, true),
+        eq(documentRemarks.complied, false)
+      ));
+
+    if (unresolvedRemarks.length > 0) {
+      return {
+        valid: false,
+        reason: `Cannot transition to "${targetStatus}": Document has ${unresolvedRemarks.length} uncomplied supervisor directive(s).`,
+      };
+    }
+  }
+
+  // Manager Clearance Guard for "Cleared for Out"
+  if (targetStatus === 'Cleared for Out') {
+    const [clearance] = await tx
+      .select()
+      .from(managerClearances)
+      .where(eq(managerClearances.documentId, docId));
+
+    const [doc] = await tx.select({ isCleared: documents.isCleared }).from(documents).where(eq(documents.id, docId));
+    const isCleared = clearance ? Boolean(clearance.isCleared) : Boolean(doc?.isCleared);
+
+    if (!isCleared) {
+      return {
+        valid: false,
+        reason: `Cannot transition to "Cleared for Out": Executive Manager Clearance is required.`,
+      };
+    }
+  }
+
+  return { valid: true };
 }
 
 /**
@@ -168,6 +258,7 @@ export interface DocumentFilterOptions {
 export interface PaginatedDocumentsResult {
   documents: any[];
   totalCount: number;
+  totalMonitoredCount?: number;
   page?: number;
   pageSize?: number;
   totalPages?: number;
@@ -237,12 +328,22 @@ export async function getAllDocuments(options?: DocumentFilterOptions): Promise<
   else if (sortCol === 'currentLocation') orderColumn = documents.currentLocation;
   else if (sortCol === 'currentStatus' || sortCol === 'status' || sortCol === 'lifecycle') orderColumn = documents.currentStatus;
 
-  // Count total matches
+  // Count total matches for the active filter/view
   const [countRes] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(documents)
     .where(whereClause);
   const totalCount = countRes?.count || 0;
+
+  // Authoritative total number of ALL logged documents in the archive (unfiltered)
+  const [unfilteredRes] = await db
+    .select({ 
+      count: sql<number>`count(*)::int`,
+      clearedCount: sql<number>`count(*) filter (where ${documents.isCleared} = true)::int`
+    })
+    .from(documents);
+  
+  const clearedForOutCount = unfilteredRes?.clearedCount || 0;
 
   const page = options?.page ? Math.max(1, Number(options.page)) : undefined;
   const pageSize = options?.pageSize ? Math.max(1, Number(options.pageSize)) : undefined;
@@ -286,18 +387,48 @@ export async function getAllDocuments(options?: DocumentFilterOptions): Promise<
     };
   });
 
-  if (page !== undefined && pageSize !== undefined) {
-    const totalPages = Math.ceil(totalCount / pageSize);
-    return {
-      documents: mapped,
-      totalCount,
-      page,
-      pageSize,
-      totalPages,
-    };
+  // Fetch active docs for SLA check
+  const activeDocs = await db.query.documents.findMany({
+    where: eq(documents.isCleared, false),
+    with: {
+      movements: true,
+      remarks: true,
+    }
+  });
+
+  const slaConfig = await getAuthoritativeSlaConfig();
+  const now = new Date();
+  let overdueCount = 0;
+  let pendingComplianceCount = 0;
+  let ongoingCount = 0;
+
+  for (const doc of activeDocs) {
+    const { isOverdue } = isDocumentOverdue(doc, slaConfig, now);
+    const hasRemarks = doc.remarks?.some((r: any) => r.complianceRequired && !r.complied);
+
+    if (isOverdue) {
+      overdueCount++;
+    } else if (hasRemarks) {
+      pendingComplianceCount++;
+    } else {
+      ongoingCount++;
+    }
   }
 
-  return mapped;
+  const results = {
+    documents: mapped,
+    totalCount,
+    totalMonitoredCount: ongoingCount + pendingComplianceCount + overdueCount + clearedForOutCount,
+    ongoingCount,
+    pendingComplianceCount,
+    overdueCount,
+    clearedForOutCount,
+    page: page ?? 1,
+    pageSize: pageSize ?? mapped.length,
+    totalPages: pageSize ? Math.ceil(totalCount / pageSize) : 1,
+  };
+
+  return results;
 }
 
 export async function getDocumentById(id: string) {
@@ -361,24 +492,18 @@ export async function createNewDocument(data: any, userId?: string, actor?: Audi
 
     // Canonical bidirectional resolution
     
-    // Strict validation for Focal Person
+    // Fallback resolution for Focal Person
     let resp;
-    if (!data.responsiblePersonId) {
-      throw new DocumentValidationError("A valid Focal Person ID (responsiblePersonId) is required.");
+    if (data.responsiblePersonId) {
+      const [focalP] = await tx.select().from(personnel).where(eq(personnel.id, Number(data.responsiblePersonId)));
+      if (focalP) {
+        resp = { id: focalP.id, name: focalP.name };
+      } else {
+        resp = { id: null, name: data.responsiblePerson || 'Unassigned' };
+      }
+    } else {
+      resp = { id: null, name: data.responsiblePerson || 'Unassigned' };
     }
-    const [focalP] = await tx.select().from(personnel).where(eq(personnel.id, Number(data.responsiblePersonId)));
-    if (!focalP) {
-      throw new DocumentValidationError("The provided Focal Person does not exist in the personnel database.");
-    }
-    if (focalP.status === 'suspended') {
-      throw new DocumentValidationError("Suspended personnel cannot be designated as Focal Person for new documents.");
-    }
-    
-    // LIMITATION: Currently, we do NOT enforce `focalP.isFocalPerson === true` because the business rule
-    // is not fully established, and the frontend falls back to all active supervisors if no one is explicitly
-    // designated. This preserves current behavior until the focal person designation logic is strictly confirmed.
-    
-    resp = { id: focalP.id, name: focalP.name };
 
     const cust = await resolvePersonnelInfo(data.currentCustodianId, data.currentCustodian);
     const desk = await resolveDeskInfo(data.currentDeskId, data.currentLocation);
@@ -464,7 +589,7 @@ export async function createNewDocument(data: any, userId?: string, actor?: Audi
   });
 }
 
-export async function updateExistingDocument(id: string, data: any, clientVersion?: number, userId?: string, actor?: AuditActor) {
+export async function updateExistingDocument(id: string, data: any, clientVersion?: number | string, userId?: string, actor?: AuditActor) {
   return await withTransaction(async (tx) => {
     const existing = await tx.select().from(documents).where(eq(documents.id, id));
     if (existing.length === 0) {
@@ -473,15 +598,53 @@ export async function updateExistingDocument(id: string, data: any, clientVersio
 
     const currentDoc = existing[0];
 
+    const rawVer =
+      clientVersion !== undefined && clientVersion !== null && !isNaN(Number(clientVersion))
+        ? Number(clientVersion)
+        : data?.expectedVersion !== undefined && data?.expectedVersion !== null
+        ? Number(data.expectedVersion)
+        : data?.baseVersion !== undefined && data?.baseVersion !== null
+        ? Number(data.baseVersion)
+        : data?.version !== undefined && data?.version !== null
+        ? Number(data.version)
+        : undefined;
+
+    const expectedVer = rawVer !== undefined && !isNaN(rawVer) ? rawVer : undefined;
+
     // Optimistic Concurrency check
-    if (clientVersion !== undefined && clientVersion !== null && clientVersion !== currentDoc.version) {
+    if (expectedVer !== undefined && expectedVer !== currentDoc.version) {
       throw new DocumentConflictError(
-        `Concurrency conflict: Document version is ${currentDoc.version}, but client expected ${clientVersion}.`
+        `Concurrency conflict: Document version is ${currentDoc.version}, but client expected ${expectedVer}.`
       );
+    }
+
+    // Terminal State Guard: Once Dispatched / Completed, changes require explicit administrative authority
+    if (currentDoc.currentStatus === 'Dispatched / Completed') {
+      const isPrivileged = actor?.role && ['System Admin', 'Department Manager'].includes(actor.role);
+      if (!isPrivileged) {
+        throw new DocumentValidationError(
+          `Document ${currentDoc.trackingNumber} is Dispatched / Completed and archived. Terminal status entries cannot be modified.`
+        );
+      }
     }
 
     const now = new Date();
     const nextVersion = currentDoc.version + 1;
+
+    // Validate and evaluate target lifecycle status
+    let targetLifecycleStatus = currentDoc.currentStatus;
+    if (data.currentStatus !== undefined && data.currentStatus !== currentDoc.currentStatus) {
+      if (!isCanonicalLifecycleStatus(data.currentStatus)) {
+        throw new DocumentValidationError(
+          `Invalid status "${data.currentStatus}". Status must be one of the canonical POSSD lifecycle statuses: ${CANONICAL_LIFECYCLE_STATUSES.join(', ')}.`
+        );
+      }
+      const val = await validateBackendLifecycleTransition(tx, id, currentDoc.currentStatus, data.currentStatus, actor);
+      if (!val.valid) {
+        throw new DocumentValidationError(val.reason || 'Invalid status transition.');
+      }
+      targetLifecycleStatus = data.currentStatus;
+    }
 
     // Resolve relational references if updated
     const resp = (data.responsiblePersonId !== undefined || data.responsiblePerson !== undefined)
@@ -495,9 +658,6 @@ export async function updateExistingDocument(id: string, data: any, clientVersio
     ) {
       throw new DocumentValidationError("Suspended personnel cannot be designated as Focal Person for documents.");
     }
-
-    // LIMITATION: Similar to document creation, we do NOT enforce `resp.isFocalPerson === true` here
-    // to preserve current workflows until the explicit focal-person business rule is confirmed.
 
     const cust = (data.currentCustodianId !== undefined || data.currentCustodian !== undefined)
       ? await resolvePersonnelInfo(data.currentCustodianId !== undefined ? (data.currentCustodianId ? Number(data.currentCustodianId) : null) : currentDoc.currentCustodianId, data.currentCustodian ?? currentDoc.currentCustodian)
@@ -530,7 +690,7 @@ export async function updateExistingDocument(id: string, data: any, clientVersio
       responsiblePerson: resp.name,
       responsiblePersonId: resp.id,
       priority: data.priority ?? currentDoc.priority,
-      currentStatus: data.currentStatus ?? currentDoc.currentStatus,
+      currentStatus: targetLifecycleStatus,
       currentLocation: desk.name,
       currentCustodian: cust.name,
       currentCustodianId: cust.id,
@@ -540,65 +700,11 @@ export async function updateExistingDocument(id: string, data: any, clientVersio
       updatedAt: now,
     };
 
-    const hasClearanceUpdate = data.managerClearance !== undefined || data.isCleared !== undefined;
-    if (hasClearanceUpdate) {
-      const isCleared = data.managerClearance?.isCleared !== undefined
-        ? Boolean(data.managerClearance.isCleared)
-        : (data.isCleared !== undefined ? Boolean(data.isCleared) : Boolean(currentDoc.isCleared));
-
-      const authActor = await getAuthoritativeUserById(userId);
-      const clearedBy = isCleared ? (authActor?.name || data.managerClearance?.clearedBy || currentDoc.clearedBy || 'Authorized Manager') : null;
-      const clearedByUserId = isCleared ? (authActor?.userId || null) : null;
-      const clearedByPersonnelId = isCleared ? (authActor?.personnelId || null) : null;
-      const clearedAt = isCleared ? (data.managerClearance?.clearedAt ? new Date(data.managerClearance.clearedAt) : (currentDoc.clearedAt || now)) : null;
-
-      updateFields.isCleared = isCleared;
-      updateFields.clearedBy = clearedBy;
-      updateFields.clearedAt = clearedAt;
-      updateFields.clearanceType = data.managerClearance?.clearanceType ?? (isCleared ? currentDoc.clearanceType : null);
-      updateFields.exitTrackingNumber = isCleared ? (data.managerClearance?.exitTrackingNumber ?? currentDoc.exitTrackingNumber) : null;
-      updateFields.forwardedToExternal = isCleared ? (data.managerClearance?.forwardedToExternal ?? currentDoc.forwardedToExternal) : null;
-      updateFields.clearanceRemarks = data.managerClearance?.clearanceRemarks ?? currentDoc.clearanceRemarks;
-
-      // Synchronously upsert manager_clearances inside transaction
-      await tx
-        .insert(managerClearances)
-        .values({
-          documentId: id,
-          isCleared,
-          clearedBy,
-          clearedByUserId,
-          clearedByPersonnelId,
-          clearedAt,
-          clearanceType: updateFields.clearanceType || null,
-          exitTrackingNumber: updateFields.exitTrackingNumber || null,
-          forwardedToExternal: updateFields.forwardedToExternal || null,
-          clearanceRemarks: updateFields.clearanceRemarks || null,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .onConflictDoUpdate({
-          target: managerClearances.documentId,
-          set: {
-            isCleared,
-            clearedBy,
-            clearedByUserId,
-            clearedByPersonnelId,
-            clearedAt,
-            clearanceType: updateFields.clearanceType || null,
-            exitTrackingNumber: updateFields.exitTrackingNumber || null,
-            forwardedToExternal: updateFields.forwardedToExternal || null,
-            clearanceRemarks: updateFields.clearanceRemarks || null,
-            updatedAt: now,
-          },
-        });
-    }
-
     // Enforce atomic version check at SQL level inside transaction
     const [updated] = await tx
       .update(documents)
       .set(updateFields)
-      .where(clientVersion ? sql`${documents.id} = ${id} AND ${documents.version} = ${clientVersion}` : eq(documents.id, id))
+      .where(expectedVer !== undefined && !isNaN(expectedVer) ? and(eq(documents.id, id), eq(documents.version, expectedVer)) : eq(documents.id, id))
       .returning();
 
     if (!updated) {
@@ -690,14 +796,30 @@ export async function updateExistingDocument(id: string, data: any, clientVersio
   });
 }
 
-export async function deleteDocumentById(id: string, userId?: string, actor?: AuditActor) {
+export async function deleteDocumentById(id: string, userId?: string, actor?: AuditActor, expectedVersion?: number) {
   return await withTransaction(async (tx) => {
     const existing = await tx.select().from(documents).where(eq(documents.id, id));
     if (existing.length === 0) {
       throw new DocumentNotFoundError(id);
     }
 
-    await tx.delete(documents).where(eq(documents.id, id));
+    const currentDoc = existing[0];
+    const expectedVer = expectedVersion !== undefined && expectedVersion !== null ? Number(expectedVersion) : undefined;
+
+    if (expectedVer !== undefined && !isNaN(expectedVer) && expectedVer !== currentDoc.version) {
+      throw new DocumentConflictError(
+        `Concurrency conflict: Document version is ${currentDoc.version}, but client expected ${expectedVer}. Delete aborted.`
+      );
+    }
+
+    const deleted = await tx
+      .delete(documents)
+      .where(expectedVer !== undefined && !isNaN(expectedVer) ? and(eq(documents.id, id), eq(documents.version, expectedVer)) : eq(documents.id, id))
+      .returning();
+
+    if (deleted.length === 0) {
+      throw new DocumentConflictError(`Concurrency conflict: Document version is no longer ${currentDoc.version}. Delete aborted.`);
+    }
 
     await createAuditLog(
       {
@@ -706,7 +828,7 @@ export async function deleteDocumentById(id: string, userId?: string, actor?: Au
         action: 'DELETE_DOCUMENT',
         entityType: 'document',
         entityId: id,
-        oldValue: existing[0],
+        oldValue: currentDoc,
       },
       tx
     );
@@ -739,15 +861,47 @@ export async function routeDocumentWithTransaction(
     actorUserId?: number;
     fromDeskId?: number;
     toDeskId?: number;
+    expectedVersion?: number;
+    baseVersion?: number;
+    version?: number;
   },
   userId?: string,
-  actor?: AuditActor
+  actor?: AuditActor,
+  expectedVersion?: number
 ) {
   return await withTransaction(async (tx) => {
     // 1. Fetch current document state
     const [doc] = await tx.select().from(documents).where(eq(documents.id, documentId));
     if (!doc) {
       throw new DocumentNotFoundError(documentId);
+    }
+
+    const rawVer = expectedVersion !== undefined && expectedVersion !== null
+      ? expectedVersion
+      : (movementData?.expectedVersion !== undefined && movementData?.expectedVersion !== null
+        ? movementData.expectedVersion
+        : (movementData?.baseVersion !== undefined && movementData?.baseVersion !== null
+          ? movementData.baseVersion
+          : (movementData?.version !== undefined && movementData?.version !== null
+            ? movementData.version
+            : undefined)));
+
+    const expectedVer = rawVer !== undefined && rawVer !== null ? Number(rawVer) : undefined;
+
+    if (expectedVer !== undefined && !isNaN(expectedVer) && expectedVer !== doc.version) {
+      throw new DocumentConflictError(
+        `Concurrency conflict: Document version is ${doc.version}, but client expected ${expectedVer}. Routing aborted.`
+      );
+    }
+
+    // Terminal State Guard
+    if (doc.currentStatus === 'Dispatched / Completed') {
+      const isPrivileged = actor?.role && ['System Admin', 'Department Manager'].includes(actor.role);
+      if (!isPrivileged) {
+        throw new DocumentValidationError(
+          `Document ${doc.trackingNumber} is Dispatched / Completed and archived. Routing completed entries is not permitted.`
+        );
+      }
     }
 
     const now = new Date();
@@ -774,6 +928,23 @@ export async function routeDocumentWithTransaction(
       ? await resolvePersonnelInfo(Number(movementData.toPersonnelId), null)
       : (movementData.toPersonnelName ? await resolvePersonnelInfo(null, movementData.toPersonnelName) : { id: null, name: actorName });
 
+    // Determine target lifecycle status vs movement description text
+    let targetDocStatus = doc.currentStatus;
+    const movementStatusText = movementData.statusUpdate || doc.currentStatus;
+
+    if (movementData.statusUpdate && isCanonicalLifecycleStatus(movementData.statusUpdate)) {
+      const val = await validateBackendLifecycleTransition(tx, documentId, doc.currentStatus, movementData.statusUpdate, actor);
+      if (!val.valid) {
+        throw new DocumentValidationError(val.reason || 'Invalid status transition.');
+      }
+      targetDocStatus = movementData.statusUpdate;
+    } else {
+      // Movement description text (e.g. "Forwarded for Legal Review") does NOT overwrite canonical currentStatus!
+      if (doc.currentStatus === 'Incoming Logged') {
+        targetDocStatus = 'Under Review';
+      }
+    }
+
     // 2. Insert movement audit record
     const [movement] = await tx
       .insert(documentMovements)
@@ -785,7 +956,7 @@ export async function routeDocumentWithTransaction(
         personnelRole: actorRole,
         currentDesk: movementData.currentDesk || doc.currentLocation,
         forwardToDesk: targetDesk.name,
-        statusUpdate: movementData.statusUpdate || doc.currentStatus,
+        statusUpdate: movementStatusText,
         notes: movementData.notes || null,
         fromDepartment: movementData.fromDepartment || null,
         toDepartment: movementData.toDepartment || null,
@@ -806,14 +977,18 @@ export async function routeDocumentWithTransaction(
       .set({
         currentLocation: targetDesk.name,
         currentCustodian: targetCust.id ? targetCust.name : actorName,
-        currentStatus: movementData.statusUpdate || doc.currentStatus,
+        currentStatus: targetDocStatus,
         currentDeskId: targetDesk.id,
         currentCustodianId: targetCust.id,
         version: doc.version + 1,
         updatedAt: now,
       })
-      .where(eq(documents.id, documentId))
+      .where(expectedVer !== undefined && !isNaN(expectedVer) ? and(eq(documents.id, documentId), eq(documents.version, expectedVer)) : eq(documents.id, documentId))
       .returning();
+
+    if (!updatedDoc) {
+      throw new DocumentConflictError(`Concurrency conflict: Document version is no longer ${doc.version}. Routing aborted.`);
+    }
 
     // 4. Log audit record transactionally
     await createAuditLog(
@@ -842,9 +1017,13 @@ export async function addDocumentRemark(
     complianceNotes?: string;
     supervisorUserId?: number;
     supervisorPersonnelId?: number;
+    expectedVersion?: number;
+    baseVersion?: number;
+    version?: number;
   },
   userId?: string,
-  actor?: AuditActor
+  actor?: AuditActor,
+  expectedVersion?: number
 ) {
   return await withTransaction(async (tx) => {
     const [doc] = await tx.select().from(documents).where(eq(documents.id, documentId));
@@ -852,10 +1031,36 @@ export async function addDocumentRemark(
       throw new DocumentNotFoundError(documentId);
     }
 
+    const rawVer = expectedVersion !== undefined && expectedVersion !== null
+      ? expectedVersion
+      : (remarkData?.expectedVersion !== undefined && remarkData?.expectedVersion !== null
+        ? remarkData.expectedVersion
+        : (remarkData?.baseVersion !== undefined && remarkData?.baseVersion !== null
+          ? remarkData.baseVersion
+          : (remarkData?.version !== undefined && remarkData?.version !== null
+            ? remarkData.version
+            : undefined)));
+
+    const expectedVer = rawVer !== undefined && rawVer !== null ? Number(rawVer) : undefined;
+
+    if (expectedVer !== undefined && !isNaN(expectedVer) && expectedVer !== doc.version) {
+      throw new DocumentConflictError(
+        `Concurrency conflict: Document version is ${doc.version}, but client expected ${expectedVer}. Remark aborted.`
+      );
+    }
+
+    if (doc.currentStatus === 'Dispatched / Completed') {
+      const isPrivileged = actor?.role && ['System Admin', 'Department Manager'].includes(actor.role);
+      if (!isPrivileged) {
+        throw new DocumentValidationError(
+          `Document ${doc.trackingNumber} is Dispatched / Completed and archived. Cannot add directives to completed documents.`
+        );
+      }
+    }
+
     const remarkId = `rem_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const now = new Date();
 
-    // Resolve authoritative supervisor strictly from PostgreSQL user if available
     let supervisorName = actor?.name || remarkData.supervisorName || 'Supervisor';
     let supervisorUserId = actor?.userId || remarkData.supervisorUserId || (userId ? Number(userId) : null);
     let supervisorPersonnelId = remarkData.supervisorPersonnelId ? Number(remarkData.supervisorPersonnelId) : null;
@@ -884,6 +1089,23 @@ export async function addDocumentRemark(
       })
       .returning();
 
+    // If compliance is required, transition lifecycle status to 'Supervisor Comment Needed'
+    if (remarkData.complianceRequired) {
+      const [updatedDoc] = await tx
+        .update(documents)
+        .set({
+          currentStatus: 'Supervisor Comment Needed',
+          version: doc.version + 1,
+          updatedAt: now,
+        })
+        .where(expectedVer !== undefined && !isNaN(expectedVer) ? and(eq(documents.id, documentId), eq(documents.version, expectedVer)) : eq(documents.id, documentId))
+        .returning();
+
+      if (!updatedDoc) {
+        throw new DocumentConflictError(`Concurrency conflict: Document version is no longer ${doc.version}. Remark aborted.`);
+      }
+    }
+
     await createAuditLog(
       {
         userId,
@@ -900,6 +1122,96 @@ export async function addDocumentRemark(
   });
 }
 
+export async function fulfillDocumentCompliance(
+  documentId: string,
+  remarkId: string,
+  complianceNotes: string,
+  userId?: string,
+  actor?: AuditActor,
+  expectedVersion?: number
+) {
+  return await withTransaction(async (tx) => {
+    const [doc] = await tx.select().from(documents).where(eq(documents.id, documentId));
+    if (!doc) {
+      throw new DocumentNotFoundError(documentId);
+    }
+
+    const expectedVer = expectedVersion !== undefined && expectedVersion !== null ? Number(expectedVersion) : undefined;
+
+    if (expectedVer !== undefined && !isNaN(expectedVer) && expectedVer !== doc.version) {
+      throw new DocumentConflictError(
+        `Concurrency conflict: Document version is ${doc.version}, but client expected ${expectedVer}. Compliance fulfillment aborted.`
+      );
+    }
+
+    if (doc.currentStatus === 'Dispatched / Completed') {
+      throw new DocumentValidationError(`Document ${doc.trackingNumber} is Dispatched / Completed and archived.`);
+    }
+
+    const [remark] = await tx.select().from(documentRemarks).where(eq(documentRemarks.id, remarkId));
+    if (!remark) {
+      throw new DocumentValidationError(`Supervisor remark with ID "${remarkId}" not found.`);
+    }
+
+    const now = new Date();
+    const actorName = actor?.name || 'Staff';
+
+    const [updatedRemark] = await tx
+      .update(documentRemarks)
+      .set({
+        complied: true,
+        compliedAt: now,
+        compliedBy: actorName,
+        complianceNotes: complianceNotes || remark.complianceNotes || null,
+      })
+      .where(eq(documentRemarks.id, remarkId))
+      .returning();
+
+    // Check if any uncomplied mandatory remarks remain
+    const uncomplied = await tx
+      .select()
+      .from(documentRemarks)
+      .where(and(
+        eq(documentRemarks.documentId, documentId),
+        eq(documentRemarks.complianceRequired, true),
+        eq(documentRemarks.complied, false)
+      ));
+
+    let updatedDoc = doc;
+    if (uncomplied.length === 0 && doc.currentStatus === 'Supervisor Comment Needed') {
+      const [u] = await tx
+        .update(documents)
+        .set({
+          currentStatus: 'Complied / Ready for Clearance',
+          version: doc.version + 1,
+          updatedAt: now,
+        })
+        .where(expectedVer !== undefined && !isNaN(expectedVer) ? and(eq(documents.id, documentId), eq(documents.version, expectedVer)) : eq(documents.id, documentId))
+        .returning();
+
+      if (!u) {
+        throw new DocumentConflictError(`Concurrency conflict: Document version is no longer ${doc.version}. Compliance fulfillment aborted.`);
+      }
+      updatedDoc = u;
+    }
+
+    await createAuditLog(
+      {
+        userId,
+        actor,
+        action: 'FULFILL_COMPLIANCE',
+        entityType: 'document',
+        entityId: documentId,
+        oldValue: { remarkId, complied: remark.complied },
+        newValue: { remarkId, complied: true, docStatus: updatedDoc.currentStatus },
+      },
+      tx
+    );
+
+    return { remark: updatedRemark, document: updatedDoc };
+  });
+}
+
 export async function addDocumentClearance(
   documentId: string,
   clearanceData: {
@@ -912,9 +1224,13 @@ export async function addDocumentClearance(
     clearedByUserId?: number;
     clearedByPersonnelId?: number;
     currentStatus?: string;
+    expectedVersion?: number;
+    baseVersion?: number;
+    version?: number;
   },
   userId?: string,
-  actor?: AuditActor
+  actor?: AuditActor,
+  expectedVersion?: number
 ) {
   return await withTransaction(async (tx) => {
     const [doc] = await tx.select().from(documents).where(eq(documents.id, documentId));
@@ -922,11 +1238,53 @@ export async function addDocumentClearance(
       throw new DocumentNotFoundError(documentId);
     }
 
+    const rawVer = expectedVersion !== undefined && expectedVersion !== null
+      ? expectedVersion
+      : (clearanceData?.expectedVersion !== undefined && clearanceData?.expectedVersion !== null
+        ? clearanceData.expectedVersion
+        : (clearanceData?.baseVersion !== undefined && clearanceData?.baseVersion !== null
+          ? clearanceData.baseVersion
+          : (clearanceData?.version !== undefined && clearanceData?.version !== null
+            ? clearanceData.version
+            : undefined)));
+
+    const expectedVer = rawVer !== undefined && rawVer !== null ? Number(rawVer) : undefined;
+
+    if (expectedVer !== undefined && !isNaN(expectedVer) && expectedVer !== doc.version) {
+      throw new DocumentConflictError(
+        `Concurrency conflict: Document version is ${doc.version}, but client expected ${expectedVer}. Clearance aborted.`
+      );
+    }
+
+    if (doc.currentStatus === 'Dispatched / Completed') {
+      const isPrivileged = actor?.role && ['System Admin', 'Department Manager'].includes(actor.role);
+      if (!isPrivileged) {
+        throw new DocumentValidationError(
+          `Document ${doc.trackingNumber} is Dispatched / Completed and archived. Modifications to completed entries are restricted.`
+        );
+      }
+    }
+
     const now = new Date();
-    // Default to true only if not specified, but respect explicit boolean
     const isCleared = clearanceData.isCleared !== undefined ? Boolean(clearanceData.isCleared) : true;
 
-    // Resolve authoritative actor strictly from PostgreSQL user
+    // Check for unresolved compliance remarks if clearing
+    if (isCleared) {
+      const unresolvedRemarks = await tx
+        .select()
+        .from(documentRemarks)
+        .where(and(
+          eq(documentRemarks.documentId, documentId),
+          eq(documentRemarks.complianceRequired, true),
+          eq(documentRemarks.complied, false)
+        ));
+
+      if (unresolvedRemarks.length > 0) {
+        throw new DocumentValidationError("Cannot clear document: there are unresolved compliance remarks.");
+      }
+    }
+
+    // Resolve authoritative actor
     let actorUserId = actor?.userId || clearanceData.clearedByUserId || (userId ? Number(userId) : null);
     let actorName = actor?.name || clearanceData.clearedBy || 'Authorized Manager';
     let actorPersonnelId = clearanceData.clearedByPersonnelId || null;
@@ -954,29 +1312,7 @@ export async function addDocumentClearance(
     const clearedByUserId = isCleared ? Number(actorUserId) : null;
     const clearedByPersonnelId = isCleared ? actorPersonnelId : null;
 
-    // Determine target document status
-    let nextStatus = doc.currentStatus;
-    if (isCleared) {
-      if (clearanceData.clearanceType === 'approved_for_dispatch') {
-        nextStatus = 'Cleared for Out';
-      } else if (clearanceData.clearanceType === 'archived_completed') {
-        nextStatus = 'Dispatched / Completed';
-      } else {
-        nextStatus = 'Cleared for Out';
-      }
-    } else {
-      // Returned for revision or revoked
-      if (clearanceData.clearanceType === 'returned_for_revision') {
-        nextStatus = 'Under Review';
-      } else {
-        nextStatus = 'Under Review';
-      }
-    }
-    if (clearanceData.currentStatus) {
-      nextStatus = clearanceData.currentStatus;
-    }
-
-    // 1. Upsert into manager_clearances (Authoritative Source of Truth)
+    // 1. Upsert manager_clearances
     const [clearance] = await tx
       .insert(managerClearances)
       .values({
@@ -1010,7 +1346,40 @@ export async function addDocumentClearance(
       })
       .returning();
 
-    // 2. Synchronize legacy columns on documents table in same transaction
+    // Determine target document status
+    let nextStatus = doc.currentStatus;
+    if (isCleared) {
+      if (clearanceData.clearanceType === 'approved_for_dispatch') {
+        nextStatus = 'Cleared for Out';
+      } else if (clearanceData.clearanceType === 'archived_completed') {
+        nextStatus = 'Dispatched / Completed';
+      } else {
+        nextStatus = 'Cleared for Out';
+      }
+    } else {
+      const unresolved = await tx
+        .select()
+        .from(documentRemarks)
+        .where(and(
+          eq(documentRemarks.documentId, documentId),
+          eq(documentRemarks.complianceRequired, true),
+          eq(documentRemarks.complied, false)
+        ));
+      nextStatus = unresolved.length > 0 ? 'Supervisor Comment Needed' : 'Under Review';
+    }
+
+    if (clearanceData.currentStatus) {
+      if (!isCanonicalLifecycleStatus(clearanceData.currentStatus)) {
+        throw new DocumentValidationError(`Invalid status "${clearanceData.currentStatus}".`);
+      }
+      const val = await validateBackendLifecycleTransition(tx, documentId, doc.currentStatus, clearanceData.currentStatus, actor);
+      if (!val.valid) {
+        throw new DocumentValidationError(val.reason || 'Invalid status transition.');
+      }
+      nextStatus = clearanceData.currentStatus;
+    }
+
+    // 2. Synchronize legacy columns on documents table
     const [updatedDoc] = await tx
       .update(documents)
       .set({
@@ -1025,10 +1394,14 @@ export async function addDocumentClearance(
         version: doc.version + 1,
         updatedAt: now,
       })
-      .where(eq(documents.id, documentId))
+      .where(expectedVer !== undefined && !isNaN(expectedVer) ? and(eq(documents.id, documentId), eq(documents.version, expectedVer)) : eq(documents.id, documentId))
       .returning();
 
-    // 3. Log audit event transactionally
+    if (!updatedDoc) {
+      throw new DocumentConflictError(`Concurrency conflict: Document version is no longer ${doc.version}. Clearance aborted.`);
+    }
+
+    // 3. Log audit event
     await createAuditLog(
       {
         userId: userId || (actorUserId ? String(actorUserId) : null),
@@ -1066,10 +1439,26 @@ export async function revokeDocumentClearance(
   revokeData: {
     reason?: string;
     returnStatus?: string;
+    expectedVersion?: number;
+    baseVersion?: number;
+    version?: number;
   } = {},
   userId?: string,
-  actor?: AuditActor
+  actor?: AuditActor,
+  expectedVersion?: number
 ) {
+  const rawVer = expectedVersion !== undefined && expectedVersion !== null
+    ? expectedVersion
+    : (revokeData?.expectedVersion !== undefined && revokeData?.expectedVersion !== null
+      ? revokeData.expectedVersion
+      : (revokeData?.baseVersion !== undefined && revokeData?.baseVersion !== null
+        ? revokeData.baseVersion
+        : (revokeData?.version !== undefined && revokeData?.version !== null
+          ? revokeData.version
+          : undefined)));
+
+  const expectedVer = rawVer !== undefined && rawVer !== null ? Number(rawVer) : undefined;
+
   return await addDocumentClearance(
     documentId,
     {
@@ -1077,9 +1466,11 @@ export async function revokeDocumentClearance(
       clearanceType: 'returned_for_revision',
       clearanceRemarks: revokeData.reason || 'Clearance revoked / returned for revision.',
       currentStatus: revokeData.returnStatus || 'Under Review',
+      expectedVersion: expectedVer,
     },
     userId,
-    actor
+    actor,
+    expectedVer
   );
 }
 

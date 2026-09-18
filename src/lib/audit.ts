@@ -357,41 +357,81 @@ export function compileDocumentAuditTrail(
     }
   });
 
-  // 4. Manager Clearance / Outgoing Dispatch
-  if (document.managerClearance?.isCleared) {
+  // 4. Manager Clearance / Outgoing Dispatch (Current or Historical)
+  if (document.managerClearance) {
     const clearance = document.managerClearance;
-    const clearanceLabel =
-      clearance.clearanceType === 'approved_for_dispatch'
-        ? 'Approved for Outgoing Dispatch'
-        : clearance.clearanceType === 'archived_completed'
-        ? 'Completed & Archived'
-        : 'Returned for Revision';
+    const hasHistoricalClearance = clearance.isCleared || clearance.clearedAt || clearance.clearedBy;
 
-    const clrId = `aud-clearance-${document.id}`;
-    if (!seenIds.has(clrId)) {
-      seenIds.add(clrId);
-      events.push({
-        id: clrId,
-        documentId: document.id,
-        trackingNumber: document.trackingNumber,
-        timestamp: clearance.clearedAt || document.updatedAt || new Date().toISOString(),
-        actorName: clearance.clearedBy || 'Division Manager',
-        actorRole: 'Department Manager / Authorizing Official',
-        action: 'CLEARANCE_GRANTED',
-        actionTitle: `Manager Clearance: ${clearanceLabel}`,
-        stageLabel: 'Terminal Clearance',
-        type: 'clearance',
-        fromDesk: document.currentLocation,
-        toDesk: clearance.forwardedToExternal || 'External Recipient',
-        statusUpdate: 'Cleared for Out',
-        clearanceType: clearance.clearanceType,
-        exitTrackingNumber: clearance.exitTrackingNumber,
-        forwardedToExternal: clearance.forwardedToExternal,
-        notes: clearance.clearanceRemarks || 'Final clearance granted for outgoing transmittal.',
-        idempotencyKey: generateIdempotencyKey(document.id, 'CLEARANCE_GRANTED', clearance.clearedBy || 'Manager'),
-      });
+    if (hasHistoricalClearance) {
+      const clearanceLabel =
+        clearance.clearanceType === 'approved_for_dispatch'
+          ? 'Approved for Outgoing Dispatch'
+          : clearance.clearanceType === 'archived_completed'
+          ? 'Completed & Archived'
+          : 'Returned for Revision';
+
+      const clrId = `aud-clearance-${document.id}`;
+      if (!seenIds.has(clrId)) {
+        seenIds.add(clrId);
+        events.push({
+          id: clrId,
+          documentId: document.id,
+          trackingNumber: document.trackingNumber,
+          timestamp: clearance.clearedAt || document.updatedAt || new Date().toISOString(),
+          actorName: clearance.clearedBy || 'Division Manager',
+          actorRole: 'Department Manager / Authorizing Official',
+          action: 'CLEARANCE_GRANTED',
+          actionTitle: `Manager Clearance: ${clearanceLabel}`,
+          stageLabel: 'Terminal Clearance',
+          type: 'clearance',
+          fromDesk: document.currentLocation,
+          toDesk: clearance.forwardedToExternal || 'External Recipient',
+          statusUpdate: 'Cleared for Out',
+          clearanceType: clearance.clearanceType,
+          exitTrackingNumber: clearance.exitTrackingNumber,
+          forwardedToExternal: clearance.forwardedToExternal,
+          notes: clearance.clearanceRemarks || 'Final clearance granted for outgoing transmittal.',
+          idempotencyKey: generateIdempotencyKey(document.id, 'CLEARANCE_GRANTED', clearance.clearedBy || 'Manager'),
+        });
+      }
+
+      // If clearance was subsequently revoked or returned for revision
+      if (!clearance.isCleared && (clearance.clearedAt || clearance.clearanceType === 'returned_for_revision')) {
+        const revId = `aud-clearance-revoked-${document.id}`;
+        if (!seenIds.has(revId)) {
+          seenIds.add(revId);
+          events.push({
+            id: revId,
+            documentId: document.id,
+            trackingNumber: document.trackingNumber,
+            timestamp: document.updatedAt || new Date().toISOString(),
+            actorName: clearance.clearedBy || 'Division Manager',
+            actorRole: 'Department Manager / Authorizing Official',
+            action: 'REVOKE_CLEARANCE',
+            actionTitle: 'Manager Clearance Revoked / Returned for Revision',
+            stageLabel: 'Clearance Revoked',
+            type: 'clearance',
+            fromDesk: document.currentLocation,
+            toDesk: 'Internal Desk',
+            statusUpdate: 'Returned for Revision',
+            clearanceType: 'returned_for_revision',
+            notes: clearance.clearanceRemarks || 'Clearance was revoked and document was returned for revision.',
+            idempotencyKey: generateIdempotencyKey(document.id, 'REVOKE_CLEARANCE', clearance.clearedBy || 'Manager'),
+          });
+        }
+      }
     }
   }
+
+  // 5. Merge additional global audit log records matching this document
+  const globalLogs = getGlobalAuditLogs({ documentId: document.id, trackingNumber: document.trackingNumber });
+  globalLogs.forEach((gLog) => {
+    if (seenIds.has(gLog.id)) return;
+    if (gLog.idempotencyKey && seenIds.has(gLog.idempotencyKey)) return;
+    seenIds.add(gLog.id);
+    if (gLog.idempotencyKey) seenIds.add(gLog.idempotencyKey);
+    events.push(gLog);
+  });
 
   // Sort chronologically
   return events.sort((a, b) => {

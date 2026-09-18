@@ -138,6 +138,7 @@ export async function apiRequest<T = any>(
       case 401:
         errorCode = 'UNAUTHORIZED';
         errorMessage = errorMessage || 'Authentication credentials missing or invalid.';
+        setAccessToken(null);
         break;
       case 403:
         errorCode = 'FORBIDDEN';
@@ -177,7 +178,8 @@ export async function apiRequest<T = any>(
  */
 export async function processOfflineQueue(): Promise<{ synced: number; failed: number }> {
   try {
-    const result = await processQueueSequentially();
+    const token = getAccessToken();
+    const result = await processQueueSequentially(token);
     return { synced: result.processed, failed: result.failed };
   } catch (e) {
     console.error('[POSSD API] Failed to process offline mutation queue:', e);
@@ -222,6 +224,11 @@ export interface FetchDocumentsParams {
 export interface PaginatedDocumentsResponse {
   documents: DocumentItem[];
   totalCount: number;
+  totalMonitoredCount?: number;
+  ongoingCount?: number;
+  pendingComplianceCount?: number;
+  overdueCount?: number;
+  clearedForOutCount?: number;
   page: number;
   pageSize: number;
   totalPages: number;
@@ -267,6 +274,11 @@ export async function fetchDocumentsPaginated(params: FetchDocumentsParams): Pro
     success: boolean;
     documents: DocumentItem[];
     totalCount: number;
+    totalMonitoredCount?: number;
+    ongoingCount?: number;
+    pendingComplianceCount?: number;
+    overdueCount?: number;
+    clearedForOutCount?: number;
     page?: number;
     pageSize?: number;
     totalPages?: number;
@@ -274,11 +286,22 @@ export async function fetchDocumentsPaginated(params: FetchDocumentsParams): Pro
       page: number;
       pageSize: number;
       totalCount: number;
+      totalMonitoredCount?: number;
+      ongoingCount?: number;
+      pendingComplianceCount?: number;
+      overdueCount?: number;
+      clearedForOutCount?: number;
       totalPages: number;
     };
   }>(url);
 
   const totalCount = data.totalCount ?? data.pagination?.totalCount ?? data.documents.length;
+  const totalMonitoredCount = data.totalMonitoredCount ?? data.pagination?.totalMonitoredCount;
+  const ongoingCount = data.ongoingCount ?? data.pagination?.ongoingCount;
+  const pendingComplianceCount = data.pendingComplianceCount ?? data.pagination?.pendingComplianceCount;
+  const overdueCount = data.overdueCount ?? data.pagination?.overdueCount;
+  const clearedForOutCount = data.clearedForOutCount ?? data.pagination?.clearedForOutCount;
+
   const page = data.page ?? data.pagination?.page ?? params.page ?? 1;
   const pageSize = data.pageSize ?? data.pagination?.pageSize ?? params.pageSize ?? 25;
   const totalPages = data.totalPages ?? data.pagination?.totalPages ?? Math.max(1, Math.ceil(totalCount / pageSize));
@@ -286,6 +309,11 @@ export async function fetchDocumentsPaginated(params: FetchDocumentsParams): Pro
   return {
     documents: data.documents || [],
     totalCount,
+    totalMonitoredCount,
+    ongoingCount,
+    pendingComplianceCount,
+    overdueCount,
+    clearedForOutCount,
     page,
     pageSize,
     totalPages,
@@ -366,9 +394,13 @@ export async function batchDeleteDocuments(
   });
 }
 
-export async function deleteDocument(docId: string): Promise<void> {
-  await apiRequest(`/api/documents/${encodeURIComponent(docId)}`, {
+export async function deleteDocument(docId: string, expectedVersion?: number): Promise<void> {
+  const url = expectedVersion !== undefined
+    ? `/api/documents/${encodeURIComponent(docId)}?expectedVersion=${expectedVersion}`
+    : `/api/documents/${encodeURIComponent(docId)}`;
+  await apiRequest(url, {
     method: 'DELETE',
+    ...(expectedVersion !== undefined ? { body: JSON.stringify({ expectedVersion }) } : {}),
   });
 }
 
@@ -420,6 +452,7 @@ export async function recordClearance(
     forwardedToExternal?: string;
     clearanceRemarks?: string;
     isCleared?: boolean;
+    expectedVersion?: number;
   }
 ): Promise<{ document: DocumentItem; clearance: any }> {
   return await apiRequest(`/api/documents/${encodeURIComponent(docId)}/clearance`, {
@@ -430,7 +463,7 @@ export async function recordClearance(
 
 export async function revokeClearance(
   docId: string,
-  revokeData: { reason?: string } = {}
+  revokeData: { reason?: string; expectedVersion?: number } = {}
 ): Promise<{ document: DocumentItem; clearance: any }> {
   return await apiRequest(`/api/documents/${encodeURIComponent(docId)}/clearance`, {
     method: 'DELETE',
@@ -722,3 +755,9 @@ export async function fetchCodebaseBundle(): Promise<CodebaseBundleResponse> {
 }
 
 export { recordGlobalAudit, getGlobalAuditLogs };
+
+
+export async function fetchDropdownOptions(): Promise<any> {
+  const data = await apiRequest<{ dropdownOptions: any }>('/api/dropdown-options/grouped?includeInactive=false');
+  return data.dropdownOptions;
+}

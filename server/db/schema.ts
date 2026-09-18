@@ -26,7 +26,6 @@ export const personnel = pgTable('personnel', {
   division: text('division').notNull(),
   avatarInitials: text('avatar_initials'),
   email: text('email').unique(),
-  assignedDesk: text('assigned_desk'),
   username: text('username').notNull().unique(),
   status: text('status').default('active'),
   isFocalPerson: boolean('is_focal_person').default(false),
@@ -212,7 +211,7 @@ export const slaRules = pgTable('sla_rules', {
 // -------------------------------------------------------------
 export const businessHours = pgTable('business_hours', {
   id: serial('id').primaryKey(),
-  dayOfWeek: integer('day_of_week').notNull(), // 0=Sun, 1=Mon, ..., 6=Sat
+  dayOfWeek: integer('day_of_week').notNull().unique(), // 0=Sun, 1=Mon, ..., 6=Sat
   isOpen: boolean('is_open').notNull().default(true),
   openTime: text('open_time').notNull().default('08:00'),
   closeTime: text('close_time').notNull().default('17:00'),
@@ -277,6 +276,10 @@ export const dropdownOptions = pgTable('dropdown_options', {
   sortOrder: integer('sort_order').default(0),
   isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at').defaultNow(),
+}, (table) => {
+  return {
+    catActiveIdx: index('idx_dropdown_cat_active').on(table.category, table.isActive),
+  };
 });
 
 // -------------------------------------------------------------

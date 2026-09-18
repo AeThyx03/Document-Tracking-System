@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { DocumentItem, AppUserRole, parsePhilippineDateToISO, AuditEventRecord } from '../types';
+import { DocumentItem, AppUserRole, parsePhilippineDateToISO, formatDateToMDY, AuditEventRecord } from '../types';
 import { compileDocumentAuditTrail } from '../lib/audit';
 import {
   History,
@@ -27,14 +27,12 @@ export type AuditTrailEvent = AuditEventRecord;
 interface DocumentAuditTrailProps {
   document: DocumentItem;
   currentUser?: AppUserRole;
-  onNavigateToTab?: (tab: 'movements' | 'remarks' | 'clearance') => void;
   onPrintAudit?: () => void;
 }
 
 export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
   document,
   currentUser,
-  onNavigateToTab,
   onPrintAudit,
 }) => {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
@@ -46,6 +44,8 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
   const allEvents = useMemo<AuditEventRecord[]>(() => {
     return compileDocumentAuditTrail(document, sortOrder);
   }, [document, sortOrder]);
+
+  const clearanceEvents = useMemo(() => allEvents.filter((ev) => ev.type === 'clearance'), [allEvents]);
 
   // Filtered events
   const filteredEvents = useMemo(() => {
@@ -118,7 +118,7 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
       `Title           : ${document.title}`,
       `Document Type   : ${document.documentType} (${document.communicationType} • ${document.reportType})`,
       `Origin Dept     : ${document.originDepartment}`,
-      `Date Received   : ${document.dateReceived} at ${document.timeReceived}`,
+      `Date Received   : ${formatDateToMDY(document.dateReceived)} at ${document.timeReceived}`,
       `Current Status  : ${document.currentStatus}`,
       `Current Custody : ${document.currentCustodian} (${document.currentLocation})`,
       `Audit Generated : ${new Date().toLocaleString()}`,
@@ -146,11 +146,6 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
     navigator.clipboard.writeText(lines.join('\n'));
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
-  };
-
-  // Print audit trail slip
-  const handlePrintAuditTrail = () => {
-    window.print();
   };
 
   const getEventBadge = (type: AuditTrailEvent['type']) => {
@@ -235,7 +230,7 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
           >
             Supervisor Directives ({(document.supervisorRemarks || []).length})
           </button>
-          {document.managerClearance?.isCleared && (
+          {clearanceEvents.length > 0 && (
             <button
               type="button"
               onClick={() => setFilterType('clearance')}
@@ -245,7 +240,7 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
                   : 'bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-600'
               }`}
             >
-              Clearance (1)
+              Clearance ({clearanceEvents.length})
             </button>
           )}
         </div>
@@ -294,18 +289,6 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
               </>
             )}
           </button>
-
-          {/* Print Audit Trail */}
-          <button
-            type="button"
-            id="print-audit-trail-btn"
-            onClick={onPrintAudit || handlePrintAuditTrail}
-            className="flex items-center gap-1 px-3 py-1 bg-blue-700 hover:bg-blue-800 text-white rounded-lg font-semibold shadow-2xs transition-colors cursor-pointer"
-            title="Print official chronological document audit report (Form POSSD-DTS-AUD01)"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>Print Trail</span>
-          </button>
         </div>
       </div>
 
@@ -324,26 +307,6 @@ export const DocumentAuditTrail: React.FC<DocumentAuditTrailProps> = ({
             </div>
           </div>
         </div>
-
-        {onNavigateToTab && (
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => onNavigateToTab('movements')}
-              className="text-[11px] text-blue-700 dark:text-blue-400 hover:underline font-semibold cursor-pointer"
-            >
-              + Log New Movement
-            </button>
-            <span className="text-slate-400">•</span>
-            <button
-              type="button"
-              onClick={() => onNavigateToTab('remarks')}
-              className="text-[11px] text-amber-700 dark:text-amber-400 hover:underline font-semibold cursor-pointer"
-            >
-              + Add Directive
-            </button>
-          </div>
-        )}
       </div>
 
       {/* The Chronological Timeline List */}

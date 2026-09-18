@@ -92,11 +92,8 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       return enrolledSupervisors;
     }
 
-    // 3. Baseline mock fallback
-    return [
-      { id: 'focal-1', name: 'Mary Flor Aquino', role: 'Supervisor' as const, division: 'Operations & Emergency', username: 'mfaquino' },
-      { id: 'focal-2', name: 'Aubrey Camille Cabreras', role: 'Supervisor' as const, division: 'Planning & QA', username: 'acabreras' },
-    ];
+    // 3. Empty fallback
+    return [];
   }, [staffList, enrolledSupervisors]);
 
   // Document Classification: Incoming vs Outgoing
@@ -207,6 +204,12 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       setValidationError('Tracking number is required.');
       return;
     }
+
+    if (existingDocuments.some(d => d.trackingNumber.trim().toUpperCase() === trackingNumber.trim().toUpperCase())) {
+      setValidationError(`Document with tracking number "${trackingNumber.trim()}" already exists in the registry. Please use a unique identifier.`);
+      return;
+    }
+
     if (!title.trim()) {
       setValidationError('Document title is required.');
       return;
@@ -217,10 +220,17 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
       return;
     }
     
-    const selectedFocal = activeFocalSupervisors.find(s => s.id === responsiblePersonId);
-    if (!selectedFocal) {
-      setValidationError('Action officer / responsible person is required.');
-      return;
+    let responsiblePersonName = 'Unassigned';
+    let responsiblePersonIdVal: number | undefined = undefined;
+    
+    if (activeFocalSupervisors.length > 0) {
+      const selectedFocal = activeFocalSupervisors.find(s => s.id === responsiblePersonId);
+      if (!selectedFocal) {
+        setValidationError('Action officer / responsible person is required.');
+        return;
+      }
+      responsiblePersonName = selectedFocal.name;
+      responsiblePersonIdVal = parseInt(selectedFocal.id, 10);
     }
 
 
@@ -274,8 +284,8 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
         dateReceived,
         timeReceived,
         targetDivision,
-        responsiblePerson: selectedFocal.name,
-        responsiblePersonId: parseInt(selectedFocal.id, 10),
+        responsiblePerson: responsiblePersonName,
+        responsiblePersonId: responsiblePersonIdVal,
         priority,
         currentStatus: 'Incoming Logged',
         currentLocation: documentClassification === 'Outgoing' ? 'Dispatch / Outbox Desk' : 'Receiving Station',
@@ -570,11 +580,15 @@ export const IncomingDocumentModal: React.FC<IncomingDocumentModalProps> = ({
               onChange={(e) => setResponsiblePersonId(e.target.value)}
               className="w-full text-sm rounded-xl border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-slate-900 dark:text-white bg-white dark:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 cursor-pointer"
             >
-              {activeFocalSupervisors.map((person) => (
-                <option key={person.id} value={person.id}>
-                  {person.name} — {person.role} ({person.division})
-                </option>
-              ))}
+              {activeFocalSupervisors.length > 0 ? (
+                activeFocalSupervisors.map((person) => (
+                  <option key={person.id} value={person.id}>
+                    {person.name} — {person.role} ({person.division})
+                  </option>
+                ))
+              ) : (
+                <option value="">No supervisors available (Will be Unassigned)</option>
+              )}
             </select>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
               Selected among enrolled personnel with supervisor permissions.

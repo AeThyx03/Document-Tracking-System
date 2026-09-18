@@ -51,7 +51,6 @@ function containsForbiddenTerm(list: string[] = []): string | null {
 }
 
 assert.strictEqual(containsForbiddenTerm(dropdowns.departments), null, 'departments must not contain port placeholders');
-assert.strictEqual(containsForbiddenTerm(dropdowns.desks), null, 'desks must not contain port placeholders');
 assert.strictEqual(containsForbiddenTerm(dropdowns.originatingAgencies), null, 'originating agencies must not contain port placeholders');
 assert.strictEqual(containsForbiddenTerm(dropdowns.targetDivisions), null, 'target divisions must not contain port placeholders');
 pass('Application dropdown defaults contain no port/marine placeholders');

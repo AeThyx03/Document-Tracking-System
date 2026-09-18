@@ -262,7 +262,7 @@ export function calculateBackoffMs(retryCount: number): number {
 /**
  * Processes mutations sequentially with retry backoff.
  */
-export async function processQueueSequentially(): Promise<{ processed: number; failed: number }> {
+export async function processQueueSequentially(token?: string | null): Promise<{ processed: number; failed: number }> {
   if (isProcessingQueue) {
     return { processed: 0, failed: 0 };
   }
@@ -299,9 +299,14 @@ export async function processQueueSequentially(): Promise<{ processed: number; f
       await updateMutationStatus(mutation.id, 'processing');
 
       try {
+        const finalHeaders = { ...(mutation.headers || {}) };
+        if (token && !finalHeaders['Authorization']) {
+          finalHeaders['Authorization'] = `Bearer ${token}`;
+        }
+
         const response = await fetch(mutation.endpoint, {
           method: mutation.method,
-          headers: mutation.headers || { 'Content-Type': 'application/json' },
+          headers: finalHeaders,
           body: mutation.payload ? JSON.stringify(mutation.payload) : undefined,
         });
 

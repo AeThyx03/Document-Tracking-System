@@ -32,6 +32,8 @@ async function runTest() {
     assert.ok(opts['priority_level'].map(o => o.value).includes(customPriority), 'Priority is available in options');
     pass('Priority is in active list');
 
+    const activeDept = opts['originating_agency']?.[0]?.value || 'General Records';
+
     // 2. Use it in a new document
     const docData = {
       trackingNumber: 'PRI-TEST-' + Date.now(),
@@ -40,7 +42,7 @@ async function runTest() {
       transactionType: 'Simple Transaction',
       communicationType: 'Letter',
       reportType: 'Audit Report',
-      originDepartment: 'Office of the Regional Director',
+      originDepartment: activeDept,
       dateReceived: '2026-09-15',
       timeReceived: '12:00:00',
       targetDivision: 'Finance & Budget Division',

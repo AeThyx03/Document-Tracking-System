@@ -70,7 +70,6 @@ const mockActor: WorkflowActor = {
   name: 'System Admin',
   role: 'System Admin',
   division: 'Executive',
-  assignedDesk: 'Central Admin',
 };
 
 async function runBatchIntegrityTests() {

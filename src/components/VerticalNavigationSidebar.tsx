@@ -34,7 +34,6 @@ interface VerticalNavigationSidebarProps {
   isRefreshing?: boolean;
   onManualRefresh?: () => void;
   onOpenRolesModal: () => void;
-  onOpenThresholdModal: () => void;
   onOpenShortcutsModal?: () => void;
   currentUserRole: string;
   isCollapsed: boolean;
@@ -52,7 +51,6 @@ export const VerticalNavigationSidebar: React.FC<VerticalNavigationSidebarProps>
   isRefreshing = false,
   onManualRefresh,
   onOpenRolesModal,
-  onOpenThresholdModal,
   onOpenShortcutsModal,
   currentUserRole,
   isCollapsed,
@@ -304,17 +302,7 @@ export const VerticalNavigationSidebar: React.FC<VerticalNavigationSidebarProps>
             </button>
 
             {isSysAdmin && (
-              <div className="grid grid-cols-2 gap-1.5">
-                <button
-                  type="button"
-                  onClick={onOpenThresholdModal}
-                  className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[10.5px] font-semibold border border-slate-700 transition-colors cursor-pointer"
-                  title="Configure Time-in-Desk Thresholds (System Admin Only)"
-                >
-                  <Sliders className="w-3.5 h-3.5 text-slate-400" />
-                  <span>Thresholds</span>
-                </button>
-
+              <div className="grid grid-cols-1">
                 <button
                   type="button"
                   onClick={onOpenRolesModal}
@@ -339,14 +327,6 @@ export const VerticalNavigationSidebar: React.FC<VerticalNavigationSidebarProps>
             </button>
             {isSysAdmin && (
               <>
-                <button
-                  type="button"
-                  onClick={onOpenThresholdModal}
-                  title="Time in Desk SLA Thresholds (System Admin)"
-                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex justify-center transition-colors cursor-pointer"
-                >
-                  <Sliders className="w-4 h-4" />
-                </button>
                 <button
                   type="button"
                   onClick={onOpenRolesModal}

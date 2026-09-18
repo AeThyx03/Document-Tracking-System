@@ -10,6 +10,7 @@ import {
   deleteDocumentById,
   routeDocumentWithTransaction,
   addDocumentRemark,
+  fulfillDocumentCompliance,
   addDocumentClearance,
   revokeDocumentClearance,
   DocumentConflictError,
@@ -51,6 +52,7 @@ documentsRouter.get('/documents', async (req: any, res) => {
         documents: result.documents,
         count: result.totalCount,
         totalCount: result.totalCount,
+        totalMonitoredCount: result.totalMonitoredCount,
         page: result.page,
         pageSize: result.pageSize,
         totalPages: result.totalPages,
@@ -58,6 +60,7 @@ documentsRouter.get('/documents', async (req: any, res) => {
           page: result.page,
           pageSize: result.pageSize,
           totalCount: result.totalCount,
+          totalMonitoredCount: result.totalMonitoredCount,
           totalPages: result.totalPages,
         },
       });
@@ -164,14 +167,22 @@ documentsRouter.put('/documents/:id', async (req: any, res) => {
       return sendApiError(res, 403, 'FORBIDDEN', `Access denied: Role "${user.role}" cannot edit documents.`);
     }
 
-    // 2. Prevent privilege escalation: Clearance operations require canAuthorizeClearance
-    const attemptsClearance =
-      req.body.managerClearance !== undefined ||
-      req.body.isCleared !== undefined ||
-      req.body.currentStatus === 'Cleared for Out' ||
-      req.body.currentStatus === 'Dispatched / Completed';
+    const oldDocs = await db.select().from(documents).where(eq(documents.id, req.params.id));
+    if (oldDocs.length === 0) {
+        return sendApiError(res, 404, 'NOT_FOUND', 'Document not found');
+    }
+    const oldDoc = oldDocs[0];
 
-    if (attemptsClearance && !user.permissions.canAuthorizeClearance) {
+    // 2. Prevent privilege escalation: Clearance operations require canAuthorizeClearance
+    const attemptsClearanceStatusChange = 
+      (req.body.currentStatus === 'Cleared for Out' || req.body.currentStatus === 'Dispatched / Completed') && 
+      oldDoc.currentStatus !== req.body.currentStatus;
+      
+    const attemptsClearanceFlag = 
+        (req.body.isCleared === true && oldDoc.isCleared !== true) ||
+        (req.body.managerClearance?.isCleared === true && oldDoc.isCleared !== true);
+
+    if ((attemptsClearanceStatusChange || attemptsClearanceFlag) && !user.permissions.canAuthorizeClearance) {
       return sendApiError(
         res,
         403,
@@ -184,7 +195,7 @@ documentsRouter.put('/documents/:id', async (req: any, res) => {
     if (Array.isArray(req.body.supervisorRemarks)) {
       const prevRemarks = await db.select().from(documentRemarks).where(eq(documentRemarks.documentId, req.params.id));
       const prevRemarkIds = new Set(prevRemarks.map((r) => r.id));
-
+      
       const hasNewRemarks = req.body.supervisorRemarks.some((r: any) => !prevRemarkIds.has(r.id));
       if (hasNewRemarks && !user.permissions.canIssueSupervisorRemarks) {
         return sendApiError(
@@ -194,8 +205,14 @@ documentsRouter.put('/documents/:id', async (req: any, res) => {
           'Access denied: Only supervisory roles (Supervisor, Division Manager, Department Manager, System Admin) can issue directives.'
         );
       }
-
-      const hasComplianceAttempt = req.body.supervisorRemarks.some((r: any) => r.complied === true);
+      
+      const hasComplianceAttempt = req.body.supervisorRemarks.some((r: any) => {
+        if (r.complied !== true) return false;
+        const prev = prevRemarks.find(pr => pr.id === r.id);
+        if (!prev) return false;
+        return prev.complied !== true;
+      });
+      
       if (hasComplianceAttempt && !user.permissions.canFulfillCompliance) {
         return sendApiError(
           res,
@@ -205,7 +222,6 @@ documentsRouter.put('/documents/:id', async (req: any, res) => {
         );
       }
     }
-
     const userId = String(user.id);
     const actor = {
       id: user.id,
@@ -451,11 +467,25 @@ documentsRouter.delete('/documents/:id', authorizeDocumentDeletion, async (req: 
       email: user.email,
       division: user.division,
     };
-    await deleteDocumentById(req.params.id, userId, actor);
+    const expectedVersion =
+      req.body?.expectedVersion !== undefined
+        ? Number(req.body.expectedVersion)
+        : req.body?.version !== undefined
+        ? Number(req.body.version)
+        : req.query?.expectedVersion !== undefined
+        ? Number(req.query.expectedVersion)
+        : req.query?.version !== undefined
+        ? Number(req.query.version)
+        : undefined;
+
+    await deleteDocumentById(req.params.id, userId, actor, expectedVersion);
     return sendApiSuccess(res, { message: 'Document deleted successfully' });
   } catch (err: any) {
     if (err instanceof DocumentNotFoundError) {
       return sendApiError(res, 404, 'NOT_FOUND', err.message);
+    }
+    if (err instanceof DocumentConflictError) {
+      return sendApiError(res, 409, 'CONCURRENCY_CONFLICT', err.message);
     }
     return sendApiError(res, 500, 'INTERNAL_SERVER_ERROR', err.message);
   }
@@ -501,6 +531,16 @@ documentsRouter.post('/documents/:id/movements', authorizeDocumentMovement, asyn
       email: user.email,
       division: user.division,
     };
+    const expectedVersion =
+      req.body.expectedVersion !== undefined
+        ? Number(req.body.expectedVersion)
+        : req.body.baseVersion !== undefined
+        ? Number(req.body.baseVersion)
+        : req.body.version !== undefined
+        ? Number(req.body.version)
+        : req.query.expectedVersion !== undefined
+        ? Number(req.query.expectedVersion)
+        : undefined;
 
     const result = await routeDocumentWithTransaction(
       req.params.id,
@@ -520,13 +560,20 @@ documentsRouter.post('/documents/:id/movements', authorizeDocumentMovement, asyn
         toDeskId,
       },
       userId,
-      actor
+      actor,
+      expectedVersion
     );
 
     return sendApiSuccess(res, result, 201);
   } catch (err: any) {
     if (err instanceof DocumentNotFoundError) {
       return sendApiError(res, 404, 'NOT_FOUND', err.message);
+    }
+    if (err instanceof DocumentConflictError) {
+      return sendApiError(res, 409, 'CONCURRENCY_CONFLICT', err.message);
+    }
+    if (err instanceof DocumentValidationError) {
+      return sendApiError(res, 400, 'VALIDATION_ERROR', err.message);
     }
     return sendApiError(res, 500, 'INTERNAL_SERVER_ERROR', err.message);
   }
@@ -571,6 +618,16 @@ documentsRouter.post('/documents/:id/remarks', authorizeSupervisorRemarks, async
       email: user.email,
       division: user.division,
     };
+    const expectedVersion =
+      req.body.expectedVersion !== undefined
+        ? Number(req.body.expectedVersion)
+        : req.body.baseVersion !== undefined
+        ? Number(req.body.baseVersion)
+        : req.body.version !== undefined
+        ? Number(req.body.version)
+        : req.query.expectedVersion !== undefined
+        ? Number(req.query.expectedVersion)
+        : undefined;
 
     const remark = await addDocumentRemark(
       req.params.id,
@@ -583,13 +640,76 @@ documentsRouter.post('/documents/:id/remarks', authorizeSupervisorRemarks, async
         supervisorPersonnelId: supervisorPersonnelId ? Number(supervisorPersonnelId) : undefined,
       },
       userId,
-      actor
+      actor,
+      expectedVersion
     );
 
     return sendApiSuccess(res, { remark }, 201);
   } catch (err: any) {
     if (err instanceof DocumentNotFoundError) {
       return sendApiError(res, 404, 'NOT_FOUND', err.message);
+    }
+    if (err instanceof DocumentConflictError) {
+      return sendApiError(res, 409, 'CONCURRENCY_CONFLICT', err.message);
+    }
+    if (err instanceof DocumentValidationError) {
+      return sendApiError(res, 400, 'VALIDATION_ERROR', err.message);
+    }
+    return sendApiError(res, 500, 'INTERNAL_SERVER_ERROR', err.message);
+  }
+});
+
+// -------------------------------------------------------------
+// PUT /api/documents/:id/remarks/:remarkId/compliance - Fulfill compliance (Authorized)
+// -------------------------------------------------------------
+documentsRouter.put('/documents/:id/remarks/:remarkId/compliance', async (req: any, res) => {
+  try {
+    const user = getAuthenticatedUser(req);
+    if (!user) {
+      return sendApiError(res, 401, 'UNAUTHORIZED', 'Authentication credentials missing or invalid.');
+    }
+    if (!user.permissions.canFulfillCompliance) {
+      return sendApiError(res, 403, 'FORBIDDEN', `Access denied: Role "${user.role}" is not authorized to fulfill compliance requirements.`);
+    }
+
+    const { complianceNotes } = req.body;
+    const userId = String(user.id);
+    const actor = {
+      id: user.id,
+      userId: user.id,
+      name: user.name || user.email,
+      role: user.role,
+      email: user.email,
+      division: user.division,
+    };
+    const expectedVersion =
+      req.body?.expectedVersion !== undefined
+        ? Number(req.body.expectedVersion)
+        : req.body?.version !== undefined
+        ? Number(req.body.version)
+        : req.query?.expectedVersion !== undefined
+        ? Number(req.query.expectedVersion)
+        : undefined;
+
+    const result = await fulfillDocumentCompliance(
+      req.params.id,
+      req.params.remarkId,
+      complianceNotes || '',
+      userId,
+      actor,
+      expectedVersion
+    );
+
+    return sendApiSuccess(res, result);
+  } catch (err: any) {
+    if (err instanceof DocumentNotFoundError) {
+      return sendApiError(res, 404, 'NOT_FOUND', err.message);
+    }
+    if (err instanceof DocumentConflictError) {
+      return sendApiError(res, 409, 'CONCURRENCY_CONFLICT', err.message);
+    }
+    if (err instanceof DocumentValidationError) {
+      return sendApiError(res, 400, 'VALIDATION_ERROR', err.message);
     }
     return sendApiError(res, 500, 'INTERNAL_SERVER_ERROR', err.message);
   }
@@ -653,6 +773,16 @@ documentsRouter.post('/documents/:id/clearance', authorizeManagerClearance, asyn
       email: user.email,
       division: user.division,
     };
+    const expectedVersion =
+      req.body.expectedVersion !== undefined
+        ? Number(req.body.expectedVersion)
+        : req.body.baseVersion !== undefined
+        ? Number(req.body.baseVersion)
+        : req.body.version !== undefined
+        ? Number(req.body.version)
+        : req.query.expectedVersion !== undefined
+        ? Number(req.query.expectedVersion)
+        : undefined;
 
     const result = await addDocumentClearance(
       req.params.id,
@@ -667,13 +797,20 @@ documentsRouter.post('/documents/:id/clearance', authorizeManagerClearance, asyn
         clearedByPersonnelId: clearedByPersonnelId ? Number(clearedByPersonnelId) : undefined,
       },
       userId,
-      actor
+      actor,
+      expectedVersion
     );
 
     return sendApiSuccess(res, result, 201);
   } catch (err: any) {
     if (err instanceof DocumentNotFoundError) {
       return sendApiError(res, 404, 'NOT_FOUND', err.message);
+    }
+    if (err instanceof DocumentConflictError) {
+      return sendApiError(res, 409, 'CONCURRENCY_CONFLICT', err.message);
+    }
+    if (err instanceof DocumentValidationError) {
+      return sendApiError(res, 400, 'VALIDATION_ERROR', err.message);
     }
     return sendApiError(res, 500, 'INTERNAL_SERVER_ERROR', err.message);
   }
@@ -695,15 +832,25 @@ documentsRouter.delete('/documents/:id/clearance', authorizeManagerClearance, as
       division: user.division,
     };
     const reason = req.body?.reason || req.query?.reason || 'Clearance revoked by executive manager.';
+    const expectedVersion =
+      req.body?.expectedVersion !== undefined
+        ? Number(req.body.expectedVersion)
+        : req.body?.version !== undefined
+        ? Number(req.body.version)
+        : req.query?.expectedVersion !== undefined
+        ? Number(req.query.expectedVersion)
+        : undefined;
 
     const result = await revokeDocumentClearance(
       req.params.id,
       {
         reason: String(reason),
         returnStatus: 'Under Review',
+        expectedVersion,
       },
       userId,
-      actor
+      actor,
+      expectedVersion
     );
 
     return sendApiSuccess(res, result);
@@ -711,8 +858,13 @@ documentsRouter.delete('/documents/:id/clearance', authorizeManagerClearance, as
     if (err instanceof DocumentNotFoundError) {
       return sendApiError(res, 404, 'NOT_FOUND', err.message);
     }
+    if (err instanceof DocumentConflictError) {
+      return sendApiError(res, 409, 'CONCURRENCY_CONFLICT', err.message);
+    }
+    if (err instanceof DocumentValidationError) {
+      return sendApiError(res, 400, 'VALIDATION_ERROR', err.message);
+    }
     return sendApiError(res, 500, 'INTERNAL_SERVER_ERROR', err.message);
   }
 });
-
 

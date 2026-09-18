@@ -11,6 +11,7 @@ export const CANONICAL_DROPDOWN_CATEGORIES = [
   'originating_agency',
   'target_division',
   'priority_level',
+  'handover_instructions',
 ] as const;
 
 export type CanonicalDropdownCategory = typeof CANONICAL_DROPDOWN_CATEGORIES[number];
@@ -56,6 +57,11 @@ export const CATEGORY_METADATA: Record<CanonicalDropdownCategory, CategoryMetada
     key: 'priority_level',
     name: 'Routing Priority Level',
     description: 'Document handling urgency and turnaround priority classification.',
+  },
+  handover_instructions: {
+    key: 'handover_instructions',
+    name: 'Remarks / Handover Instructions',
+    description: 'Pre-defined instructions available when forwarding a document.',
   },
 };
 
@@ -142,6 +148,13 @@ export function normalizeCategoryIdentifier(categoryInput: string | null | undef
     case 'routing_priority':
       return 'priority_level';
 
+    case 'handover_instructions':
+    case 'handoverinstructions':
+    case 'handover_instruction':
+    case 'remarks':
+    case 'remark':
+      return 'handover_instructions';
+
     default:
       return null;
   }
@@ -223,6 +236,7 @@ export async function getDropdownOptionsGrouped(options: { includeInactive?: boo
     originating_agency: [],
     target_division: [],
     priority_level: [],
+    handover_instructions: [],
   };
 
   for (const item of all) {

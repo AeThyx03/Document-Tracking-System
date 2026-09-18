@@ -48,7 +48,7 @@ export interface DocumentItem {
   responsiblePerson: string;
   responsiblePersonId?: number;
   priority: string;
-  currentStatus: 'Incoming Logged' | 'Under Review' | 'Supervisor Comment Needed' | 'Complied / Ready for Clearance' | 'Cleared for Out' | 'Dispatched / Completed';
+  currentStatus: 'Incoming Logged' | 'Assigned' | 'Under Review' | 'Supervisor Comment Needed' | 'Complied / Ready for Clearance' | 'Cleared for Out' | 'Dispatched / Completed';
   currentLocation: string; // e.g. "Records Receiving Desk", "Admin Office Room 2", "Accounting Section"
   currentCustodian: string; // who holds it physically right now
   fileLink?: string; // Optional external URL or cloud file link (Cloud Storage, OneDrive, PDF, etc.)
@@ -104,6 +104,7 @@ export type AuditActionType =
   | 'DIRECTIVE_ISSUED'
   | 'COMPLIANCE_FULFILLED'
   | 'CLEARANCE_GRANTED'
+  | 'REVOKE_CLEARANCE'
   | 'PRIORITY_UPDATED'
   | 'DOCUMENT_FORWARDED'
   | 'STATUS_CHANGED'
@@ -173,7 +174,6 @@ export type UserRoleType =
 export interface RegistryDropdownOptions {
   roles: string[];
   departments: string[];
-  desks: string[];
   documentTypes: string[]; // Transaction Types (e.g. Simple Transaction, Complex Transaction)
   transactionTypes?: string[]; // Alias for Transaction Types
   communicationTypes: string[]; // Communication Types (e.g. Memorandum, Letter, Endorsement)
@@ -182,76 +182,28 @@ export interface RegistryDropdownOptions {
   targetDivisions?: string[]; // Forward To / Target Division options
   focalPersons?: string[]; // Designated focal persons selected among enrolled supervisors
   priorities: string[];
+  handoverInstructions: string[];
   personnel: string[];
 }
 
 export const DEFAULT_REGISTRY_DROPDOWN_OPTIONS: RegistryDropdownOptions = {
   roles: ['Receiving', 'Staff', 'Supervisor', 'Division Manager', 'Department Manager', 'System Admin'],
-  departments: [
-    'Administrative Section',
-    'Billing & Collections Section',
-    'Finance & Budget Division',
-    'Legal & Regulatory Affairs',
-    'Safety & Environmental Division',
-    'Central Records & Receiving Desk',
-  ],
-  desks: [
-    'Records Receiving Counter A',
-    'Finance Evaluation Bay 1',
-    'Planning Drafting Bay 2',
-    'Central Manager Suite 101',
-    'Executive Review Table',
-    'Central Registry Systems Hub',
-  ],
-  documentTypes: [
-    'Simple Transaction',
-    'Complex Transaction',
-    'Highly Technical Transaction',
-    'Memorandum',
-    'Letter',
-    'Indorsement',
-    'Report',
-  ],
-  communicationTypes: [
-    'Memorandum',
-    'Letter',
-    'Endorsement',
-    'Office Order',
-    'Special Order',
-    'Advisory',
-    'Circular',
-    'Notice',
-  ],
-  reportTypes: [
-    'Inspection Report',
-    'Audit Report',
-    'Incident Report',
-    'Progress Report',
-    'Clearance Slip',
-    'Financial Statement',
-    'Accomplishment Report',
-  ],
-  originatingAgencies: [
-    'Office of the Regional Director',
-    'Regional Trial Court',
-    'Department of Transportation',
-    'Civil Service Commission',
-    'Department of Budget and Management',
-    'Commission on Audit',
-    'Internal POSSD Division',
-    'External Contractor / Supplier',
-  ],
-  targetDivisions: [
-    'Administrative Section',
-    'Billing & Collections Section',
-    'Finance & Budget Division',
-    'Legal & Regulatory Affairs',
-    'Safety & Environmental Division',
-    'Central Records & Receiving Desk',
-    'Executive Office of the Manager',
-  ],
-  focalPersons: ['Mary Flor Aquino', 'Aubrey Camille Cabreras'],
+  departments: [],
+  documentTypes: [],
+  communicationTypes: [],
+  reportTypes: [],
+  originatingAgencies: [],
+  targetDivisions: [],
+  focalPersons: [],
   priorities: ['Routine', 'Urgent', 'Rush'],
+  handoverInstructions: [
+    'For your information and reference',
+    'For your appropriate action',
+    'For review and recommendation',
+    'For compliance',
+    'For signature / approval',
+    'For filing / archiving'
+  ],
   personnel: [],
 };
 
@@ -272,7 +224,6 @@ export interface UserDisplayProfile {
   name: string;
   avatarInitials?: string;
   division: string;
-  assignedDesk?: string;
 }
 
 /**
@@ -291,7 +242,6 @@ export interface AppUserRole {
   division: string;
   avatarInitials?: string;
   email?: string;
-  assignedDesk?: string;
   username: string;
   status?: UserAccountStatus;
   isFocalPerson?: boolean;
@@ -492,11 +442,14 @@ export function parsePhilippineDateToISO(dateStr: string, timeStr?: string): str
 
 /**
  * Formats an ISO or UTC date string for display in Asia/Manila timezone (PHT).
+ * Defaulting to Month-Day-Year format as requested.
  */
 export function formatPhilippineDateTime(isoString?: string | null): string {
   if (!isoString) return 'N/A';
   const d = new Date(isoString);
   if (isNaN(d.getTime())) return String(isoString);
+  
+  // Use explicit Month-Day-Year format: Sep 17, 2026, 06:30:29 PM
   return d.toLocaleString('en-US', {
     timeZone: 'Asia/Manila',
     year: 'numeric',
@@ -506,4 +459,25 @@ export function formatPhilippineDateTime(isoString?: string | null): string {
     minute: '2-digit',
     second: '2-digit',
   });
+}
+
+/**
+ * Formats a local date string (YYYY-MM-DD) to Month-Day-Year (MM-DD-YYYY).
+ */
+export function formatDateToMDY(dateStr: string): string {
+  if (!dateStr) return 'N/A';
+  if (dateStr.includes('T')) {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const y = d.getFullYear();
+    return `${m}-${day}-${y}`;
+  }
+  const parts = dateStr.split('-');
+  if (parts.length === 3) {
+    const [y, m, d] = parts;
+    return `${m}-${d}-${y}`;
+  }
+  return dateStr;
 }

@@ -194,4 +194,35 @@
     page-break-after: always !important;
     break-after: page !important;
   }
+
+  /* Registry Table Print Optimization */
+  .registry-table-print {
+    table-layout: fixed !important;
+    width: 100% !important;
+    border: 1px solid #000 !important;
+  }
+  .registry-table-print th, 
+  .registry-table-print td {
+    border: 1px solid #000 !important;
+    word-wrap: break-word !important;
+    white-space: normal !important;
+  }
+}
+
+/* Stable Column Widths Utility */
+.col-tracking { width: 140px; min-width: 140px; }
+.col-title { width: auto; min-width: 250px; }
+.col-date { width: 150px; min-width: 150px; }
+.col-origin { width: 180px; min-width: 180px; }
+.col-division { width: 180px; min-width: 180px; }
+.col-custodian { width: 180px; min-width: 180px; }
+.col-lifecycle { width: 220px; min-width: 220px; }
+.col-actions { width: 100px; min-width: 100px; }
+
+/* Distribution Desk table container fix */
+#main-workspace .distribution-desk-table-container {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  height: 100%;
 }

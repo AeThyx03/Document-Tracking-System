@@ -34,14 +34,24 @@ export function getReferenceNow(): number {
   return Date.now();
 }
 
+function safeGetToken(): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem('possd_access_token') || '';
+    }
+  } catch {}
+  return '';
+}
+
 export async function fetchTimeInDeskConfigFromBackend(): Promise<TimeInDeskConfig> {
   try {
+    const token = safeGetToken();
     const res = await fetch('/api/sla/config', {
-      headers: { 'Authorization': 'Bearer ' + (window.localStorage.getItem('possd_auth_token') || '') }
+      headers: { 'Authorization': 'Bearer ' + token }
     });
     const data = await res.json();
     if (data.success && data.config) {
-      return {
+      const merged: TimeInDeskConfig = {
         ...DEFAULT_TIME_IN_DESK_CONFIG,
         ...data.config,
         divisionThresholds: {
@@ -49,6 +59,8 @@ export async function fetchTimeInDeskConfigFromBackend(): Promise<TimeInDeskConf
           ...(data.config.divisionThresholds || {})
         }
       };
+      saveTimeInDeskConfig(merged);
+      return merged;
     }
   } catch (err) {
     console.error('Failed to fetch SLA config from backend:', err);
@@ -58,17 +70,19 @@ export async function fetchTimeInDeskConfigFromBackend(): Promise<TimeInDeskConf
 
 export function getTimeInDeskConfig(): TimeInDeskConfig {
   try {
-    const raw = localStorage.getItem(TIME_IN_DESK_CONFIG_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        ...DEFAULT_TIME_IN_DESK_CONFIG,
-        ...parsed,
-        divisionThresholds: {
-          ...DEFAULT_TIME_IN_DESK_CONFIG.divisionThresholds,
-          ...(parsed.divisionThresholds || {}),
-        },
-      };
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(TIME_IN_DESK_CONFIG_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          ...DEFAULT_TIME_IN_DESK_CONFIG,
+          ...parsed,
+          divisionThresholds: {
+            ...DEFAULT_TIME_IN_DESK_CONFIG.divisionThresholds,
+            ...(parsed.divisionThresholds || {}),
+          },
+        };
+      }
     }
   } catch (err) {
     console.error('Failed to parse time-in-desk config:', err);
@@ -78,22 +92,30 @@ export function getTimeInDeskConfig(): TimeInDeskConfig {
 
 export async function saveTimeInDeskConfigToBackend(config: TimeInDeskConfig): Promise<void> {
   try {
-    await fetch('/api/sla/config', {
+    const token = safeGetToken();
+    const res = await fetch('/api/sla/config', {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + (window.localStorage.getItem('possd_auth_token') || '')
+        'Authorization': 'Bearer ' + token
       },
       body: JSON.stringify(config)
     });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.message || `Server error (status ${res.status})`);
+    }
   } catch (err) {
     console.error('Failed to save SLA config to backend:', err);
+    throw err;
   }
 }
 
 export function saveTimeInDeskConfig(config: TimeInDeskConfig): void {
   try {
-    localStorage.setItem(TIME_IN_DESK_CONFIG_KEY, JSON.stringify(config));
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(TIME_IN_DESK_CONFIG_KEY, JSON.stringify(config));
+    }
   } catch (err) {
     console.error('Failed to save time-in-desk config:', err);
   }
